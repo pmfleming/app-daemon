@@ -1,0 +1,23 @@
+[package]
+name = "app-daemon"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "Application catalog and activation daemon for Shelllist"
+repository = "https://github.com/pmfleming/app-daemon"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+freedesktop-desktop-entry = { version = "0.8.1", default-features = false }
+futures = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["io-std", "io-util", "macros", "process", "rt-multi-thread", "signal", "sync", "time"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+uuid = { version = "1", features = ["v4"] }
+zbus = { version = "5", features = ["tokio"] }
+
+[dev-dependencies]
+tempfile = "3"

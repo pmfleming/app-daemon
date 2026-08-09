@@ -1,0 +1,38 @@
+{
+  "protocol": "app-api",
+  "version": 1,
+  "registry": {
+    "methods": [
+      {
+        "name": "applications.query",
+        "params_example": { "query": "", "generation": 1, "limit": 500 },
+        "response_key": "applications",
+        "stream": "applications.changed"
+      },
+      {
+        "name": "applications.refresh",
+        "params_example": { "query": "", "generation": 1, "limit": 500 },
+        "response_key": "applications",
+        "stream": "applications.changed"
+      },
+      {
+        "name": "applications.execute",
+        "params_example": {
+          "target_id": "org.example.App.desktop",
+          "action": "activate",
+          "window_id": null,
+          "desktop_action_id": null,
+          "expected_revision": 1,
+          "workspace_id": "2"
+        },
+        "response_key": "operation",
+        "stream": "applications.operation"
+      }
+    ],
+    "streams": [
+      { "name": "applications.changed" },
+      { "name": "windows.changed" },
+      { "name": "applications.operation" }
+    ]
+  }
+}

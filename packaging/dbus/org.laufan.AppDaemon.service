@@ -1,0 +1,4 @@
+[D-BUS Service]
+Name=org.laufan.AppDaemon
+Exec=@out@/bin/app-daemon daemon
+SystemdService=app-daemon.service
