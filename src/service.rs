@@ -183,6 +183,25 @@ fn resolve_target(catalog: &Catalog, window: &Client) -> String {
             return entry.id.clone();
         }
     }
+    for candidate in [&window.class, &window.initial_class] {
+        let suffix = candidate
+            .trim()
+            .trim_end_matches(".desktop")
+            .rsplit('.')
+            .next()
+            .unwrap_or("");
+        let mut matches = catalog.entries.iter().filter(|entry| {
+            entry
+                .id
+                .trim_end_matches(".desktop")
+                .eq_ignore_ascii_case(suffix)
+        });
+        if let Some(entry) = matches.next()
+            && matches.next().is_none()
+        {
+            return entry.id.clone();
+        }
+    }
     let class = if window.initial_class.is_empty() {
         &window.class
     } else {
@@ -390,12 +409,40 @@ async fn launch_action(catalog: &Catalog, target_id: &str, action_id: &str) -> a
 
 #[cfg(test)]
 mod tests {
-    use super::running_score;
+    use std::fs;
+
+    use crate::{
+        catalog::Catalog,
+        hyprland::{Client, Workspace},
+    };
+
+    use super::{resolve_target, running_score};
 
     #[test]
     fn focused_and_recent_windows_rank_first() {
         assert!(running_score(true, 0) > running_score(false, 1));
         assert!(running_score(false, 1) > running_score(false, 8));
         assert!(running_score(false, 8) > running_score(false, i64::MAX));
+    }
+
+    #[test]
+    fn resolves_unique_reverse_dns_class_suffix() {
+        let directory = tempfile::tempdir().unwrap();
+        fs::write(
+            directory.path().join("yazi.desktop"),
+            "[Desktop Entry]\nType=Application\nName=Yazi\nExec=true\n",
+        )
+        .unwrap();
+        let catalog = Catalog::from_paths(vec![directory.path().into()]);
+        let window = Client {
+            address: "0x1".into(),
+            class: "com.laufan.yazi".into(),
+            initial_class: "com.laufan.yazi".into(),
+            title: "Yazi".into(),
+            workspace: Workspace::default(),
+            focus_rank: 0,
+            mapped: true,
+        };
+        assert_eq!(resolve_target(&catalog, &window), "yazi.desktop");
     }
 }
