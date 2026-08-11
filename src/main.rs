@@ -46,8 +46,8 @@ async fn main() -> Result<()> {
         Command::Client => client::run().await,
         Command::Debug { command } => {
             let value = match command {
-                DebugCommand::ProtocolRegistry => protocol::registry(),
-                DebugCommand::ContractFixture => protocol::contract_fixture(),
+                DebugCommand::ProtocolRegistry => protocol::registry()?,
+                DebugCommand::ContractFixture => protocol::contract_fixture()?,
             };
             println!("{}", serde_json::to_string_pretty(&value)?);
             Ok(())

@@ -10,6 +10,9 @@ use crate::{
 
 pub const PROTOCOL: &str = protocol::NAME;
 pub const VERSION: u8 = protocol::VERSION;
+pub const BUS_NAME: &str = "org.laufan.AppDaemon";
+pub const OBJECT_PATH: &str = "/org/laufan/AppDaemon";
+pub const INTERFACE: &str = "org.laufan.AppDaemon1";
 
 pub struct ApiService {
     applications: Arc<ApplicationService>,
@@ -43,9 +46,9 @@ impl ApiService {
                     .execute(execute)
                     .await
                     .map(|operation| json!({ "operation": operation }))
-                    .map_err(|error| ApiError::new("operation-failed", error.to_string()))
+                    .map_err(|error| ("operation-failed", error.to_string()))
             }
-            _ => Err(ApiError::new(
+            _ => Err((
                 "unsupported-method",
                 format!("Unsupported app-api method: {method}"),
             )),
@@ -57,30 +60,20 @@ impl ApiService {
     }
 }
 
-#[derive(Debug)]
-pub struct ApiError {
-    code: &'static str,
-    message: String,
-}
-impl ApiError {
-    fn new(code: &'static str, message: String) -> Self {
-        Self { code, message }
-    }
-}
+type ApiError = (&'static str, String);
 
 fn decode<T: DeserializeOwned>(value: Value) -> Result<T, ApiError> {
-    serde_json::from_value(value)
-        .map_err(|error| ApiError::new("validation-error", error.to_string()))
+    serde_json::from_value(value).map_err(|error| ("validation-error", error.to_string()))
 }
 
 pub fn success(data: Value) -> Value {
     json!({ "protocol": PROTOCOL, "version": VERSION, "ok": true, "data": data })
 }
 
-fn error_response(error: ApiError) -> Value {
-    json!({ "protocol": PROTOCOL, "version": VERSION, "ok": false, "error": { "code": error.code, "message": error.message, "retryable": false } })
+fn error_response((code, message): ApiError) -> Value {
+    json!({ "protocol": PROTOCOL, "version": VERSION, "ok": false, "error": { "code": code, "message": message, "retryable": false } })
 }
 
 pub fn error(code: &'static str, message: String) -> Value {
-    error_response(ApiError::new(code, message))
+    error_response((code, message))
 }

@@ -7,7 +7,7 @@ use std::{
 use serde::Deserialize;
 use tokio::process::Command;
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, Hash)]
 pub struct Workspace {
     #[serde(default)]
     pub id: i64,
@@ -15,7 +15,7 @@ pub struct Workspace {
     pub name: String,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Deserialize, Hash)]
 pub struct Client {
     #[serde(default)]
     pub address: String,
@@ -40,7 +40,7 @@ const fn mapped() -> bool {
     true
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Default)]
 pub struct Snapshot {
     pub available: bool,
     pub revision: u64,
@@ -63,15 +63,7 @@ impl Snapshot {
         clients.retain(|client| client.mapped && valid_address(&client.address));
         clients.sort_by_key(|client| client.focus_rank);
         let mut hasher = DefaultHasher::new();
-        for client in &clients {
-            client.address.hash(&mut hasher);
-            client.class.hash(&mut hasher);
-            client.initial_class.hash(&mut hasher);
-            client.title.hash(&mut hasher);
-            client.workspace.id.hash(&mut hasher);
-            client.workspace.name.hash(&mut hasher);
-            client.focus_rank.hash(&mut hasher);
-        }
+        clients.hash(&mut hasher);
         Self {
             available: true,
             revision: hasher.finish(),

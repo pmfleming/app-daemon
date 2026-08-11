@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeSet, HashSet, hash_map::DefaultHasher},
+    collections::{HashSet, hash_map::DefaultHasher},
     env, fs,
     hash::{Hash, Hasher},
     os::unix::fs::PermissionsExt,
@@ -7,10 +7,11 @@ use std::{
 };
 
 use freedesktop_desktop_entry::{DesktopEntry, default_paths, get_languages_from_env};
+use walkdir::WalkDir;
 
 use crate::model::DesktopActionSummary;
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct CatalogEntry {
     pub id: String,
     pub name: String,
@@ -36,7 +37,7 @@ impl CatalogEntry {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct Catalog {
     pub revision: u64,
     pub entries: Vec<CatalogEntry>,
@@ -51,62 +52,21 @@ impl Catalog {
         let locales = get_languages_from_env();
         let desktops = current_desktops();
         let mut seen_ids = HashSet::new();
-        let mut entries = Vec::new();
-
-        for root in paths {
-            for path in desktop_files(&root) {
-                let Some(id) = desktop_id(&root, &path) else {
-                    continue;
-                };
-                if !seen_ids.insert(id.clone()) {
-                    continue;
-                }
-                let Ok(entry) = DesktopEntry::from_path(path, Some(&locales)) else {
-                    continue;
-                };
-                if !visible(&entry, &desktops) {
-                    continue;
-                }
-                let Some(name) = entry.name(&locales).filter(|value| !value.is_empty()) else {
-                    continue;
-                };
-                let actions = entry
-                    .actions()
-                    .unwrap_or_default()
+        let mut entries = paths
+            .iter()
+            .flat_map(|root| {
+                desktop_files(root)
                     .into_iter()
-                    .filter(|id| !id.is_empty())
-                    .filter_map(|action_id| {
-                        let name = entry.action_name(action_id, &locales)?.to_string();
-                        Some(DesktopActionSummary {
-                            id: action_id.to_owned(),
-                            name,
-                            icon: entry
-                                .action_entry(action_id, "Icon")
-                                .unwrap_or("")
-                                .to_owned(),
-                        })
-                    })
-                    .collect();
-                entries.push(CatalogEntry {
-                    id,
-                    name: name.to_string(),
-                    generic_name: entry.generic_name(&locales).unwrap_or_default().to_string(),
-                    comment: entry.comment(&locales).unwrap_or_default().to_string(),
-                    icon: entry.icon().unwrap_or("").to_owned(),
-                    keywords: strings(entry.keywords(&locales).unwrap_or_default()),
-                    categories: entry
-                        .categories()
-                        .unwrap_or_default()
-                        .into_iter()
-                        .filter(|value| !value.is_empty())
-                        .map(str::to_owned)
-                        .collect(),
-                    startup_class: entry.startup_wm_class().unwrap_or("").to_owned(),
-                    actions,
-                    entry,
-                });
-            }
-        }
+                    .map(move |path| (root, path))
+            })
+            .filter_map(|(root, path)| {
+                let id = desktop_id(root, &path)?;
+                if !seen_ids.insert(id.clone()) {
+                    return None;
+                }
+                catalog_entry(path, id, &locales, &desktops)
+            })
+            .collect::<Vec<_>>();
         entries.sort_by(|left, right| {
             left.name
                 .to_lowercase()
@@ -120,6 +80,56 @@ impl Catalog {
     pub fn by_id(&self, id: &str) -> Option<&CatalogEntry> {
         self.entries.iter().find(|entry| entry.id == id)
     }
+}
+
+fn catalog_entry(
+    path: PathBuf,
+    id: String,
+    locales: &[String],
+    desktops: &[String],
+) -> Option<CatalogEntry> {
+    let entry = DesktopEntry::from_path(path, Some(locales)).ok()?;
+    let name = entry.name(locales).filter(|value| !value.is_empty())?;
+    if !visible(&entry, desktops) {
+        return None;
+    }
+    Some(CatalogEntry {
+        id,
+        name: name.into_owned(),
+        generic_name: entry.generic_name(locales).unwrap_or_default().into_owned(),
+        comment: entry.comment(locales).unwrap_or_default().into_owned(),
+        icon: entry.icon().unwrap_or_default().to_owned(),
+        keywords: strings(entry.keywords(locales).unwrap_or_default()),
+        categories: entry
+            .categories()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned)
+            .collect(),
+        startup_class: entry.startup_wm_class().unwrap_or_default().to_owned(),
+        actions: desktop_actions(&entry, locales),
+        entry,
+    })
+}
+
+fn desktop_actions(entry: &DesktopEntry, locales: &[String]) -> Vec<DesktopActionSummary> {
+    entry
+        .actions()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|id| !id.is_empty())
+        .filter_map(|id| {
+            Some(DesktopActionSummary {
+                id: id.to_owned(),
+                name: entry.action_name(id, locales)?.into_owned(),
+                icon: entry
+                    .action_entry(id, "Icon")
+                    .unwrap_or_default()
+                    .to_owned(),
+            })
+        })
+        .collect()
 }
 
 fn strings(values: Vec<std::borrow::Cow<'_, str>>) -> Vec<String> {
@@ -140,35 +150,26 @@ fn current_desktops() -> Vec<String> {
 }
 
 fn visible(entry: &DesktopEntry, desktops: &[String]) -> bool {
-    if entry.type_() != Some("Application")
-        || entry.hidden()
-        || entry.no_display()
-        || entry.exec().is_none_or(str::is_empty)
-        || entry
-            .try_exec()
-            .is_some_and(|value| !executable_available(value))
-    {
-        return false;
-    }
-    if let Some(only) = entry.only_show_in()
-        && !only.iter().filter(|value| !value.is_empty()).any(|value| {
-            desktops
+    entry.type_() == Some("Application")
+        && !entry.hidden()
+        && !entry.no_display()
+        && entry.exec().is_some_and(|value| !value.is_empty())
+        && entry.try_exec().is_none_or(executable_available)
+        && entry
+            .only_show_in()
+            .is_none_or(|only| list_matches(only, desktops))
+        && entry
+            .not_show_in()
+            .is_none_or(|excluded| !list_matches(excluded, desktops))
+}
+
+fn list_matches(values: Vec<&str>, desktops: &[String]) -> bool {
+    values.iter().any(|value| {
+        !value.is_empty()
+            && desktops
                 .iter()
                 .any(|desktop| value.eq_ignore_ascii_case(desktop))
-        })
-    {
-        return false;
-    }
-    if let Some(excluded) = entry.not_show_in()
-        && excluded.iter().any(|value| {
-            desktops
-                .iter()
-                .any(|desktop| value.eq_ignore_ascii_case(desktop))
-        })
-    {
-        return false;
-    }
-    true
+    })
 }
 
 fn executable_available(value: &str) -> bool {
@@ -186,35 +187,18 @@ fn is_executable(path: &Path) -> bool {
 }
 
 fn desktop_files(root: &Path) -> Vec<PathBuf> {
-    fn visit(path: &Path, files: &mut Vec<PathBuf>, visited: &mut BTreeSet<PathBuf>) {
-        let Ok(canonical) = path.canonicalize() else {
-            return;
-        };
-        if !visited.insert(canonical) {
-            return;
-        }
-        let Ok(read_dir) = fs::read_dir(path) else {
-            return;
-        };
-        let mut children: Vec<_> = read_dir
-            .filter_map(Result::ok)
-            .map(|entry| entry.path())
-            .collect();
-        children.sort();
-        for child in children {
-            if child.is_dir() {
-                visit(&child, files, visited);
-            } else if child
-                .extension()
+    WalkDir::new(root)
+        .follow_links(true)
+        .sort_by_file_name()
+        .into_iter()
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_type().is_file())
+        .map(|entry| entry.into_path())
+        .filter(|path| {
+            path.extension()
                 .is_some_and(|extension| extension == "desktop")
-            {
-                files.push(child);
-            }
-        }
-    }
-    let mut files = Vec::new();
-    visit(root, &mut files, &mut BTreeSet::new());
-    files
+        })
+        .collect()
 }
 
 fn desktop_id(root: &Path, path: &Path) -> Option<String> {
@@ -244,29 +228,27 @@ mod tests {
     use super::Catalog;
 
     #[test]
-    fn preserves_empty_optional_fields_and_honors_precedence() {
-        let high = tempfile::tempdir().unwrap();
-        let low = tempfile::tempdir().unwrap();
+    fn preserves_empty_optional_fields_and_honors_precedence() -> anyhow::Result<()> {
+        let high = tempfile::tempdir()?;
+        let low = tempfile::tempdir()?;
         fs::write(
             high.path().join("hidden.desktop"),
             "[Desktop Entry]\nType=Application\nName=Hidden\nExec=hidden\nHidden=true\n",
-        )
-        .unwrap();
+        )?;
         fs::write(
             low.path().join("hidden.desktop"),
             "[Desktop Entry]\nType=Application\nName=Visible lower copy\nExec=true\n",
-        )
-        .unwrap();
+        )?;
         fs::write(
             high.path().join("plain.desktop"),
             "[Desktop Entry]\nType=Application\nName=Plain\nExec=true\n",
-        )
-        .unwrap();
+        )?;
 
         let catalog = Catalog::from_paths(vec![high.path().into(), low.path().into()]);
         assert_eq!(catalog.entries.len(), 1);
         assert_eq!(catalog.entries[0].id, "plain.desktop");
         assert_eq!(catalog.entries[0].icon, "");
         assert_eq!(catalog.entries[0].startup_class, "");
+        Ok(())
     }
 }

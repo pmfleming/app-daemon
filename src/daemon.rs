@@ -21,20 +21,16 @@ use tokio::{
 use zbus::{connection, object_server::SignalEmitter};
 
 use crate::{
-    api::{self, ApiService},
+    api::{self, ApiService, BUS_NAME, OBJECT_PATH},
     protocol,
     service::ApplicationService,
 };
 
-pub const BUS_NAME: &str = "org.laufan.AppDaemon";
-pub const OBJECT_PATH: &str = "/org/laufan/AppDaemon";
-pub const INTERFACE: &str = "org.laufan.AppDaemon1";
-
 pub struct AppDaemon {
-    api: Arc<ApiService>,
+    api: ApiService,
     applications: Arc<ApplicationService>,
     sequence: AtomicU64,
-    subscriptions: Arc<Mutex<HashMap<String, JoinHandle<()>>>>,
+    subscriptions: Mutex<HashMap<String, JoinHandle<()>>>,
 }
 
 #[zbus::interface(name = "org.laufan.AppDaemon1")]
@@ -55,75 +51,28 @@ impl AppDaemon {
         streams: Vec<String>,
         #[zbus(signal_emitter)] emitter: SignalEmitter<'_>,
     ) -> String {
-        if let Some(stream) = streams
-            .iter()
-            .find(|stream| !protocol::STREAMS.contains(&stream.as_str()))
-        {
-            return api::error(
-                "unsupported-stream",
-                format!("Unsupported app-api stream: {stream}"),
-            )
-            .to_string();
-        }
+        let selected = match selected_streams(&streams) {
+            Ok(selected) => selected,
+            Err(stream) => {
+                return api::error(
+                    "unsupported-stream",
+                    format!("Unsupported app-api stream: {stream}"),
+                )
+                .to_string();
+            }
+        };
         let id = format!(
             "subscription-{}",
             self.sequence.fetch_add(1, Ordering::Relaxed)
         );
-        let subscription_id = id.clone();
-        let selected = streams;
-        let applications = Arc::clone(&self.applications);
-        let owned_emitter = emitter.to_owned();
-        let task_id = id.clone();
-        let task = tokio::spawn(async move {
-            let mut interval = time::interval(Duration::from_millis(900));
-            let mut previous = applications.revisions().await;
-            emit_event(
-                &owned_emitter,
-                protocol::stream::APPLICATIONS,
-                "subscribed",
-                &task_id,
-                json!({ "catalog_revision": previous.0, "window_revision": previous.1 }),
-            )
-            .await;
-            loop {
-                interval.tick().await;
-                let current = applications.revisions().await;
-                if current.0 != previous.0
-                    && selected
-                        .iter()
-                        .any(|value| value == protocol::stream::APPLICATIONS)
-                {
-                    emit_event(
-                        &owned_emitter,
-                        protocol::stream::APPLICATIONS,
-                        "changed",
-                        &task_id,
-                        json!({ "revision": current.0 }),
-                    )
-                    .await;
-                }
-                if current.1 != previous.1
-                    && selected
-                        .iter()
-                        .any(|value| value == protocol::stream::WINDOWS)
-                {
-                    emit_event(
-                        &owned_emitter,
-                        protocol::stream::WINDOWS,
-                        "changed",
-                        &task_id,
-                        json!({ "revision": current.1 }),
-                    )
-                    .await;
-                }
-                previous = current;
-            }
-        });
-        self.subscriptions
-            .lock()
-            .await
-            .insert(subscription_id.clone(), task);
-        api::success(json!({ "subscription": { "id": subscription_id } })).to_string()
+        let task = tokio::spawn(poll_revisions(
+            Arc::clone(&self.applications),
+            emitter.to_owned(),
+            id.clone(),
+            selected,
+        ));
+        self.subscriptions.lock().await.insert(id.clone(), task);
+        api::success(json!({ "subscription": { "id": id } })).to_string()
     }
 
     async fn cancel(&self, request_id: &str) -> String {
@@ -144,6 +93,68 @@ impl AppDaemon {
     -> zbus::Result<()>;
 }
 
+fn selected_streams(streams: &[String]) -> Result<(bool, bool), &str> {
+    if let Some(stream) = streams
+        .iter()
+        .find(|stream| !protocol::STREAMS.contains(&stream.as_str()))
+    {
+        return Err(stream);
+    }
+    Ok((
+        streams
+            .iter()
+            .any(|value| value == protocol::stream::APPLICATIONS),
+        streams
+            .iter()
+            .any(|value| value == protocol::stream::WINDOWS),
+    ))
+}
+
+async fn poll_revisions(
+    applications: Arc<ApplicationService>,
+    emitter: SignalEmitter<'static>,
+    subscription_id: String,
+    selected: (bool, bool),
+) {
+    let mut interval = time::interval(Duration::from_millis(900));
+    let mut previous = applications.revisions().await;
+    emit_event(
+        &emitter,
+        protocol::stream::APPLICATIONS,
+        "subscribed",
+        &subscription_id,
+        json!({ "catalog_revision": previous.0, "window_revision": previous.1 }),
+    )
+    .await;
+    loop {
+        interval.tick().await;
+        let current = applications.revisions().await;
+        let changes = [
+            (
+                selected.0 && current.0 != previous.0,
+                protocol::stream::APPLICATIONS,
+                current.0,
+            ),
+            (
+                selected.1 && current.1 != previous.1,
+                protocol::stream::WINDOWS,
+                current.1,
+            ),
+        ];
+        for (_, stream, revision) in changes.into_iter().filter(|change| change.0) {
+            emit_event(
+                &emitter,
+                stream,
+                "changed",
+                &subscription_id,
+                json!({ "revision": revision }),
+            )
+            .await;
+        }
+        previous = current;
+    }
+}
+
 async fn emit_event(
     emitter: &SignalEmitter<'_>,
     stream: &str,
@@ -152,8 +163,8 @@ async fn emit_event(
     fields: Value,
 ) {
     let mut value = json!({ "protocol": api::PROTOCOL, "version": api::VERSION, "stream": stream, "event": event, "subscription_id": subscription_id });
-    if let (Some(target), Some(extra)) = (value.as_object_mut(), fields.as_object()) {
-        target.extend(extra.clone());
+    if let (Some(target), Value::Object(extra)) = (value.as_object_mut(), fields) {
+        target.extend(extra);
     }
     if let Err(error) = AppDaemon::event(emitter, stream, &value.to_string()).await {
         tracing::warn!(%stream, %error, "app-api event could not be emitted");
@@ -163,10 +174,10 @@ async fn emit_event(
 pub async fn run() -> Result<()> {
     let applications = ApplicationService::new();
     let daemon = AppDaemon {
-        api: Arc::new(ApiService::new(Arc::clone(&applications))),
+        api: ApiService::new(Arc::clone(&applications)),
         applications,
         sequence: AtomicU64::new(1),
-        subscriptions: Arc::new(Mutex::new(HashMap::new())),
+        subscriptions: Mutex::new(HashMap::new()),
     };
     let _connection = connection::Builder::session()
         .context("connect to session D-Bus")?

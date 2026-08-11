@@ -7,7 +7,7 @@ pub struct DesktopActionSummary {
     pub icon: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WindowSummary {
     pub id: String,
     pub title: String,
@@ -18,7 +18,7 @@ pub struct WindowSummary {
     pub focus_rank: i64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ApplicationSummary {
     pub id: String,
     pub revision: u64,
@@ -38,7 +38,7 @@ pub struct ApplicationSummary {
     pub score: i64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ApplicationPage {
     pub revision: u64,
     pub generation: u64,
@@ -47,7 +47,7 @@ pub struct ApplicationPage {
     pub hyprland_available: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OperationResult {
     pub id: String,
     pub action: String,

@@ -12,18 +12,18 @@ use crate::{
 };
 
 pub struct ApplicationService {
-    catalog: RwLock<Catalog>,
+    catalog: RwLock<Arc<Catalog>>,
 }
 
 impl ApplicationService {
     pub fn new() -> Arc<Self> {
         Arc::new(Self {
-            catalog: RwLock::new(Catalog::load()),
+            catalog: RwLock::new(Arc::new(Catalog::load())),
         })
     }
 
     pub async fn refresh(&self) {
-        *self.catalog.write().await = Catalog::load();
+        *self.catalog.write().await = Arc::new(Catalog::load());
     }
 
     pub async fn revisions(&self) -> (u64, u64) {
@@ -34,59 +34,17 @@ impl ApplicationService {
     }
 
     pub async fn query(&self, params: QueryParams) -> ApplicationPage {
-        let catalog = self.catalog.read().await.clone();
         let windows = Snapshot::load().await;
-        page(&catalog, &windows, &params)
+        let catalog = Arc::clone(&*self.catalog.read().await);
+        page(&catalog, windows, &params)
     }
 
     pub async fn execute(&self, params: ExecuteParams) -> anyhow::Result<OperationResult> {
-        let catalog = self.catalog.read().await.clone();
         let windows = Snapshot::load().await;
-        let operation_id = format!("operation-{}", Uuid::new_v4());
-        let message = match params.action.as_str() {
-            "activate" => {
-                if let Some(window) = target_windows(&catalog, &windows, &params.target_id).first()
-                {
-                    hyprland::focus(&window.address).await?;
-                    format!("Focused {}", display_name(&catalog, &params.target_id))
-                } else {
-                    launch(&catalog, &params.target_id).await?;
-                    format!("Launched {}", display_name(&catalog, &params.target_id))
-                }
-            }
-            "launch" => {
-                launch(&catalog, &params.target_id).await?;
-                format!("Launched {}", display_name(&catalog, &params.target_id))
-            }
-            "focus-window" => {
-                let id = params
-                    .window_id
-                    .as_deref()
-                    .context("window_id is required")?;
-                let window = windows
-                    .by_window_id(id)
-                    .context("window is no longer available")?;
-                anyhow::ensure!(
-                    target_windows(&catalog, &windows, &params.target_id)
-                        .iter()
-                        .any(|candidate| candidate.address == window.address),
-                    "window no longer belongs to the selected application"
-                );
-                hyprland::focus(&window.address).await?;
-                format!("Focused {}", display_name(&catalog, &params.target_id))
-            }
-            "desktop-action" => {
-                let action_id = params
-                    .desktop_action_id
-                    .as_deref()
-                    .context("desktop_action_id is required")?;
-                launch_action(&catalog, &params.target_id, action_id).await?;
-                format!("Started {}", display_name(&catalog, &params.target_id))
-            }
-            _ => anyhow::bail!("unsupported application action"),
-        };
+        let catalog = Arc::clone(&*self.catalog.read().await);
+        let message = execute_action(&catalog, &windows, &params).await?;
         Ok(OperationResult {
-            id: operation_id,
+            id: format!("operation-{}", Uuid::new_v4()),
             action: params.action,
             target_id: params.target_id,
             status: "completed".into(),
@@ -95,7 +53,71 @@ impl ApplicationService {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+async fn execute_action(
+    catalog: &Catalog,
+    windows: &Snapshot,
+    params: &ExecuteParams,
+) -> anyhow::Result<String> {
+    let verb = match params.action.as_str() {
+        "activate" => activate(catalog, windows, &params.target_id).await?,
+        "launch" => {
+            launch(catalog, &params.target_id).await?;
+            "Launched"
+        }
+        "focus-window" => {
+            focus_window(catalog, windows, params).await?;
+            "Focused"
+        }
+        "desktop-action" => {
+            let action = params
+                .desktop_action_id
+                .as_deref()
+                .context("desktop_action_id is required")?;
+            launch_action(catalog, &params.target_id, action).await?;
+            "Started"
+        }
+        _ => anyhow::bail!("unsupported application action"),
+    };
+    Ok(format!(
+        "{verb} {}",
+        display_name(catalog, &params.target_id)
+    ))
+}
+
+async fn activate(
+    catalog: &Catalog,
+    windows: &Snapshot,
+    target_id: &str,
+) -> anyhow::Result<&'static str> {
+    if let Some(window) = target_window(catalog, windows, target_id) {
+        hyprland::focus(&window.address).await?;
+        Ok("Focused")
+    } else {
+        launch(catalog, target_id).await?;
+        Ok("Launched")
+    }
+}
+
+async fn focus_window(
+    catalog: &Catalog,
+    windows: &Snapshot,
+    params: &ExecuteParams,
+) -> anyhow::Result<()> {
+    let id = params
+        .window_id
+        .as_deref()
+        .context("window_id is required")?;
+    let window = windows
+        .by_window_id(id)
+        .context("window is no longer available")?;
+    anyhow::ensure!(
+        resolve_target(catalog, window) == params.target_id,
+        "window no longer belongs to the selected application"
+    );
+    hyprland::focus(&window.address).await
+}
+
+#[derive(Debug, Deserialize)]
 pub struct QueryParams {
     #[serde(default)]
     pub query: String,
@@ -109,7 +131,7 @@ const fn default_limit() -> usize {
     500
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Deserialize)]
 pub struct ExecuteParams {
     pub target_id: String,
     pub action: String,
@@ -117,18 +139,15 @@ pub struct ExecuteParams {
     pub window_id: Option<String>,
     #[serde(default)]
     pub desktop_action_id: Option<String>,
-    #[serde(default)]
-    pub expected_revision: Option<u64>,
-    #[serde(default)]
-    pub workspace_id: Option<String>,
 }
 
-fn page(catalog: &Catalog, windows: &Snapshot, params: &QueryParams) -> ApplicationPage {
+fn page(catalog: &Catalog, windows: Snapshot, params: &QueryParams) -> ApplicationPage {
     let revision = catalog.revision.rotate_left(17) ^ windows.revision;
-    let mut grouped: HashMap<String, Vec<&Client>> = HashMap::new();
-    for window in &windows.clients {
+    let available = windows.available;
+    let mut grouped: HashMap<String, Vec<Client>> = HashMap::new();
+    for window in windows.clients {
         grouped
-            .entry(resolve_target(catalog, window))
+            .entry(resolve_target(catalog, &window))
             .or_default()
             .push(window);
     }
@@ -165,83 +184,84 @@ fn page(catalog: &Catalog, windows: &Snapshot, params: &QueryParams) -> Applicat
         generation: params.generation,
         applications,
         has_more,
-        hyprland_available: windows.available,
+        hyprland_available: available,
     }
 }
 
 fn resolve_target(catalog: &Catalog, window: &Client) -> String {
-    for candidate in [&window.class, &window.initial_class] {
-        let key = candidate.trim().trim_end_matches(".desktop");
-        if let Some(entry) = catalog.entries.iter().find(|entry| {
-            entry
-                .id
-                .trim_end_matches(".desktop")
-                .eq_ignore_ascii_case(key)
-                || (!entry.startup_class.is_empty()
-                    && entry.startup_class.eq_ignore_ascii_case(key))
-        }) {
-            return entry.id.clone();
-        }
-    }
-    for candidate in [&window.class, &window.initial_class] {
-        let suffix = candidate
-            .trim()
-            .trim_end_matches(".desktop")
-            .rsplit('.')
-            .next()
-            .unwrap_or("");
-        let mut matches = catalog.entries.iter().filter(|entry| {
-            entry
-                .id
-                .trim_end_matches(".desktop")
-                .eq_ignore_ascii_case(suffix)
-        });
-        if let Some(entry) = matches.next()
-            && matches.next().is_none()
-        {
-            return entry.id.clone();
-        }
-    }
-    let class = if window.initial_class.is_empty() {
-        &window.class
-    } else {
-        &window.initial_class
-    };
-    format!("window-group:{}", class.trim().to_ascii_lowercase())
+    window_classes(window)
+        .find_map(|class| exact_target(catalog, class))
+        .or_else(|| window_classes(window).find_map(|class| suffix_target(catalog, class)))
+        .unwrap_or_else(|| {
+            let class = if window.initial_class.is_empty() {
+                &window.class
+            } else {
+                &window.initial_class
+            };
+            format!("window-group:{}", class.trim().to_ascii_lowercase())
+        })
 }
 
-fn target_windows<'a>(
+fn window_classes(window: &Client) -> impl Iterator<Item = &str> {
+    [&window.class, &window.initial_class]
+        .into_iter()
+        .map(|class| class.trim().trim_end_matches(".desktop"))
+}
+
+fn exact_target(catalog: &Catalog, class: &str) -> Option<String> {
+    catalog
+        .entries
+        .iter()
+        .find(|entry| {
+            entry
+                .id
+                .trim_end_matches(".desktop")
+                .eq_ignore_ascii_case(class)
+                || (!entry.startup_class.is_empty()
+                    && entry.startup_class.eq_ignore_ascii_case(class))
+        })
+        .map(|entry| entry.id.clone())
+}
+
+fn suffix_target(catalog: &Catalog, class: &str) -> Option<String> {
+    let suffix = class.rsplit('.').next().unwrap_or_default();
+    let mut matches = catalog.entries.iter().filter(|entry| {
+        entry
+            .id
+            .trim_end_matches(".desktop")
+            .eq_ignore_ascii_case(suffix)
+    });
+    let target = matches.next()?;
+    matches.next().is_none().then(|| target.id.clone())
+}
+
+fn target_window<'a>(
     catalog: &Catalog,
     windows: &'a Snapshot,
     target_id: &str,
-) -> Vec<&'a Client> {
+) -> Option<&'a Client> {
     windows
         .clients
         .iter()
-        .filter(|window| resolve_target(catalog, window) == target_id)
-        .collect()
+        .find(|window| resolve_target(catalog, window) == target_id)
 }
 
-fn instances(clients: Vec<&Client>) -> Vec<WindowSummary> {
+fn instances(clients: Vec<Client>) -> Vec<WindowSummary> {
     clients
         .into_iter()
         .map(|window| WindowSummary {
             id: hyprland::window_id(&window.address),
-            title: window.title.clone(),
-            class: window.class.clone(),
+            title: window.title,
+            class: window.class,
             workspace_id: window.workspace.id.to_string(),
-            workspace_name: window.workspace.name.clone(),
+            workspace_name: window.workspace.name,
             focused: window.focus_rank == 0,
             focus_rank: window.focus_rank,
         })
         .collect()
 }
 
-fn summary_for_entry(
-    entry: &CatalogEntry,
-    clients: Vec<&Client>,
-    revision: u64,
-) -> ApplicationSummary {
+fn instance_state(clients: Vec<Client>) -> (Vec<WindowSummary>, bool, i64) {
     let instances = instances(clients);
     let focused = instances.iter().any(|window| window.focused);
     let best_rank = instances
@@ -249,6 +269,15 @@ fn summary_for_entry(
         .map(|window| window.focus_rank)
         .min()
         .unwrap_or(i64::MAX);
+    (instances, focused, best_rank)
+}
+
+fn summary_for_entry(
+    entry: &CatalogEntry,
+    clients: Vec<Client>,
+    revision: u64,
+) -> ApplicationSummary {
+    let (instances, focused, best_rank) = instance_state(clients);
     let running = !instances.is_empty();
     ApplicationSummary {
         id: entry.id.clone(),
@@ -270,25 +299,13 @@ fn summary_for_entry(
     }
 }
 
-fn summary_for_unmatched(id: String, clients: Vec<&Client>, revision: u64) -> ApplicationSummary {
+fn summary_for_unmatched(id: String, clients: Vec<Client>, revision: u64) -> ApplicationSummary {
     let name = clients
         .first()
-        .map(|window| {
-            if window.class.is_empty() {
-                "Untitled"
-            } else {
-                &window.class
-            }
-        })
-        .unwrap_or("Untitled")
+        .filter(|window| !window.class.is_empty())
+        .map_or("Untitled", |window| &window.class)
         .to_owned();
-    let instances = instances(clients);
-    let focused = instances.iter().any(|window| window.focused);
-    let best_rank = instances
-        .iter()
-        .map(|window| window.focus_rank)
-        .min()
-        .unwrap_or(i64::MAX);
+    let (instances, focused, best_rank) = instance_state(clients);
     ApplicationSummary {
         id,
         revision,
@@ -354,15 +371,15 @@ fn matches_query(application: &ApplicationSummary, query: &str) -> bool {
 }
 
 fn display_name(catalog: &Catalog, target_id: &str) -> String {
-    catalog
-        .by_id(target_id)
-        .map(|entry| entry.name.clone())
-        .unwrap_or_else(|| {
+    catalog.by_id(target_id).map_or_else(
+        || {
             target_id
                 .strip_prefix("window-group:")
                 .unwrap_or(target_id)
                 .to_owned()
-        })
+        },
+        |entry| entry.name.clone(),
+    )
 }
 
 async fn launch(catalog: &Catalog, target_id: &str) -> anyhow::Result<()> {
@@ -426,13 +443,12 @@ mod tests {
     }
 
     #[test]
-    fn resolves_unique_reverse_dns_class_suffix() {
-        let directory = tempfile::tempdir().unwrap();
+    fn resolves_unique_reverse_dns_class_suffix() -> anyhow::Result<()> {
+        let directory = tempfile::tempdir()?;
         fs::write(
             directory.path().join("yazi.desktop"),
             "[Desktop Entry]\nType=Application\nName=Yazi\nExec=true\n",
-        )
-        .unwrap();
+        )?;
         let catalog = Catalog::from_paths(vec![directory.path().into()]);
         let window = Client {
             address: "0x1".into(),
@@ -444,5 +460,6 @@ mod tests {
             mapped: true,
         };
         assert_eq!(resolve_target(&catalog, &window), "yazi.desktop");
+        Ok(())
     }
 }

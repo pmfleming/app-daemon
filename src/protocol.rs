@@ -16,36 +16,35 @@ pub const METHODS: &[&str] = &[
 ];
 pub const STREAMS: &[&str] = &[stream::APPLICATIONS, stream::WINDOWS, stream::OPERATION];
 
-pub fn contract_fixture() -> Value {
+pub fn contract_fixture() -> serde_json::Result<Value> {
     serde_json::from_str(include_str!("../test_support/app-api-v1.json"))
-        .expect("app-api fixture is valid")
 }
 
-pub fn registry() -> Value {
-    contract_fixture()["registry"].take()
+pub fn registry() -> serde_json::Result<Value> {
+    Ok(contract_fixture()?["registry"].take())
 }
 
 #[cfg(test)]
 mod tests {
+    use serde_json::Value;
+
     use super::{METHODS, STREAMS, VERSION, contract_fixture};
 
+    fn names<'a>(fixture: &'a Value, registry: &str) -> Vec<&'a str> {
+        fixture["registry"][registry]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|item| item["name"].as_str())
+            .collect()
+    }
+
     #[test]
-    fn fixture_matches_registry() {
-        let fixture = contract_fixture();
+    fn fixture_matches_registry() -> serde_json::Result<()> {
+        let fixture = contract_fixture()?;
         assert_eq!(fixture["version"], VERSION);
-        let methods: Vec<_> = fixture["registry"]["methods"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|item| item["name"].as_str().unwrap())
-            .collect();
-        let streams: Vec<_> = fixture["registry"]["streams"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|item| item["name"].as_str().unwrap())
-            .collect();
-        assert_eq!(methods, METHODS);
-        assert_eq!(streams, STREAMS);
+        assert_eq!(names(&fixture, "methods"), METHODS);
+        assert_eq!(names(&fixture, "streams"), STREAMS);
+        Ok(())
     }
 }

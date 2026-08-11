@@ -1,0 +1,35 @@
+project_name = "app-daemon"
+project_root = "."
+# source_roots is optional; Cargo workspace and local path packages are discovered automatically.
+output_dir = "target/analysis"
+
+[rust]
+identity_resolution = "auto"
+rust_analyzer = "rust-analyzer"
+identity_timeout_seconds = 60
+identity_offline = true
+
+[verification]
+timeout_seconds = 600
+workspace = true
+all_targets = true
+all_features = false
+audit = false
+deny = false
+semver = false
+feature_matrix = false
+miri = false
+
+# Stable rule limits prevent new findings while allowing an explicit baseline:
+# [policy.rules."rust.reliability.expect"]
+# level = "error"
+# max = 0
+# exclude_paths = ["src/generated/**"]
+# exclude_packages = ["generated-bindings"]
+
+# Temporary exceptions must be owned, justified, and time-bounded:
+# [[policy.waivers]]
+# rule_id = "rust.project.license"
+# reason = "Owner license decision is pending"
+# owner = "project-maintainers"
+# expires = "2026-12-31"
