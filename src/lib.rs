@@ -5,4 +5,5 @@ pub mod daemon;
 pub mod hyprland;
 pub mod model;
 pub mod protocol;
+pub mod resources;
 pub mod service;

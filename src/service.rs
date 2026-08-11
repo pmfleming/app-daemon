@@ -2,23 +2,29 @@ use std::{collections::HashMap, process::Stdio, sync::Arc};
 
 use anyhow::Context;
 use serde::Deserialize;
-use tokio::{process::Command, sync::RwLock};
+use tokio::{
+    process::Command,
+    sync::{Mutex, RwLock},
+};
 use uuid::Uuid;
 
 use crate::{
     catalog::{Catalog, CatalogEntry},
     hyprland::{self, Client, Snapshot},
     model::{ApplicationPage, ApplicationSummary, OperationResult, WindowSummary},
+    resources::{ResourceSampler, ResourceSnapshot, ResourceUsage},
 };
 
 pub struct ApplicationService {
     catalog: RwLock<Arc<Catalog>>,
+    resources: Mutex<ResourceSampler>,
 }
 
 impl ApplicationService {
     pub fn new() -> Arc<Self> {
         Arc::new(Self {
             catalog: RwLock::new(Arc::new(Catalog::load())),
+            resources: Mutex::new(ResourceSampler::default()),
         })
     }
 
@@ -36,7 +42,8 @@ impl ApplicationService {
     pub async fn query(&self, params: QueryParams) -> ApplicationPage {
         let windows = Snapshot::load().await;
         let catalog = Arc::clone(&*self.catalog.read().await);
-        page(&catalog, windows, &params)
+        let resources = self.resources.lock().await.sample();
+        page(&catalog, windows, &resources, &params)
     }
 
     pub async fn execute(&self, params: ExecuteParams) -> anyhow::Result<OperationResult> {
@@ -141,7 +148,12 @@ pub struct ExecuteParams {
     pub desktop_action_id: Option<String>,
 }
 
-fn page(catalog: &Catalog, windows: Snapshot, params: &QueryParams) -> ApplicationPage {
+fn page(
+    catalog: &Catalog,
+    windows: Snapshot,
+    resources: &ResourceSnapshot,
+    params: &QueryParams,
+) -> ApplicationPage {
     let revision = catalog.revision.rotate_left(17) ^ windows.revision;
     let available = windows.available;
     let mut grouped: HashMap<String, Vec<Client>> = HashMap::new();
@@ -159,6 +171,7 @@ fn page(catalog: &Catalog, windows: Snapshot, params: &QueryParams) -> Applicati
             summary_for_entry(
                 entry,
                 grouped.remove(&entry.id).unwrap_or_default(),
+                resources,
                 revision,
             )
         })
@@ -166,7 +179,7 @@ fn page(catalog: &Catalog, windows: Snapshot, params: &QueryParams) -> Applicati
     applications.extend(
         grouped
             .into_iter()
-            .map(|(id, clients)| summary_for_unmatched(id, clients, revision)),
+            .map(|(id, clients)| summary_for_unmatched(id, clients, resources, revision)),
     );
     applications.retain(|application| matches_query(application, &params.query));
     applications.sort_by(|left, right| {
@@ -246,38 +259,48 @@ fn target_window<'a>(
         .find(|window| resolve_target(catalog, window) == target_id)
 }
 
-fn instances(clients: Vec<Client>) -> Vec<WindowSummary> {
+fn instances(clients: &[Client], resources: &ResourceSnapshot) -> Vec<WindowSummary> {
     clients
-        .into_iter()
-        .map(|window| WindowSummary {
-            id: hyprland::window_id(&window.address),
-            title: window.title,
-            class: window.class,
-            workspace_id: window.workspace.id.to_string(),
-            workspace_name: window.workspace.name,
-            focused: window.focus_rank == 0,
-            focus_rank: window.focus_rank,
+        .iter()
+        .map(|window| {
+            let usage = resources.usage_for_roots([window.pid]);
+            WindowSummary {
+                id: hyprland::window_id(&window.address),
+                title: window.title.clone(),
+                class: window.class.clone(),
+                workspace_id: window.workspace.id.to_string(),
+                workspace_name: window.workspace.name.clone(),
+                focused: window.focus_rank == 0,
+                focus_rank: window.focus_rank,
+                cpu_percent: usage.cpu_percent,
+                memory_bytes: usage.memory_bytes,
+            }
         })
         .collect()
 }
 
-fn instance_state(clients: Vec<Client>) -> (Vec<WindowSummary>, bool, i64) {
-    let instances = instances(clients);
+fn instance_state(
+    clients: Vec<Client>,
+    resources: &ResourceSnapshot,
+) -> (Vec<WindowSummary>, bool, i64, ResourceUsage) {
+    let usage = resources.usage_for_roots(clients.iter().map(|window| window.pid));
+    let instances = instances(&clients, resources);
     let focused = instances.iter().any(|window| window.focused);
     let best_rank = instances
         .iter()
         .map(|window| window.focus_rank)
         .min()
         .unwrap_or(i64::MAX);
-    (instances, focused, best_rank)
+    (instances, focused, best_rank, usage)
 }
 
 fn summary_for_entry(
     entry: &CatalogEntry,
     clients: Vec<Client>,
+    resources: &ResourceSnapshot,
     revision: u64,
 ) -> ApplicationSummary {
-    let (instances, focused, best_rank) = instance_state(clients);
+    let (instances, focused, best_rank, usage) = instance_state(clients, resources);
     let running = !instances.is_empty();
     ApplicationSummary {
         id: entry.id.clone(),
@@ -293,19 +316,26 @@ fn summary_for_entry(
         running,
         focused,
         running_count: instances.len(),
+        cpu_percent: usage.cpu_percent,
+        memory_bytes: usage.memory_bytes,
         instances,
         desktop_actions: entry.actions.clone(),
         score: running_score(focused, best_rank),
     }
 }
 
-fn summary_for_unmatched(id: String, clients: Vec<Client>, revision: u64) -> ApplicationSummary {
+fn summary_for_unmatched(
+    id: String,
+    clients: Vec<Client>,
+    resources: &ResourceSnapshot,
+    revision: u64,
+) -> ApplicationSummary {
     let name = clients
         .first()
         .filter(|window| !window.class.is_empty())
         .map_or("Untitled", |window| &window.class)
         .to_owned();
-    let (instances, focused, best_rank) = instance_state(clients);
+    let (instances, focused, best_rank, usage) = instance_state(clients, resources);
     ApplicationSummary {
         id,
         revision,
@@ -323,6 +353,8 @@ fn summary_for_unmatched(id: String, clients: Vec<Client>, revision: u64) -> App
         running: true,
         focused,
         running_count: instances.len(),
+        cpu_percent: usage.cpu_percent,
+        memory_bytes: usage.memory_bytes,
         instances,
         desktop_actions: Vec::new(),
         score: running_score(focused, best_rank),
@@ -455,6 +487,7 @@ mod tests {
             class: "com.laufan.yazi".into(),
             initial_class: "com.laufan.yazi".into(),
             title: "Yazi".into(),
+            pid: 42,
             workspace: Workspace::default(),
             focus_rank: 0,
             mapped: true,

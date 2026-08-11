@@ -1,6 +1,6 @@
 # app-daemon
 
-Rust application catalog, Hyprland window identity, and activation policy for the Shelllist launcher.
+Rust application catalog, Hyprland window identity, process-tree CPU and resident-memory accounting, and activation policy for the Shelllist launcher.
 
 ```sh
 nix develop

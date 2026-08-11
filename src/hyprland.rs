@@ -26,6 +26,8 @@ pub struct Client {
     #[serde(default)]
     pub title: String,
     #[serde(default)]
+    pub pid: u32,
+    #[serde(default)]
     pub workspace: Workspace,
     #[serde(rename = "focusHistoryID", default = "unfocused")]
     pub focus_rank: i64,

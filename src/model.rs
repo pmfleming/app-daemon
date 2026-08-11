@@ -7,7 +7,7 @@ pub struct DesktopActionSummary {
     pub icon: String,
 }
 
-#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
 pub struct WindowSummary {
     pub id: String,
     pub title: String,
@@ -16,9 +16,11 @@ pub struct WindowSummary {
     pub workspace_name: String,
     pub focused: bool,
     pub focus_rank: i64,
+    pub cpu_percent: f64,
+    pub memory_bytes: u64,
 }
 
-#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
 pub struct ApplicationSummary {
     pub id: String,
     pub revision: u64,
@@ -33,12 +35,14 @@ pub struct ApplicationSummary {
     pub running: bool,
     pub focused: bool,
     pub running_count: usize,
+    pub cpu_percent: f64,
+    pub memory_bytes: u64,
     pub instances: Vec<WindowSummary>,
     pub desktop_actions: Vec<DesktopActionSummary>,
     pub score: i64,
 }
 
-#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
 pub struct ApplicationPage {
     pub revision: u64,
     pub generation: u64,

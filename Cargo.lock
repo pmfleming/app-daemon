@@ -75,6 +75,7 @@ dependencies = [
  "clap",
  "freedesktop-desktop-entry",
  "futures",
+ "libc",
  "serde",
  "serde_json",
  "tempfile",
