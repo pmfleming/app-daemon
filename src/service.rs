@@ -1,31 +1,47 @@
-use std::{collections::HashMap, process::Stdio, sync::Arc};
+use std::{
+    collections::HashMap,
+    process::Stdio,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use anyhow::Context;
 use serde::Deserialize;
 use tokio::{
     process::Command,
     sync::{Mutex, RwLock},
+    time::{self, MissedTickBehavior},
 };
 use uuid::Uuid;
 
 use crate::{
     catalog::{Catalog, CatalogEntry},
+    history::{HistoryStore, now_milliseconds},
     hyprland::{self, Client, Snapshot},
-    model::{ApplicationPage, ApplicationSummary, OperationResult, WindowSummary},
+    model::{
+        ApplicationPage, ApplicationResourceHistory, ApplicationSummary, OperationResult,
+        WindowSummary,
+    },
     resources::{ResourceSampler, ResourceSnapshot, ResourceUsage},
 };
 
 pub struct ApplicationService {
     catalog: RwLock<Arc<Catalog>>,
-    resources: Mutex<ResourceSampler>,
+    resources: RwLock<ResourceSnapshot>,
+    history: Mutex<HistoryStore>,
 }
 
 impl ApplicationService {
     pub fn new() -> Arc<Self> {
-        Arc::new(Self {
+        let service = Arc::new(Self {
             catalog: RwLock::new(Arc::new(Catalog::load())),
-            resources: Mutex::new(ResourceSampler::default()),
-        })
+            resources: RwLock::new(ResourceSnapshot::default()),
+            history: Mutex::new(HistoryStore::load_default()),
+        });
+        if tokio::runtime::Handle::try_current().is_ok() {
+            tokio::spawn(track_resources(Arc::downgrade(&service)));
+        }
+        service
     }
 
     pub async fn refresh(&self) {
@@ -42,8 +58,30 @@ impl ApplicationService {
     pub async fn query(&self, params: QueryParams) -> ApplicationPage {
         let windows = Snapshot::load().await;
         let catalog = Arc::clone(&*self.catalog.read().await);
-        let resources = self.resources.lock().await.sample();
+        let resources = self.resources.read().await;
         page(&catalog, windows, &resources, &params)
+    }
+
+    pub async fn resource_history(
+        &self,
+        params: ResourceHistoryParams,
+    ) -> ApplicationResourceHistory {
+        let (points, has_more) =
+            self.history
+                .lock()
+                .await
+                .query(&params.target_id, params.since_ms, params.limit);
+        ApplicationResourceHistory {
+            target_id: params.target_id,
+            points,
+            has_more,
+        }
+    }
+
+    pub async fn save_history(&self) {
+        if let Err(error) = self.history.lock().await.save() {
+            tracing::warn!(%error, "resource history could not be saved");
+        }
     }
 
     pub async fn execute(&self, params: ExecuteParams) -> anyhow::Result<OperationResult> {
@@ -57,6 +95,52 @@ impl ApplicationService {
             status: "completed".into(),
             message,
         })
+    }
+}
+
+const RESOURCE_SAMPLE_INTERVAL: Duration = Duration::from_secs(2);
+const HISTORY_SAVE_INTERVAL: Duration = Duration::from_secs(60);
+
+async fn track_resources(service: std::sync::Weak<ApplicationService>) {
+    let mut sampler = ResourceSampler::default();
+    let mut interval = time::interval(RESOURCE_SAMPLE_INTERVAL);
+    interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
+    let mut last_save = Instant::now();
+    loop {
+        interval.tick().await;
+        let Some(service) = service.upgrade() else {
+            return;
+        };
+        let windows = Snapshot::load().await;
+        let catalog = Arc::clone(&*service.catalog.read().await);
+        let timestamp_ms = now_milliseconds();
+        let mut roots: HashMap<String, Vec<u32>> = HashMap::new();
+        for window in &windows.clients {
+            roots
+                .entry(resolve_target(&catalog, window))
+                .or_default()
+                .push(window.pid);
+        }
+        let snapshot = sampler.sample_for_roots(roots.values().flatten().copied());
+        {
+            let mut history = service.history.lock().await;
+            for (target_id, pids) in roots {
+                let usage = snapshot.usage_for_roots(pids);
+                history.record(
+                    &target_id,
+                    timestamp_ms,
+                    snapshot.interval_seconds(),
+                    &usage,
+                );
+            }
+            if last_save.elapsed() >= HISTORY_SAVE_INTERVAL {
+                if let Err(error) = history.save() {
+                    tracing::warn!(%error, "resource history could not be saved");
+                }
+                last_save = Instant::now();
+            }
+        }
+        *service.resources.write().await = snapshot;
     }
 }
 
@@ -188,6 +272,19 @@ pub struct QueryParams {
 
 const fn default_limit() -> usize {
     500
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ResourceHistoryParams {
+    pub target_id: String,
+    #[serde(default)]
+    pub since_ms: Option<u64>,
+    #[serde(default = "default_history_limit")]
+    pub limit: usize,
+}
+
+const fn default_history_limit() -> usize {
+    1_000
 }
 
 #[derive(Debug, Deserialize)]
@@ -325,7 +422,15 @@ fn instances(clients: &[Client], resources: &ResourceSnapshot) -> Vec<WindowSumm
                 focused: window.focus_rank == 0,
                 focus_rank: window.focus_rank,
                 cpu_percent: usage.cpu_percent,
+                cpu_percent_of_machine: usage.cpu_percent_of_machine,
                 memory_bytes: usage.memory_bytes,
+                gpu_percent: usage.gpu_percent,
+                gpu_memory_bytes: usage.gpu_memory_bytes,
+                energy_mwh: usage.energy_mwh,
+                battery_percent: usage.battery_percent,
+                power_watts: usage.power_watts,
+                battery_percent_per_hour: usage.battery_percent_per_hour,
+                energy_source: usage.energy_source,
             }
         })
         .collect()
@@ -369,7 +474,15 @@ fn summary_for_entry(
         focused,
         running_count: instances.len(),
         cpu_percent: usage.cpu_percent,
+        cpu_percent_of_machine: usage.cpu_percent_of_machine,
         memory_bytes: usage.memory_bytes,
+        gpu_percent: usage.gpu_percent,
+        gpu_memory_bytes: usage.gpu_memory_bytes,
+        energy_mwh: usage.energy_mwh,
+        battery_percent: usage.battery_percent,
+        power_watts: usage.power_watts,
+        battery_percent_per_hour: usage.battery_percent_per_hour,
+        energy_source: usage.energy_source,
         instances,
         desktop_actions: entry.actions.clone(),
         score: running_score(focused, best_rank),
@@ -406,7 +519,15 @@ fn summary_for_unmatched(
         focused,
         running_count: instances.len(),
         cpu_percent: usage.cpu_percent,
+        cpu_percent_of_machine: usage.cpu_percent_of_machine,
         memory_bytes: usage.memory_bytes,
+        gpu_percent: usage.gpu_percent,
+        gpu_memory_bytes: usage.gpu_memory_bytes,
+        energy_mwh: usage.energy_mwh,
+        battery_percent: usage.battery_percent,
+        power_watts: usage.power_watts,
+        battery_percent_per_hour: usage.battery_percent_per_hour,
+        energy_source: usage.energy_source,
         instances,
         desktop_actions: Vec::new(),
         score: running_score(focused, best_rank),

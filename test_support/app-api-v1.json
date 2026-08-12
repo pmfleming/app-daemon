@@ -10,6 +10,16 @@
         "stream": "applications.changed"
       },
       {
+        "name": "applications.history",
+        "params_example": {
+          "target_id": "org.example.App.desktop",
+          "since_ms": 0,
+          "limit": 1000
+        },
+        "response_key": "history",
+        "stream": "applications.changed"
+      },
+      {
         "name": "applications.refresh",
         "params_example": { "query": "", "generation": 1, "limit": 500 },
         "response_key": "applications",

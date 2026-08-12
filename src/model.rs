@@ -16,8 +16,17 @@ pub struct WindowSummary {
     pub workspace_name: String,
     pub focused: bool,
     pub focus_rank: i64,
+    /// Top-compatible CPU usage; 100% represents one logical CPU.
     pub cpu_percent: f64,
+    pub cpu_percent_of_machine: f64,
     pub memory_bytes: u64,
+    pub gpu_percent: f64,
+    pub gpu_memory_bytes: u64,
+    pub energy_mwh: f64,
+    pub battery_percent: f64,
+    pub power_watts: f64,
+    pub battery_percent_per_hour: f64,
+    pub energy_source: String,
 }
 
 #[derive(Debug, PartialEq, Serialize, Deserialize)]
@@ -35,8 +44,17 @@ pub struct ApplicationSummary {
     pub running: bool,
     pub focused: bool,
     pub running_count: usize,
+    /// Top-compatible CPU usage; 100% represents one logical CPU.
     pub cpu_percent: f64,
+    pub cpu_percent_of_machine: f64,
     pub memory_bytes: u64,
+    pub gpu_percent: f64,
+    pub gpu_memory_bytes: u64,
+    pub energy_mwh: f64,
+    pub battery_percent: f64,
+    pub power_watts: f64,
+    pub battery_percent_per_hour: f64,
+    pub energy_source: String,
     pub instances: Vec<WindowSummary>,
     pub desktop_actions: Vec<DesktopActionSummary>,
     pub score: i64,
@@ -49,6 +67,30 @@ pub struct ApplicationPage {
     pub applications: Vec<ApplicationSummary>,
     pub has_more: bool,
     pub hyprland_available: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ResourceHistoryPoint {
+    pub timestamp_ms: u64,
+    pub duration_ms: u64,
+    pub cpu_percent: f64,
+    pub cpu_percent_of_machine: f64,
+    pub memory_bytes: u64,
+    #[serde(default)]
+    pub gpu_percent: f64,
+    #[serde(default)]
+    pub gpu_memory_bytes: u64,
+    pub energy_mwh: f64,
+    pub battery_percent: f64,
+    pub average_power_watts: f64,
+    pub energy_source: String,
+}
+
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
+pub struct ApplicationResourceHistory {
+    pub target_id: String,
+    pub points: Vec<ResourceHistoryPoint>,
+    pub has_more: bool,
 }
 
 #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]

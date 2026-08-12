@@ -5,7 +5,7 @@ use serde_json::{Value, json};
 
 use crate::{
     protocol,
-    service::{ApplicationService, ExecuteParams},
+    service::{ApplicationService, ExecuteParams, ResourceHistoryParams},
 };
 
 pub const PROTOCOL: &str = protocol::NAME;
@@ -29,6 +29,13 @@ impl ApiService {
             "applications.query" => Ok(
                 json!({ "applications": self.applications.query(match decode(params) { Ok(value) => value, Err(error) => return error_response(error) }).await }),
             ),
+            "applications.history" => {
+                let query: ResourceHistoryParams = match decode(params) {
+                    Ok(value) => value,
+                    Err(error) => return error_response(error),
+                };
+                Ok(json!({ "history": self.applications.resource_history(query).await }))
+            }
             "applications.refresh" => {
                 let query = match decode(params) {
                     Ok(value) => value,

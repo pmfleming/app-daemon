@@ -173,6 +173,7 @@ async fn emit_event(
 
 pub async fn run() -> Result<()> {
     let applications = ApplicationService::new();
+    let shutdown_applications = Arc::clone(&applications);
     let daemon = AppDaemon {
         api: ApiService::new(Arc::clone(&applications)),
         applications,
@@ -194,5 +195,10 @@ pub async fn run() -> Result<()> {
         "app-daemon started"
     );
     let mut terminate = signal(SignalKind::terminate()).context("listen for SIGTERM")?;
-    tokio::select! { result = ctrl_c() => result.context("wait for Ctrl-C"), _ = terminate.recv() => Ok(()) }
+    let result = tokio::select! {
+        result = ctrl_c() => result.context("wait for Ctrl-C"),
+        _ = terminate.recv() => Ok(()),
+    };
+    shutdown_applications.save_history().await;
+    result
 }
