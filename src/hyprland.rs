@@ -88,8 +88,7 @@ pub fn window_id(address: &str) -> String {
 }
 
 pub async fn focus(address: &str) -> anyhow::Result<()> {
-    anyhow::ensure!(valid_address(address), "window address is invalid");
-    let selector = format!("address:{address}");
+    let selector = address_selector(address)?;
     let lua = format!("hl.dsp.focus({{ window = '{selector}' }})");
     if dispatch(&["dispatch", &lua]).await {
         return Ok(());
@@ -98,6 +97,23 @@ pub async fn focus(address: &str) -> anyhow::Result<()> {
         return Ok(());
     }
     anyhow::bail!("Hyprland rejected the focus request")
+}
+
+pub async fn close(address: &str) -> anyhow::Result<()> {
+    let selector = address_selector(address)?;
+    if dispatch(&["dispatch", "closewindow", &selector]).await {
+        return Ok(());
+    }
+    let lua = format!("hl.dsp.window.close({{ window = '{selector}' }})");
+    if dispatch(&["dispatch", &lua]).await {
+        return Ok(());
+    }
+    anyhow::bail!("Hyprland rejected the close request")
+}
+
+fn address_selector(address: &str) -> anyhow::Result<String> {
+    anyhow::ensure!(valid_address(address), "window address is invalid");
+    Ok(format!("address:{address}"))
 }
 
 async fn dispatch(arguments: &[&str]) -> bool {
@@ -121,10 +137,17 @@ fn valid_address(address: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::window_id;
+    use super::{address_selector, window_id};
 
     #[test]
     fn creates_protocol_safe_window_ids() {
         assert_eq!(window_id("0xAb12"), "window-ab12");
+    }
+
+    #[test]
+    fn validates_window_selectors_for_dispatch() -> anyhow::Result<()> {
+        assert_eq!(address_selector("0xAb12")?, "address:0xAb12");
+        assert!(address_selector("not-an-address").is_err());
+        Ok(())
     }
 }

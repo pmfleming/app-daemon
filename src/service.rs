@@ -75,6 +75,14 @@ async fn execute_action(
             focus_window(catalog, windows, params).await?;
             "Focused"
         }
+        "close" => {
+            close_application(catalog, windows, &params.target_id).await?;
+            "Closed"
+        }
+        "close-window" => {
+            close_window(catalog, windows, params).await?;
+            "Closed"
+        }
         "desktop-action" => {
             let action = params
                 .desktop_action_id
@@ -110,6 +118,50 @@ async fn focus_window(
     windows: &Snapshot,
     params: &ExecuteParams,
 ) -> anyhow::Result<()> {
+    let window = target_instance(catalog, windows, params)?;
+    hyprland::focus(&window.address).await
+}
+
+async fn close_window(
+    catalog: &Catalog,
+    windows: &Snapshot,
+    params: &ExecuteParams,
+) -> anyhow::Result<()> {
+    let window = target_instance(catalog, windows, params)?;
+    hyprland::close(&window.address).await
+}
+
+async fn close_application(
+    catalog: &Catalog,
+    windows: &Snapshot,
+    target_id: &str,
+) -> anyhow::Result<()> {
+    let addresses = application_window_addresses(catalog, windows, target_id);
+    anyhow::ensure!(!addresses.is_empty(), "application is no longer running");
+    for address in addresses {
+        hyprland::close(&address).await?;
+    }
+    Ok(())
+}
+
+fn application_window_addresses(
+    catalog: &Catalog,
+    windows: &Snapshot,
+    target_id: &str,
+) -> Vec<String> {
+    windows
+        .clients
+        .iter()
+        .filter(|window| resolve_target(catalog, window) == target_id)
+        .map(|window| window.address.clone())
+        .collect()
+}
+
+fn target_instance<'a>(
+    catalog: &Catalog,
+    windows: &'a Snapshot,
+    params: &ExecuteParams,
+) -> anyhow::Result<&'a Client> {
     let id = params
         .window_id
         .as_deref()
@@ -121,7 +173,7 @@ async fn focus_window(
         resolve_target(catalog, window) == params.target_id,
         "window no longer belongs to the selected application"
     );
-    hyprland::focus(&window.address).await
+    Ok(window)
 }
 
 #[derive(Debug, Deserialize)]
@@ -483,13 +535,48 @@ mod tests {
         hyprland::{Client, Workspace},
     };
 
-    use super::{resolve_target, running_score};
+    use super::{application_window_addresses, resolve_target, running_score};
 
     #[test]
     fn focused_and_recent_windows_rank_first() {
         assert!(running_score(true, 0) > running_score(false, 1));
         assert!(running_score(false, 1) > running_score(false, 8));
         assert!(running_score(false, 8) > running_score(false, i64::MAX));
+    }
+
+    #[test]
+    fn selects_all_application_windows_for_closing() -> anyhow::Result<()> {
+        let directory = tempfile::tempdir()?;
+        fs::write(
+            directory.path().join("example.desktop"),
+            "[Desktop Entry]\nType=Application\nName=Example\nExec=true\nStartupWMClass=example\n",
+        )?;
+        let catalog = Catalog::from_paths(vec![directory.path().into()]);
+        let client = |address: &str, class: &str| Client {
+            address: address.into(),
+            class: class.into(),
+            initial_class: class.into(),
+            title: class.into(),
+            pid: 42,
+            workspace: Workspace::default(),
+            focus_rank: 0,
+            mapped: true,
+        };
+        let windows = crate::hyprland::Snapshot {
+            available: true,
+            revision: 1,
+            clients: vec![
+                client("0x1", "example"),
+                client("0x2", "example"),
+                client("0x3", "other"),
+            ],
+        };
+
+        assert_eq!(
+            application_window_addresses(&catalog, &windows, "example.desktop"),
+            ["0x1", "0x2"]
+        );
+        Ok(())
     }
 
     #[test]
