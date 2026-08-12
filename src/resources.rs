@@ -1,6 +1,7 @@
 use std::{
     collections::{HashMap, HashSet},
     fs,
+    os::unix::fs::MetadataExt,
     path::{Path, PathBuf},
     time::Instant,
 };
@@ -16,6 +17,13 @@ pub struct ResourceUsage {
     pub gpu_percent: f64,
     /// Resident GPU memory reported by DRM, falling back to allocated memory.
     pub gpu_memory_bytes: u64,
+    /// Actual storage I/O completed by the process tree during this sample.
+    pub disk_read_bytes: u64,
+    pub disk_write_bytes: u64,
+    pub disk_read_bytes_per_second: f64,
+    pub disk_write_bytes_per_second: f64,
+    /// Allocated size of unique regular files currently open by the process tree.
+    pub open_file_disk_bytes: u64,
     /// Estimated energy attributed to the process tree during this sample.
     pub energy_mwh: f64,
     /// The energy estimate expressed as a percentage of full battery capacity.
@@ -31,21 +39,34 @@ struct ProcessStat {
     total_ticks: u64,
     start_ticks: u64,
     memory_bytes: u64,
+    disk_read_bytes: u64,
+    disk_write_bytes: u64,
 }
 
 #[derive(Debug, Clone, Copy)]
 struct PreviousProcess {
     total_ticks: u64,
     start_ticks: u64,
+    disk_read_bytes: u64,
+    disk_write_bytes: u64,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct ProcessUsage {
     parent_pid: u32,
     cpu_percent: f64,
     memory_bytes: u64,
     gpu_percent: f64,
     gpu_memory_bytes: u64,
+    disk_read_bytes: u64,
+    disk_write_bytes: u64,
+    open_files: HashMap<DiskFileId, u64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct DiskFileId {
+    device: u64,
+    inode: u64,
 }
 
 #[derive(Debug, Default)]
@@ -104,6 +125,7 @@ impl ResourceSnapshot {
         }
 
         let mut usage = ResourceUsage::default();
+        let mut open_files = HashMap::new();
         for pid in included {
             if let Some(process) = self.processes.get(&pid) {
                 usage.cpu_percent += process.cpu_percent;
@@ -112,7 +134,23 @@ impl ResourceSnapshot {
                 usage.gpu_memory_bytes = usage
                     .gpu_memory_bytes
                     .saturating_add(process.gpu_memory_bytes);
+                usage.disk_read_bytes = usage
+                    .disk_read_bytes
+                    .saturating_add(process.disk_read_bytes);
+                usage.disk_write_bytes = usage
+                    .disk_write_bytes
+                    .saturating_add(process.disk_write_bytes);
+                for (&file, &bytes) in &process.open_files {
+                    open_files.entry(file).or_insert(bytes);
+                }
             }
+        }
+        usage.open_file_disk_bytes = open_files.values().copied().sum();
+        if self.interval_seconds > 0.0 {
+            usage.disk_read_bytes_per_second =
+                rounded(usage.disk_read_bytes as f64 / self.interval_seconds, 1);
+            usage.disk_write_bytes_per_second =
+                rounded(usage.disk_write_bytes as f64 / self.interval_seconds, 1);
         }
 
         let raw_cpu = usage.cpu_percent.max(0.0);
@@ -245,6 +283,7 @@ impl ResourceSampler {
         let process_children = process_children(&current);
         let active_processes = descendants(active_roots, &process_children);
         let current_gpu = read_gpu_processes(&active_processes);
+        let current_open_files = read_open_files(&active_processes);
         let energy = self.energy.sample(interval_seconds);
         let mut snapshot = ResourceSnapshot {
             logical_cpus,
@@ -273,6 +312,24 @@ impl ResourceSampler {
                 })
                 .map(finite_nonnegative)
                 .unwrap_or(0.0);
+            let previous = self
+                .previous_processes
+                .get(&pid)
+                .filter(|previous| previous.start_ticks == process.start_ticks);
+            let disk_read_bytes = previous
+                .map(|previous| {
+                    process
+                        .disk_read_bytes
+                        .saturating_sub(previous.disk_read_bytes)
+                })
+                .unwrap_or(0);
+            let disk_write_bytes = previous
+                .map(|previous| {
+                    process
+                        .disk_write_bytes
+                        .saturating_sub(previous.disk_write_bytes)
+                })
+                .unwrap_or(0);
             let gpu = current_gpu.get(&pid);
             let gpu_percent = gpu
                 .map(|gpu| {
@@ -303,6 +360,9 @@ impl ResourceSampler {
                     memory_bytes: process.memory_bytes,
                     gpu_percent,
                     gpu_memory_bytes: gpu.map_or(0, |gpu| gpu.memory_bytes),
+                    disk_read_bytes,
+                    disk_write_bytes,
+                    open_files: current_open_files.get(&pid).cloned().unwrap_or_default(),
                 },
             );
         }
@@ -322,6 +382,8 @@ impl ResourceSampler {
                     PreviousProcess {
                         total_ticks: process.total_ticks,
                         start_ticks: process.start_ticks,
+                        disk_read_bytes: process.disk_read_bytes,
+                        disk_write_bytes: process.disk_write_bytes,
                     },
                 )
             })
@@ -343,7 +405,9 @@ fn read_processes() -> HashMap<u32, ProcessStat> {
             let pid = entry.file_name().to_str()?.parse::<u32>().ok()?;
             let stat = fs::read_to_string(entry.path().join("stat")).ok()?;
             let memory_bytes = resident_memory_bytes(&entry.path().join("status"));
-            parse_process_stat(&stat, memory_bytes).map(|process| (pid, process))
+            let (disk_read_bytes, disk_write_bytes) = read_process_io(&entry.path().join("io"));
+            parse_process_stat(&stat, memory_bytes, disk_read_bytes, disk_write_bytes)
+                .map(|process| (pid, process))
         })
         .collect()
 }
@@ -370,6 +434,33 @@ fn descendants(
         }
     }
     included
+}
+
+fn read_open_files(pids: &HashSet<u32>) -> HashMap<u32, HashMap<DiskFileId, u64>> {
+    pids.iter()
+        .map(|&pid| (pid, read_process_open_files(pid)))
+        .collect()
+}
+
+fn read_process_open_files(pid: u32) -> HashMap<DiskFileId, u64> {
+    let Ok(entries) = fs::read_dir(format!("/proc/{pid}/fd")) else {
+        return HashMap::new();
+    };
+    entries
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            let metadata = fs::metadata(entry.path()).ok()?;
+            metadata.file_type().is_file().then(|| {
+                (
+                    DiskFileId {
+                        device: metadata.dev(),
+                        inode: metadata.ino(),
+                    },
+                    metadata.blocks().saturating_mul(512),
+                )
+            })
+        })
+        .collect()
 }
 
 fn read_gpu_processes(pids: &HashSet<u32>) -> HashMap<u32, GpuProcessStat> {
@@ -493,7 +584,12 @@ fn parse_bytes(value: &str) -> Option<u64> {
     value.checked_mul(multiplier)
 }
 
-fn parse_process_stat(value: &str, memory_bytes: u64) -> Option<ProcessStat> {
+fn parse_process_stat(
+    value: &str,
+    memory_bytes: u64,
+    disk_read_bytes: u64,
+    disk_write_bytes: u64,
+) -> Option<ProcessStat> {
     let command_end = value.rfind(')')?;
     let fields = value
         .get(command_end + 1..)?
@@ -508,7 +604,25 @@ fn parse_process_stat(value: &str, memory_bytes: u64) -> Option<ProcessStat> {
             .saturating_add(fields.get(12)?.parse::<u64>().ok()?),
         start_ticks: fields.get(19)?.parse().ok()?,
         memory_bytes,
+        disk_read_bytes,
+        disk_write_bytes,
     })
+}
+
+fn read_process_io(path: &Path) -> (u64, u64) {
+    let Ok(value) = fs::read_to_string(path) else {
+        return (0, 0);
+    };
+    let mut read_bytes = 0;
+    let mut write_bytes = 0;
+    for line in value.lines() {
+        if let Some(value) = line.strip_prefix("read_bytes:") {
+            read_bytes = value.trim().parse().unwrap_or(0);
+        } else if let Some(value) = line.strip_prefix("write_bytes:") {
+            write_bytes = value.trim().parse().unwrap_or(0);
+        }
+    }
+    (read_bytes, write_bytes)
 }
 
 fn read_system_cpu() -> (u64, usize) {
@@ -649,17 +763,19 @@ fn rounded(value: f64, decimals: i32) -> f64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{ProcessUsage, ResourceSnapshot, parse_gpu_fdinfo, parse_process_stat};
+    use super::{DiskFileId, ProcessUsage, ResourceSnapshot, parse_gpu_fdinfo, parse_process_stat};
     use std::collections::HashMap;
 
     #[test]
     fn parses_proc_stat_with_spaces_in_command() {
         let stat = "42 (application helper) S 7 0 0 0 0 0 0 0 0 0 120 30 0 0 0 0 0 0 99 0 0";
-        let process = parse_process_stat(stat, 4096).expect("valid stat");
+        let process = parse_process_stat(stat, 4096, 8192, 16384).expect("valid stat");
         assert_eq!(process.parent_pid, 7);
         assert_eq!(process.total_ticks, 150);
         assert_eq!(process.start_ticks, 99);
         assert_eq!(process.memory_bytes, 4096);
+        assert_eq!(process.disk_read_bytes, 8192);
+        assert_eq!(process.disk_write_bytes, 16384);
     }
 
     #[test]
@@ -673,6 +789,24 @@ mod tests {
                     memory_bytes: 100,
                     gpu_percent: 0.0,
                     gpu_memory_bytes: 0,
+                    disk_read_bytes: 10,
+                    disk_write_bytes: 20,
+                    open_files: HashMap::from([
+                        (
+                            DiskFileId {
+                                device: 1,
+                                inode: 1,
+                            },
+                            1024,
+                        ),
+                        (
+                            DiskFileId {
+                                device: 1,
+                                inode: 2,
+                            },
+                            2048,
+                        ),
+                    ]),
                 },
             ),
             (
@@ -683,6 +817,15 @@ mod tests {
                     memory_bytes: 200,
                     gpu_percent: 0.0,
                     gpu_memory_bytes: 0,
+                    disk_read_bytes: 30,
+                    disk_write_bytes: 40,
+                    open_files: HashMap::from([(
+                        DiskFileId {
+                            device: 1,
+                            inode: 1,
+                        },
+                        1024,
+                    )]),
                 },
             ),
             (
@@ -693,6 +836,9 @@ mod tests {
                     memory_bytes: 50,
                     gpu_percent: 0.0,
                     gpu_memory_bytes: 0,
+                    disk_read_bytes: 50,
+                    disk_write_bytes: 60,
+                    open_files: HashMap::new(),
                 },
             ),
         ]);
@@ -712,6 +858,11 @@ mod tests {
         assert_eq!(usage.cpu_percent, 5.5);
         assert_eq!(usage.cpu_percent_of_machine, 1.4);
         assert_eq!(usage.memory_bytes, 300);
+        assert_eq!(usage.disk_read_bytes, 40);
+        assert_eq!(usage.disk_write_bytes, 60);
+        assert_eq!(usage.disk_read_bytes_per_second, 20.0);
+        assert_eq!(usage.disk_write_bytes_per_second, 30.0);
+        assert_eq!(usage.open_file_disk_bytes, 3072);
         assert_eq!(usage.energy_mwh, 2.75);
         assert_eq!(usage.energy_source, "rapl");
     }

@@ -22,6 +22,11 @@ pub struct WindowSummary {
     pub memory_bytes: u64,
     pub gpu_percent: f64,
     pub gpu_memory_bytes: u64,
+    pub disk_read_bytes: u64,
+    pub disk_write_bytes: u64,
+    pub disk_read_bytes_per_second: f64,
+    pub disk_write_bytes_per_second: f64,
+    pub open_file_disk_bytes: u64,
     pub energy_mwh: f64,
     pub battery_percent: f64,
     pub power_watts: f64,
@@ -50,6 +55,11 @@ pub struct ApplicationSummary {
     pub memory_bytes: u64,
     pub gpu_percent: f64,
     pub gpu_memory_bytes: u64,
+    pub disk_read_bytes: u64,
+    pub disk_write_bytes: u64,
+    pub disk_read_bytes_per_second: f64,
+    pub disk_write_bytes_per_second: f64,
+    pub open_file_disk_bytes: u64,
     pub energy_mwh: f64,
     pub battery_percent: f64,
     pub power_watts: f64,
@@ -80,6 +90,16 @@ pub struct ResourceHistoryPoint {
     pub gpu_percent: f64,
     #[serde(default)]
     pub gpu_memory_bytes: u64,
+    #[serde(default)]
+    pub disk_read_bytes: u64,
+    #[serde(default)]
+    pub disk_write_bytes: u64,
+    #[serde(default)]
+    pub disk_read_bytes_per_second: f64,
+    #[serde(default)]
+    pub disk_write_bytes_per_second: f64,
+    #[serde(default)]
+    pub open_file_disk_bytes: u64,
     pub energy_mwh: f64,
     pub battery_percent: f64,
     pub average_power_watts: f64,

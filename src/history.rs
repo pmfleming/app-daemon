@@ -22,6 +22,9 @@ struct PendingPoint {
     memory_weighted: f64,
     gpu_weighted: f64,
     gpu_memory_weighted: f64,
+    disk_read_bytes: u64,
+    disk_write_bytes: u64,
+    open_file_disk_weighted: f64,
     energy_mwh: f64,
     battery_percent: f64,
     energy_source: String,
@@ -38,6 +41,9 @@ impl PendingPoint {
         self.memory_weighted += usage.memory_bytes as f64 * duration_ms as f64;
         self.gpu_weighted += usage.gpu_percent * duration_ms as f64;
         self.gpu_memory_weighted += usage.gpu_memory_bytes as f64 * duration_ms as f64;
+        self.disk_read_bytes = self.disk_read_bytes.saturating_add(usage.disk_read_bytes);
+        self.disk_write_bytes = self.disk_write_bytes.saturating_add(usage.disk_write_bytes);
+        self.open_file_disk_weighted += usage.open_file_disk_bytes as f64 * duration_ms as f64;
         self.energy_mwh += usage.energy_mwh;
         self.battery_percent += usage.battery_percent;
         if usage.energy_source != "unavailable" {
@@ -58,6 +64,14 @@ impl PendingPoint {
             memory_bytes: (self.memory_weighted / duration).round() as u64,
             gpu_percent: rounded(self.gpu_weighted / duration, 1),
             gpu_memory_bytes: (self.gpu_memory_weighted / duration).round() as u64,
+            disk_read_bytes: self.disk_read_bytes,
+            disk_write_bytes: self.disk_write_bytes,
+            disk_read_bytes_per_second: rounded(self.disk_read_bytes as f64 * 1000.0 / duration, 1),
+            disk_write_bytes_per_second: rounded(
+                self.disk_write_bytes as f64 * 1000.0 / duration,
+                1,
+            ),
+            open_file_disk_bytes: (self.open_file_disk_weighted / duration).round() as u64,
             energy_mwh: rounded(self.energy_mwh, 4),
             battery_percent: rounded(self.battery_percent, 6),
             average_power_watts: rounded(self.energy_mwh * 3_600.0 / duration, 3),
@@ -248,6 +262,11 @@ mod tests {
             memory_bytes: 1024,
             gpu_percent: 25.0,
             gpu_memory_bytes: 2048,
+            disk_read_bytes: 100,
+            disk_write_bytes: 200,
+            disk_read_bytes_per_second: 20.0,
+            disk_write_bytes_per_second: 40.0,
+            open_file_disk_bytes: 4096,
             energy_mwh: 2.0,
             battery_percent: 0.004,
             power_watts: 3.6,
@@ -264,6 +283,11 @@ mod tests {
         assert_eq!(points[0].cpu_percent, 50.0);
         assert_eq!(points[0].gpu_percent, 25.0);
         assert_eq!(points[0].gpu_memory_bytes, 2048);
+        assert_eq!(points[0].disk_read_bytes, 300);
+        assert_eq!(points[0].disk_write_bytes, 600);
+        assert_eq!(points[0].disk_read_bytes_per_second, 20.0);
+        assert_eq!(points[0].disk_write_bytes_per_second, 40.0);
+        assert_eq!(points[0].open_file_disk_bytes, 4096);
         assert_eq!(points[0].energy_mwh, 6.0);
         store.save()?;
 
