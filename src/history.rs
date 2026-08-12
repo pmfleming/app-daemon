@@ -7,7 +7,9 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 
-use crate::{model::ResourceHistoryPoint, resources::ResourceUsage};
+use crate::model::{
+    ComputeUsage, HistoricalResourceUsage, ResourceHistoryPoint, ResourceUsage, StorageUsage,
+};
 
 const FILE_VERSION: u8 = 1;
 const BUCKET_MILLISECONDS: u64 = 15_000;
@@ -17,17 +19,27 @@ const RETENTION_MILLISECONDS: u64 = 24 * 60 * 60 * 1000;
 struct PendingPoint {
     timestamp_ms: u64,
     duration_ms: u64,
-    cpu_weighted: f64,
-    machine_cpu_weighted: f64,
-    memory_weighted: f64,
-    gpu_weighted: f64,
-    gpu_memory_weighted: f64,
-    disk_read_bytes: u64,
-    disk_write_bytes: u64,
-    open_file_disk_weighted: f64,
+    compute: WeightedCompute,
+    storage: WeightedStorage,
     energy_mwh: f64,
     battery_percent: f64,
     energy_source: String,
+}
+
+#[derive(Debug, Default)]
+struct WeightedCompute {
+    cpu: f64,
+    machine_cpu: f64,
+    memory: f64,
+    gpu: f64,
+    gpu_memory: f64,
+}
+
+#[derive(Debug, Default)]
+struct WeightedStorage {
+    read_bytes: u64,
+    write_bytes: u64,
+    open_file_bytes: f64,
 }
 
 impl PendingPoint {
@@ -36,18 +48,12 @@ impl PendingPoint {
             self.timestamp_ms = timestamp_ms.saturating_sub(duration_ms);
         }
         self.duration_ms = self.duration_ms.saturating_add(duration_ms);
-        self.cpu_weighted += usage.cpu_percent * duration_ms as f64;
-        self.machine_cpu_weighted += usage.cpu_percent_of_machine * duration_ms as f64;
-        self.memory_weighted += usage.memory_bytes as f64 * duration_ms as f64;
-        self.gpu_weighted += usage.gpu_percent * duration_ms as f64;
-        self.gpu_memory_weighted += usage.gpu_memory_bytes as f64 * duration_ms as f64;
-        self.disk_read_bytes = self.disk_read_bytes.saturating_add(usage.disk_read_bytes);
-        self.disk_write_bytes = self.disk_write_bytes.saturating_add(usage.disk_write_bytes);
-        self.open_file_disk_weighted += usage.open_file_disk_bytes as f64 * duration_ms as f64;
-        self.energy_mwh += usage.energy_mwh;
-        self.battery_percent += usage.battery_percent;
-        if usage.energy_source != "unavailable" {
-            self.energy_source.clone_from(&usage.energy_source);
+        self.compute.add(duration_ms, &usage.compute);
+        self.storage.add(duration_ms, &usage.storage);
+        self.energy_mwh += usage.energy.energy_mwh;
+        self.battery_percent += usage.energy.battery_percent;
+        if usage.energy.energy_source != "unavailable" {
+            self.energy_source.clone_from(&usage.energy.energy_source);
         }
     }
 
@@ -59,28 +65,62 @@ impl PendingPoint {
         Some(ResourceHistoryPoint {
             timestamp_ms: self.timestamp_ms.saturating_add(self.duration_ms),
             duration_ms: self.duration_ms,
-            cpu_percent: rounded(self.cpu_weighted / duration, 1),
-            cpu_percent_of_machine: rounded(self.machine_cpu_weighted / duration, 1),
-            memory_bytes: (self.memory_weighted / duration).round() as u64,
-            gpu_percent: rounded(self.gpu_weighted / duration, 1),
-            gpu_memory_bytes: (self.gpu_memory_weighted / duration).round() as u64,
-            disk_read_bytes: self.disk_read_bytes,
-            disk_write_bytes: self.disk_write_bytes,
-            disk_read_bytes_per_second: rounded(self.disk_read_bytes as f64 * 1000.0 / duration, 1),
-            disk_write_bytes_per_second: rounded(
-                self.disk_write_bytes as f64 * 1000.0 / duration,
-                1,
-            ),
-            open_file_disk_bytes: (self.open_file_disk_weighted / duration).round() as u64,
-            energy_mwh: rounded(self.energy_mwh, 4),
-            battery_percent: rounded(self.battery_percent, 6),
-            average_power_watts: rounded(self.energy_mwh * 3_600.0 / duration, 3),
-            energy_source: if self.energy_source.is_empty() {
-                "unavailable".into()
-            } else {
-                self.energy_source
+            resources: HistoricalResourceUsage {
+                compute: self.compute.finish(duration),
+                storage: self.storage.finish(duration),
+                energy_mwh: rounded(self.energy_mwh, 4),
+                battery_percent: rounded(self.battery_percent, 6),
+                average_power_watts: rounded(self.energy_mwh * 3_600.0 / duration, 3),
+                energy_source: available_source(self.energy_source),
             },
         })
+    }
+}
+
+impl WeightedCompute {
+    fn add(&mut self, duration_ms: u64, usage: &ComputeUsage) {
+        let weight = duration_ms as f64;
+        self.cpu += usage.cpu_percent * weight;
+        self.machine_cpu += usage.cpu_percent_of_machine * weight;
+        self.memory += usage.memory_bytes as f64 * weight;
+        self.gpu += usage.gpu_percent * weight;
+        self.gpu_memory += usage.gpu_memory_bytes as f64 * weight;
+    }
+
+    fn finish(self, duration: f64) -> ComputeUsage {
+        ComputeUsage {
+            cpu_percent: rounded(self.cpu / duration, 1),
+            cpu_percent_of_machine: rounded(self.machine_cpu / duration, 1),
+            memory_bytes: (self.memory / duration).round() as u64,
+            gpu_percent: rounded(self.gpu / duration, 1),
+            gpu_memory_bytes: (self.gpu_memory / duration).round() as u64,
+        }
+    }
+}
+
+impl WeightedStorage {
+    fn add(&mut self, duration_ms: u64, usage: &StorageUsage) {
+        self.read_bytes = self.read_bytes.saturating_add(usage.disk_read_bytes);
+        self.write_bytes = self.write_bytes.saturating_add(usage.disk_write_bytes);
+        self.open_file_bytes += usage.open_file_disk_bytes as f64 * duration_ms as f64;
+    }
+
+    fn finish(self, duration: f64) -> StorageUsage {
+        StorageUsage {
+            disk_read_bytes: self.read_bytes,
+            disk_write_bytes: self.write_bytes,
+            disk_read_bytes_per_second: rounded(self.read_bytes as f64 * 1000.0 / duration, 1),
+            disk_write_bytes_per_second: rounded(self.write_bytes as f64 * 1000.0 / duration, 1),
+            open_file_disk_bytes: (self.open_file_bytes / duration).round() as u64,
+        }
+    }
+}
+
+fn available_source(source: String) -> String {
+    if source.is_empty() {
+        "unavailable".into()
+    } else {
+        source
     }
 }
 
@@ -249,7 +289,7 @@ fn rounded(value: f64, decimals: i32) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::HistoryStore;
-    use crate::resources::ResourceUsage;
+    use crate::model::{ComputeUsage, EnergyUsage, ResourceUsage, StorageUsage};
 
     #[test]
     fn aggregates_and_persists_resource_buckets() -> anyhow::Result<()> {
@@ -257,21 +297,27 @@ mod tests {
         let path = directory.path().join("history.json");
         let mut store = HistoryStore::load(Some(path.clone()));
         let usage = ResourceUsage {
-            cpu_percent: 50.0,
-            cpu_percent_of_machine: 12.5,
-            memory_bytes: 1024,
-            gpu_percent: 25.0,
-            gpu_memory_bytes: 2048,
-            disk_read_bytes: 100,
-            disk_write_bytes: 200,
-            disk_read_bytes_per_second: 20.0,
-            disk_write_bytes_per_second: 40.0,
-            open_file_disk_bytes: 4096,
-            energy_mwh: 2.0,
-            battery_percent: 0.004,
-            power_watts: 3.6,
-            battery_percent_per_hour: 7.2,
-            energy_source: "rapl".into(),
+            compute: ComputeUsage {
+                cpu_percent: 50.0,
+                cpu_percent_of_machine: 12.5,
+                memory_bytes: 1024,
+                gpu_percent: 25.0,
+                gpu_memory_bytes: 2048,
+            },
+            storage: StorageUsage {
+                disk_read_bytes: 100,
+                disk_write_bytes: 200,
+                disk_read_bytes_per_second: 20.0,
+                disk_write_bytes_per_second: 40.0,
+                open_file_disk_bytes: 4096,
+            },
+            energy: EnergyUsage {
+                energy_mwh: 2.0,
+                battery_percent: 0.004,
+                power_watts: 3.6,
+                battery_percent_per_hour: 7.2,
+                energy_source: "rapl".into(),
+            },
         };
         let now = super::now_milliseconds();
         for timestamp in [now - 10_000, now - 5_000, now] {
@@ -280,15 +326,16 @@ mod tests {
         let (points, more) = store.query("example.desktop", None, 10);
         assert!(!more);
         assert_eq!(points.len(), 1);
-        assert_eq!(points[0].cpu_percent, 50.0);
-        assert_eq!(points[0].gpu_percent, 25.0);
-        assert_eq!(points[0].gpu_memory_bytes, 2048);
-        assert_eq!(points[0].disk_read_bytes, 300);
-        assert_eq!(points[0].disk_write_bytes, 600);
-        assert_eq!(points[0].disk_read_bytes_per_second, 20.0);
-        assert_eq!(points[0].disk_write_bytes_per_second, 40.0);
-        assert_eq!(points[0].open_file_disk_bytes, 4096);
-        assert_eq!(points[0].energy_mwh, 6.0);
+        let point = &points[0].resources;
+        assert_eq!(point.compute.cpu_percent, 50.0);
+        assert_eq!(point.compute.gpu_percent, 25.0);
+        assert_eq!(point.compute.gpu_memory_bytes, 2048);
+        assert_eq!(point.storage.disk_read_bytes, 300);
+        assert_eq!(point.storage.disk_write_bytes, 600);
+        assert_eq!(point.storage.disk_read_bytes_per_second, 20.0);
+        assert_eq!(point.storage.disk_write_bytes_per_second, 40.0);
+        assert_eq!(point.storage.open_file_disk_bytes, 4096);
+        assert_eq!(point.energy_mwh, 6.0);
         store.save()?;
 
         let loaded = HistoryStore::load(Some(path));

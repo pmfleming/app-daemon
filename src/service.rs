@@ -20,9 +20,9 @@ use crate::{
     hyprland::{self, Client, Snapshot},
     model::{
         ApplicationPage, ApplicationResourceHistory, ApplicationSummary, OperationResult,
-        WindowSummary,
+        ResourceUsage, WindowSummary,
     },
-    resources::{ResourceSampler, ResourceSnapshot, ResourceUsage},
+    resources::{ResourceSampler, ResourceSnapshot},
 };
 
 pub struct ApplicationService {
@@ -111,37 +111,37 @@ async fn track_resources(service: std::sync::Weak<ApplicationService>) {
         let Some(service) = service.upgrade() else {
             return;
         };
-        let windows = Snapshot::load().await;
-        let catalog = Arc::clone(&*service.catalog.read().await);
-        let timestamp_ms = now_milliseconds();
-        let mut roots: HashMap<String, Vec<u32>> = HashMap::new();
-        for window in &windows.clients {
-            roots
-                .entry(resolve_target(&catalog, window))
-                .or_default()
-                .push(window.pid);
+        sample_resources(&service, &mut sampler).await;
+        if last_save.elapsed() >= HISTORY_SAVE_INTERVAL {
+            service.save_history().await;
+            last_save = Instant::now();
         }
-        let snapshot = sampler.sample_for_roots(roots.values().flatten().copied());
-        {
-            let mut history = service.history.lock().await;
-            for (target_id, pids) in roots {
-                let usage = snapshot.usage_for_roots(pids);
-                history.record(
-                    &target_id,
-                    timestamp_ms,
-                    snapshot.interval_seconds(),
-                    &usage,
-                );
-            }
-            if last_save.elapsed() >= HISTORY_SAVE_INTERVAL {
-                if let Err(error) = history.save() {
-                    tracing::warn!(%error, "resource history could not be saved");
-                }
-                last_save = Instant::now();
-            }
-        }
-        *service.resources.write().await = snapshot;
     }
+}
+
+async fn sample_resources(service: &ApplicationService, sampler: &mut ResourceSampler) {
+    let windows = Snapshot::load().await;
+    let catalog = Arc::clone(&*service.catalog.read().await);
+    let mut roots: HashMap<String, Vec<u32>> = HashMap::new();
+    for window in &windows.clients {
+        roots
+            .entry(resolve_target(&catalog, window))
+            .or_default()
+            .push(window.pid);
+    }
+    let snapshot = sampler.sample_for_roots(roots.values().flatten().copied());
+    let mut history = service.history.lock().await;
+    for (target_id, pids) in roots {
+        let usage = snapshot.usage_for_roots(pids);
+        history.record(
+            &target_id,
+            now_milliseconds(),
+            snapshot.interval_seconds(),
+            &usage,
+        );
+    }
+    drop(history);
+    *service.resources.write().await = snapshot;
 }
 
 async fn execute_action(
@@ -421,21 +421,7 @@ fn instances(clients: &[Client], resources: &ResourceSnapshot) -> Vec<WindowSumm
                 workspace_name: window.workspace.name.clone(),
                 focused: window.focus_rank == 0,
                 focus_rank: window.focus_rank,
-                cpu_percent: usage.cpu_percent,
-                cpu_percent_of_machine: usage.cpu_percent_of_machine,
-                memory_bytes: usage.memory_bytes,
-                gpu_percent: usage.gpu_percent,
-                gpu_memory_bytes: usage.gpu_memory_bytes,
-                disk_read_bytes: usage.disk_read_bytes,
-                disk_write_bytes: usage.disk_write_bytes,
-                disk_read_bytes_per_second: usage.disk_read_bytes_per_second,
-                disk_write_bytes_per_second: usage.disk_write_bytes_per_second,
-                open_file_disk_bytes: usage.open_file_disk_bytes,
-                energy_mwh: usage.energy_mwh,
-                battery_percent: usage.battery_percent,
-                power_watts: usage.power_watts,
-                battery_percent_per_hour: usage.battery_percent_per_hour,
-                energy_source: usage.energy_source,
+                resources: usage,
             }
         })
         .collect()
@@ -478,21 +464,7 @@ fn summary_for_entry(
         running,
         focused,
         running_count: instances.len(),
-        cpu_percent: usage.cpu_percent,
-        cpu_percent_of_machine: usage.cpu_percent_of_machine,
-        memory_bytes: usage.memory_bytes,
-        gpu_percent: usage.gpu_percent,
-        gpu_memory_bytes: usage.gpu_memory_bytes,
-        disk_read_bytes: usage.disk_read_bytes,
-        disk_write_bytes: usage.disk_write_bytes,
-        disk_read_bytes_per_second: usage.disk_read_bytes_per_second,
-        disk_write_bytes_per_second: usage.disk_write_bytes_per_second,
-        open_file_disk_bytes: usage.open_file_disk_bytes,
-        energy_mwh: usage.energy_mwh,
-        battery_percent: usage.battery_percent,
-        power_watts: usage.power_watts,
-        battery_percent_per_hour: usage.battery_percent_per_hour,
-        energy_source: usage.energy_source,
+        resources: usage,
         instances,
         desktop_actions: entry.actions.clone(),
         score: running_score(focused, best_rank),
@@ -528,21 +500,7 @@ fn summary_for_unmatched(
         running: true,
         focused,
         running_count: instances.len(),
-        cpu_percent: usage.cpu_percent,
-        cpu_percent_of_machine: usage.cpu_percent_of_machine,
-        memory_bytes: usage.memory_bytes,
-        gpu_percent: usage.gpu_percent,
-        gpu_memory_bytes: usage.gpu_memory_bytes,
-        disk_read_bytes: usage.disk_read_bytes,
-        disk_write_bytes: usage.disk_write_bytes,
-        disk_read_bytes_per_second: usage.disk_read_bytes_per_second,
-        disk_write_bytes_per_second: usage.disk_write_bytes_per_second,
-        open_file_disk_bytes: usage.open_file_disk_bytes,
-        energy_mwh: usage.energy_mwh,
-        battery_percent: usage.battery_percent,
-        power_watts: usage.power_watts,
-        battery_percent_per_hour: usage.battery_percent_per_hour,
-        energy_source: usage.energy_source,
+        resources: usage,
         instances,
         desktop_actions: Vec::new(),
         score: running_score(focused, best_rank),

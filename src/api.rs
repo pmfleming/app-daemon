@@ -25,45 +25,45 @@ impl ApiService {
 
     pub async fn dispatch(&self, method: &str, params: Value) -> Value {
         tracing::debug!(%method, "app-api request started");
-        let result = match method {
-            "applications.query" => Ok(
-                json!({ "applications": self.applications.query(match decode(params) { Ok(value) => value, Err(error) => return error_response(error) }).await }),
-            ),
-            "applications.history" => {
-                let query: ResourceHistoryParams = match decode(params) {
-                    Ok(value) => value,
-                    Err(error) => return error_response(error),
-                };
-                Ok(json!({ "history": self.applications.resource_history(query).await }))
-            }
-            "applications.refresh" => {
-                let query = match decode(params) {
-                    Ok(value) => value,
-                    Err(error) => return error_response(error),
-                };
-                self.applications.refresh().await;
-                Ok(json!({ "applications": self.applications.query(query).await }))
-            }
-            "applications.execute" => {
-                let execute: ExecuteParams = match decode(params) {
-                    Ok(value) => value,
-                    Err(error) => return error_response(error),
-                };
-                self.applications
-                    .execute(execute)
-                    .await
-                    .map(|operation| json!({ "operation": operation }))
-                    .map_err(|error| ("operation-failed", error.to_string()))
-            }
+        self.request(method, params)
+            .await
+            .map_or_else(error_response, success)
+    }
+
+    async fn request(&self, method: &str, params: Value) -> Result<Value, ApiError> {
+        match method {
+            "applications.query" => self.query(params).await,
+            "applications.history" => self.history(params).await,
+            "applications.refresh" => self.refresh(params).await,
+            "applications.execute" => self.execute(params).await,
             _ => Err((
                 "unsupported-method",
                 format!("Unsupported app-api method: {method}"),
             )),
-        };
-        match result {
-            Ok(data) => success(data),
-            Err(error) => error_response(error),
         }
+    }
+
+    async fn query(&self, params: Value) -> Result<Value, ApiError> {
+        Ok(json!({ "applications": self.applications.query(decode(params)?).await }))
+    }
+
+    async fn history(&self, params: Value) -> Result<Value, ApiError> {
+        let query: ResourceHistoryParams = decode(params)?;
+        Ok(json!({ "history": self.applications.resource_history(query).await }))
+    }
+
+    async fn refresh(&self, params: Value) -> Result<Value, ApiError> {
+        let query = decode(params)?;
+        self.applications.refresh().await;
+        Ok(json!({ "applications": self.applications.query(query).await }))
+    }
+
+    async fn execute(&self, params: Value) -> Result<Value, ApiError> {
+        self.applications
+            .execute(decode::<ExecuteParams>(params)?)
+            .await
+            .map(|operation| json!({ "operation": operation }))
+            .map_err(|error| ("operation-failed", error.to_string()))
     }
 }
 

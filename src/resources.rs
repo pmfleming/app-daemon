@@ -6,32 +6,7 @@ use std::{
     time::Instant,
 };
 
-#[derive(Debug, Clone, Default, PartialEq)]
-pub struct ResourceUsage {
-    /// Top-compatible CPU usage: 100% is one fully occupied logical CPU.
-    pub cpu_percent: f64,
-    /// CPU usage as a percentage of the whole machine, always capped at 100%.
-    pub cpu_percent_of_machine: f64,
-    pub memory_bytes: u64,
-    /// DRM engine time: 100% is one fully occupied GPU engine.
-    pub gpu_percent: f64,
-    /// Resident GPU memory reported by DRM, falling back to allocated memory.
-    pub gpu_memory_bytes: u64,
-    /// Actual storage I/O completed by the process tree during this sample.
-    pub disk_read_bytes: u64,
-    pub disk_write_bytes: u64,
-    pub disk_read_bytes_per_second: f64,
-    pub disk_write_bytes_per_second: f64,
-    /// Allocated size of unique regular files currently open by the process tree.
-    pub open_file_disk_bytes: u64,
-    /// Estimated energy attributed to the process tree during this sample.
-    pub energy_mwh: f64,
-    /// The energy estimate expressed as a percentage of full battery capacity.
-    pub battery_percent: f64,
-    pub power_watts: f64,
-    pub battery_percent_per_hour: f64,
-    pub energy_source: String,
-}
+use crate::model::{ComputeUsage, EnergyUsage, ResourceUsage, StorageUsage};
 
 #[derive(Debug, Clone, Copy)]
 struct ProcessStat {
@@ -113,79 +88,92 @@ impl Default for ResourceSnapshot {
 
 impl ResourceSnapshot {
     pub fn usage_for_roots(&self, roots: impl IntoIterator<Item = u32>) -> ResourceUsage {
-        let mut pending = roots.into_iter().filter(|pid| *pid > 0).collect::<Vec<_>>();
-        let mut included = HashSet::new();
-        while let Some(pid) = pending.pop() {
-            if !included.insert(pid) {
-                continue;
-            }
-            if let Some(children) = self.children.get(&pid) {
-                pending.extend(children);
-            }
-        }
-
+        let pids = descendants(roots, &self.children);
         let mut usage = ResourceUsage::default();
         let mut open_files = HashMap::new();
-        for pid in included {
-            if let Some(process) = self.processes.get(&pid) {
-                usage.cpu_percent += process.cpu_percent;
-                usage.memory_bytes = usage.memory_bytes.saturating_add(process.memory_bytes);
-                usage.gpu_percent += process.gpu_percent;
-                usage.gpu_memory_bytes = usage
-                    .gpu_memory_bytes
-                    .saturating_add(process.gpu_memory_bytes);
-                usage.disk_read_bytes = usage
-                    .disk_read_bytes
-                    .saturating_add(process.disk_read_bytes);
-                usage.disk_write_bytes = usage
-                    .disk_write_bytes
-                    .saturating_add(process.disk_write_bytes);
-                for (&file, &bytes) in &process.open_files {
-                    open_files.entry(file).or_insert(bytes);
-                }
-            }
-        }
-        usage.open_file_disk_bytes = open_files.values().copied().sum();
-        if self.interval_seconds > 0.0 {
-            usage.disk_read_bytes_per_second =
-                rounded(usage.disk_read_bytes as f64 / self.interval_seconds, 1);
-            usage.disk_write_bytes_per_second =
-                rounded(usage.disk_write_bytes as f64 / self.interval_seconds, 1);
-        }
-
-        let raw_cpu = usage.cpu_percent.max(0.0);
-        usage.cpu_percent = rounded(raw_cpu, 1);
-        usage.cpu_percent_of_machine = rounded(
-            (raw_cpu / self.logical_cpus.max(1) as f64).clamp(0.0, 100.0),
-            1,
-        );
-        let raw_gpu = usage.gpu_percent.max(0.0);
-        usage.gpu_percent = rounded(raw_gpu, 1);
-        let total_activity = self.total_process_cpu_percent + self.total_process_gpu_percent;
-        let share = if total_activity > 0.0 {
-            ((raw_cpu + raw_gpu) / total_activity).clamp(0.0, 1.0)
-        } else {
-            0.0
-        };
-        usage.energy_mwh = rounded(self.system_energy_mwh * share, 4);
-        usage.power_watts = if self.interval_seconds > 0.0 {
-            rounded(usage.energy_mwh * 3.6 / self.interval_seconds, 3)
-        } else {
-            0.0
-        };
-        if self.battery_full_mwh > 0.0 {
-            usage.battery_percent = rounded(usage.energy_mwh / self.battery_full_mwh * 100.0, 6);
-            usage.battery_percent_per_hour = rounded(
-                usage.power_watts / (self.battery_full_mwh / 1000.0) * 100.0,
-                4,
+        for process in pids.iter().filter_map(|pid| self.processes.get(pid)) {
+            usage.add_process(process);
+            open_files.extend(
+                process
+                    .open_files
+                    .iter()
+                    .map(|(&file, &bytes)| (file, bytes)),
             );
         }
-        usage.energy_source = self.energy_source.clone();
+        usage.storage.open_file_disk_bytes = open_files.values().copied().sum();
+        self.complete(usage)
+    }
+
+    fn complete(&self, mut usage: ResourceUsage) -> ResourceUsage {
+        usage.compute.normalize_cpu(self.logical_cpus);
+        usage.storage.normalize_rates(self.interval_seconds);
+        let activity = usage.compute.cpu_percent + usage.compute.gpu_percent;
+        let total = self.total_process_cpu_percent + self.total_process_gpu_percent;
+        usage.energy = self.estimated_energy(activity, total);
         usage
+    }
+
+    fn estimated_energy(&self, activity: f64, total: f64) -> EnergyUsage {
+        let share = if total > 0.0 {
+            (activity / total).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        let energy_mwh = rounded(self.system_energy_mwh * share, 4);
+        let power_watts = rate(energy_mwh * 3.6, self.interval_seconds, 3);
+        let battery_percent = rate(energy_mwh * 100.0, self.battery_full_mwh, 6);
+        let battery_percent_per_hour = rate(power_watts * 100_000.0, self.battery_full_mwh, 4);
+        EnergyUsage {
+            energy_mwh,
+            battery_percent,
+            power_watts,
+            battery_percent_per_hour,
+            energy_source: self.energy_source.clone(),
+        }
     }
 
     pub fn interval_seconds(&self) -> f64 {
         self.interval_seconds
+    }
+}
+
+impl ResourceUsage {
+    fn add_process(&mut self, process: &ProcessUsage) {
+        self.compute.cpu_percent += process.cpu_percent;
+        self.compute.memory_bytes = self
+            .compute
+            .memory_bytes
+            .saturating_add(process.memory_bytes);
+        self.compute.gpu_percent += process.gpu_percent;
+        self.compute.gpu_memory_bytes = self
+            .compute
+            .gpu_memory_bytes
+            .saturating_add(process.gpu_memory_bytes);
+        self.storage.disk_read_bytes = self
+            .storage
+            .disk_read_bytes
+            .saturating_add(process.disk_read_bytes);
+        self.storage.disk_write_bytes = self
+            .storage
+            .disk_write_bytes
+            .saturating_add(process.disk_write_bytes);
+    }
+}
+
+impl ComputeUsage {
+    fn normalize_cpu(&mut self, logical_cpus: usize) {
+        let raw_cpu = self.cpu_percent.max(0.0);
+        self.cpu_percent = rounded(raw_cpu, 1);
+        self.cpu_percent_of_machine =
+            rounded((raw_cpu / logical_cpus.max(1) as f64).clamp(0.0, 100.0), 1);
+        self.gpu_percent = rounded(self.gpu_percent, 1);
+    }
+}
+
+impl StorageUsage {
+    fn normalize_rates(&mut self, seconds: f64) {
+        self.disk_read_bytes_per_second = rate(self.disk_read_bytes as f64, seconds, 1);
+        self.disk_write_bytes_per_second = rate(self.disk_write_bytes as f64, seconds, 1);
     }
 }
 
@@ -195,45 +183,42 @@ struct EnergySampler {
 }
 
 impl EnergySampler {
-    fn sample(&mut self, interval_seconds: f64) -> EnergySample {
+    fn sample(&mut self, seconds: f64) -> EnergySample {
         let battery = read_batteries();
-        let current = read_rapl_zones();
-        let mut rapl_uj = 0_u64;
-        let mut matched = false;
-        for (path, &(value, maximum)) in &current {
-            let Some(&(previous, _)) = self.previous_rapl.get(path) else {
-                continue;
-            };
-            matched = true;
-            let delta = if value >= previous {
-                value - previous
-            } else if maximum > previous {
-                maximum - previous + value
-            } else {
-                0
-            };
-            rapl_uj = rapl_uj.saturating_add(delta);
-        }
-        self.previous_rapl = current;
-
-        if matched && rapl_uj > 0 {
-            return EnergySample {
-                energy_mwh: rapl_uj as f64 / 3_600_000.0,
-                battery_full_mwh: battery.full_mwh,
-                source: "rapl".into(),
-            };
-        }
-        if battery.discharge_watts > 0.0 && interval_seconds > 0.0 {
-            return EnergySample {
-                energy_mwh: battery.discharge_watts * interval_seconds / 3.6,
-                battery_full_mwh: battery.full_mwh,
-                source: "battery".into(),
-            };
-        }
+        let rapl_mwh = self.rapl_energy_mwh();
+        let (energy_mwh, source) = if rapl_mwh > 0.0 {
+            (rapl_mwh, "rapl")
+        } else if battery.discharge_watts > 0.0 && seconds > 0.0 {
+            (battery.discharge_watts * seconds / 3.6, "battery")
+        } else {
+            (0.0, "unavailable")
+        };
         EnergySample {
+            energy_mwh,
             battery_full_mwh: battery.full_mwh,
-            ..EnergySample::default()
+            source: source.into(),
         }
+    }
+
+    fn rapl_energy_mwh(&mut self) -> f64 {
+        let current = read_rapl_zones();
+        let microjoules = current
+            .iter()
+            .filter_map(|(path, &(value, maximum))| {
+                let &(previous, _) = self.previous_rapl.get(path)?;
+                Some(counter_delta(previous, value, maximum))
+            })
+            .sum::<u64>();
+        self.previous_rapl = current;
+        microjoules as f64 / 3_600_000.0
+    }
+}
+
+fn counter_delta(previous: u64, current: u64, maximum: u64) -> u64 {
+    if current >= previous {
+        current - previous
+    } else {
+        maximum.saturating_sub(previous).saturating_add(current)
     }
 }
 
@@ -260,10 +245,6 @@ pub struct ResourceSampler {
 }
 
 impl ResourceSampler {
-    pub fn sample(&mut self) -> ResourceSnapshot {
-        self.sample_for_roots(std::iter::empty())
-    }
-
     pub fn sample_for_roots(
         &mut self,
         active_roots: impl IntoIterator<Item = u32>,
@@ -283,7 +264,7 @@ impl ResourceSampler {
         let process_children = process_children(&current);
         let active_processes = descendants(active_roots, &process_children);
         let current_gpu = read_gpu_processes(&active_processes);
-        let current_open_files = read_open_files(&active_processes);
+        let mut current_open_files = read_open_files(&active_processes);
         let energy = self.energy.sample(interval_seconds);
         let mut snapshot = ResourceSnapshot {
             logical_cpus,
@@ -300,59 +281,17 @@ impl ResourceSampler {
 
         let mut next_gpu_engines = HashMap::new();
         for (&pid, process) in &current {
-            let cpu_percent = system_delta
-                .and_then(|total_delta| {
-                    let previous = self.previous_processes.get(&pid)?;
-                    (previous.start_ticks == process.start_ticks).then(|| {
-                        process.total_ticks.saturating_sub(previous.total_ticks) as f64
-                            / total_delta as f64
-                            * logical_cpus as f64
-                            * 100.0
-                    })
-                })
-                .map(finite_nonnegative)
-                .unwrap_or(0.0);
-            let previous = self
-                .previous_processes
-                .get(&pid)
-                .filter(|previous| previous.start_ticks == process.start_ticks);
-            let disk_read_bytes = previous
-                .map(|previous| {
-                    process
-                        .disk_read_bytes
-                        .saturating_sub(previous.disk_read_bytes)
-                })
-                .unwrap_or(0);
-            let disk_write_bytes = previous
-                .map(|previous| {
-                    process
-                        .disk_write_bytes
-                        .saturating_sub(previous.disk_write_bytes)
-                })
-                .unwrap_or(0);
+            let cpu_percent = self.cpu_percent(pid, process, system_delta, logical_cpus);
+            let (disk_read_bytes, disk_write_bytes) = self.disk_delta(pid, process);
             let gpu = current_gpu.get(&pid);
-            let gpu_percent = gpu
-                .map(|gpu| {
-                    gpu.engine_nanoseconds
-                        .iter()
-                        .map(|(engine, &nanoseconds)| {
-                            let key = (pid, process.start_ticks, engine.clone());
-                            let previous = self.previous_gpu_engines.get(&key).copied();
-                            next_gpu_engines.insert(key, nanoseconds);
-                            previous
-                                .map(|previous| nanoseconds.saturating_sub(previous))
-                                .unwrap_or(0)
-                        })
-                        .sum::<u64>() as f64
-                        / (interval_seconds * 1_000_000_000.0)
-                        * 100.0
-                })
-                .filter(|_| interval_seconds > 0.0)
-                .map(finite_nonnegative)
-                .unwrap_or(0.0);
-            snapshot.total_process_cpu_percent += cpu_percent;
-            snapshot.total_process_gpu_percent += gpu_percent;
-            snapshot.processes.insert(
+            let gpu_percent = self.gpu_percent(
+                pid,
+                process.start_ticks,
+                gpu,
+                interval_seconds,
+                &mut next_gpu_engines,
+            );
+            snapshot.insert(
                 pid,
                 ProcessUsage {
                     parent_pid: process.parent_pid,
@@ -362,36 +301,111 @@ impl ResourceSampler {
                     gpu_memory_bytes: gpu.map_or(0, |gpu| gpu.memory_bytes),
                     disk_read_bytes,
                     disk_write_bytes,
-                    open_files: current_open_files.get(&pid).cloned().unwrap_or_default(),
+                    open_files: current_open_files.remove(&pid).unwrap_or_default(),
                 },
             );
         }
-        for (&pid, process) in &snapshot.processes {
-            snapshot
-                .children
-                .entry(process.parent_pid)
-                .or_default()
-                .push(pid);
-        }
+        self.remember(current, next_gpu_engines, system_ticks, now);
+        snapshot
+    }
 
+    fn cpu_percent(
+        &self,
+        pid: u32,
+        process: &ProcessStat,
+        system_delta: Option<u64>,
+        logical_cpus: usize,
+    ) -> f64 {
+        let Some((previous, total_delta)) = self.previous(pid, process).zip(system_delta) else {
+            return 0.0;
+        };
+        finite_nonnegative(
+            process.total_ticks.saturating_sub(previous.total_ticks) as f64 / total_delta as f64
+                * logical_cpus as f64
+                * 100.0,
+        )
+    }
+
+    fn disk_delta(&self, pid: u32, process: &ProcessStat) -> (u64, u64) {
+        self.previous(pid, process).map_or((0, 0), |previous| {
+            (
+                process
+                    .disk_read_bytes
+                    .saturating_sub(previous.disk_read_bytes),
+                process
+                    .disk_write_bytes
+                    .saturating_sub(previous.disk_write_bytes),
+            )
+        })
+    }
+
+    fn previous(&self, pid: u32, process: &ProcessStat) -> Option<&PreviousProcess> {
+        self.previous_processes
+            .get(&pid)
+            .filter(|previous| previous.start_ticks == process.start_ticks)
+    }
+
+    fn gpu_percent(
+        &self,
+        pid: u32,
+        start_ticks: u64,
+        gpu: Option<&GpuProcessStat>,
+        seconds: f64,
+        next: &mut HashMap<(u32, u64, String), u64>,
+    ) -> f64 {
+        let Some(gpu) = gpu.filter(|_| seconds > 0.0) else {
+            return 0.0;
+        };
+        let elapsed = gpu
+            .engine_nanoseconds
+            .iter()
+            .map(|(engine, &nanoseconds)| {
+                let key = (pid, start_ticks, engine.clone());
+                let previous = self.previous_gpu_engines.get(&key).copied();
+                next.insert(key, nanoseconds);
+                previous.map_or(0, |value| nanoseconds.saturating_sub(value))
+            })
+            .sum::<u64>();
+        finite_nonnegative(elapsed as f64 / (seconds * 1_000_000_000.0) * 100.0)
+    }
+
+    fn remember(
+        &mut self,
+        current: HashMap<u32, ProcessStat>,
+        gpu_engines: HashMap<(u32, u64, String), u64>,
+        system_ticks: u64,
+        now: Instant,
+    ) {
         self.previous_processes = current
             .into_iter()
-            .map(|(pid, process)| {
-                (
-                    pid,
-                    PreviousProcess {
-                        total_ticks: process.total_ticks,
-                        start_ticks: process.start_ticks,
-                        disk_read_bytes: process.disk_read_bytes,
-                        disk_write_bytes: process.disk_write_bytes,
-                    },
-                )
-            })
+            .map(|(pid, process)| (pid, process.into()))
             .collect();
-        self.previous_gpu_engines = next_gpu_engines;
+        self.previous_gpu_engines = gpu_engines;
         self.previous_system_ticks = Some(system_ticks);
         self.previous_sample = Some(now);
-        snapshot
+    }
+}
+
+impl From<ProcessStat> for PreviousProcess {
+    fn from(process: ProcessStat) -> Self {
+        Self {
+            total_ticks: process.total_ticks,
+            start_ticks: process.start_ticks,
+            disk_read_bytes: process.disk_read_bytes,
+            disk_write_bytes: process.disk_write_bytes,
+        }
+    }
+}
+
+impl ResourceSnapshot {
+    fn insert(&mut self, pid: u32, process: ProcessUsage) {
+        self.total_process_cpu_percent += process.cpu_percent;
+        self.total_process_gpu_percent += process.gpu_percent;
+        self.children
+            .entry(process.parent_pid)
+            .or_default()
+            .push(pid);
+        self.processes.insert(pid, process);
     }
 }
 
@@ -471,81 +485,123 @@ fn read_gpu_processes(pids: &HashSet<u32>) -> HashMap<u32, GpuProcessStat> {
 
 fn read_gpu_process(pid: u32) -> Option<GpuProcessStat> {
     let entries = fs::read_dir(format!("/proc/{pid}/fdinfo")).ok()?;
-    let mut clients: HashMap<String, GpuClientStat> = HashMap::new();
-    for fdinfo in entries.filter_map(Result::ok) {
-        let Ok(value) = fs::read_to_string(fdinfo.path()) else {
-            continue;
-        };
-        let Some((id, client)) = parse_gpu_fdinfo(&value) else {
-            continue;
-        };
-        let target = clients.entry(id).or_default();
-        merge_max(&mut target.engine_nanoseconds, client.engine_nanoseconds);
-        merge_max(&mut target.resident_regions, client.resident_regions);
-        merge_max(&mut target.allocated_regions, client.allocated_regions);
-    }
-    if clients.is_empty() {
-        return None;
-    }
+    let clients = entries
+        .filter_map(Result::ok)
+        .filter_map(|entry| fs::read_to_string(entry.path()).ok())
+        .filter_map(|value| parse_gpu_fdinfo(&value))
+        .fold(
+            HashMap::<String, GpuClientStat>::new(),
+            |mut clients, (id, client)| {
+                clients.entry(id).or_default().merge(client);
+                clients
+            },
+        );
+    (!clients.is_empty()).then(|| aggregate_gpu_clients(clients))
+}
+
+fn aggregate_gpu_clients(clients: HashMap<String, GpuClientStat>) -> GpuProcessStat {
     let mut process = GpuProcessStat::default();
     for (client_id, client) in clients {
-        for (engine, value) in client.engine_nanoseconds {
-            process
+        process.memory_bytes = process.memory_bytes.saturating_add(client.memory_bytes());
+        process.engine_nanoseconds.extend(
+            client
                 .engine_nanoseconds
-                .insert(format!("{client_id}/{engine}"), value);
-        }
-        let regions = if client.resident_regions.is_empty() {
-            client.allocated_regions
-        } else {
-            client.resident_regions
-        };
-        process.memory_bytes = process
-            .memory_bytes
-            .saturating_add(regions.values().copied().sum::<u64>());
+                .into_iter()
+                .map(|(engine, value)| (format!("{client_id}/{engine}"), value)),
+        );
     }
-    Some(process)
+    process
 }
 
 fn parse_gpu_fdinfo(value: &str) -> Option<(String, GpuClientStat)> {
-    let fields = value
-        .lines()
-        .filter_map(|line| line.split_once(':'))
-        .map(|(key, value)| (key.trim(), value.trim()))
-        .collect::<Vec<_>>();
-    let client_id = fields
-        .iter()
-        .find_map(|(key, value)| (*key == "drm-client-id").then_some(*value))?;
-    let device = fields
-        .iter()
-        .find_map(|(key, value)| (*key == "drm-pdev").then_some(*value))
-        .or_else(|| {
-            fields
-                .iter()
-                .find_map(|(key, value)| (*key == "drm-driver").then_some(*value))
-        })
-        .unwrap_or("unknown");
+    let mut client_id = None;
+    let mut device = None;
+    let mut driver = None;
     let mut client = GpuClientStat::default();
-    for (key, value) in fields {
-        if let Some(engine) = key.strip_prefix("drm-engine-") {
-            if let Some(nanoseconds) = parse_duration_nanoseconds(value) {
-                client
-                    .engine_nanoseconds
-                    .insert(engine.to_owned(), nanoseconds);
-            }
-        } else if let Some(region) = key.strip_prefix("drm-resident-") {
-            if let Some(bytes) = parse_bytes(value) {
-                client.resident_regions.insert(region.to_owned(), bytes);
-            }
-        } else if let Some(region) = key.strip_prefix("drm-memory-")
-            && let Some(bytes) = parse_bytes(value)
-        {
-            client.allocated_regions.insert(region.to_owned(), bytes);
+    for (key, value) in drm_fields(value) {
+        match key {
+            "drm-client-id" => client_id = Some(value),
+            "drm-pdev" => device = Some(value),
+            "drm-driver" => driver = Some(value),
+            _ => client.record(key, value),
         }
     }
-    (!client.engine_nanoseconds.is_empty()
-        || !client.resident_regions.is_empty()
-        || !client.allocated_regions.is_empty())
-    .then(|| (format!("{device}/{client_id}"), client))
+    let key = format!("{}/{}", device.or(driver).unwrap_or("unknown"), client_id?);
+    (!client.is_empty()).then_some((key, client))
+}
+
+fn drm_fields(value: &str) -> impl Iterator<Item = (&str, &str)> {
+    value.lines().filter_map(|line| {
+        line.split_once(':')
+            .map(|(key, value)| (key.trim(), value.trim()))
+    })
+}
+
+impl GpuClientStat {
+    fn record(&mut self, key: &str, value: &str) {
+        if record_metric(
+            &mut self.engine_nanoseconds,
+            key,
+            value,
+            "drm-engine-",
+            parse_duration_nanoseconds,
+        ) {
+            return;
+        }
+        if record_metric(
+            &mut self.resident_regions,
+            key,
+            value,
+            "drm-resident-",
+            parse_bytes,
+        ) {
+            return;
+        }
+        record_metric(
+            &mut self.allocated_regions,
+            key,
+            value,
+            "drm-memory-",
+            parse_bytes,
+        );
+    }
+
+    fn merge(&mut self, other: Self) {
+        merge_max(&mut self.engine_nanoseconds, other.engine_nanoseconds);
+        merge_max(&mut self.resident_regions, other.resident_regions);
+        merge_max(&mut self.allocated_regions, other.allocated_regions);
+    }
+
+    fn is_empty(&self) -> bool {
+        self.engine_nanoseconds.is_empty()
+            && self.resident_regions.is_empty()
+            && self.allocated_regions.is_empty()
+    }
+
+    fn memory_bytes(&self) -> u64 {
+        let regions = if self.resident_regions.is_empty() {
+            &self.allocated_regions
+        } else {
+            &self.resident_regions
+        };
+        regions.values().copied().sum()
+    }
+}
+
+fn record_metric(
+    target: &mut HashMap<String, u64>,
+    key: &str,
+    value: &str,
+    prefix: &str,
+    parse: fn(&str) -> Option<u64>,
+) -> bool {
+    let Some(name) = key.strip_prefix(prefix) else {
+        return false;
+    };
+    if let Some(value) = parse(value) {
+        target.insert(name.to_owned(), value);
+    }
+    true
 }
 
 fn merge_max(target: &mut HashMap<String, u64>, source: HashMap<String, u64>) {
@@ -590,23 +646,24 @@ fn parse_process_stat(
     disk_read_bytes: u64,
     disk_write_bytes: u64,
 ) -> Option<ProcessStat> {
-    let command_end = value.rfind(')')?;
-    let fields = value
-        .get(command_end + 1..)?
-        .split_whitespace()
-        .collect::<Vec<_>>();
+    let fields = process_stat_fields(value)?;
     Some(ProcessStat {
-        parent_pid: fields.get(1)?.parse().ok()?,
-        total_ticks: fields
-            .get(11)?
-            .parse::<u64>()
-            .ok()?
-            .saturating_add(fields.get(12)?.parse::<u64>().ok()?),
-        start_ticks: fields.get(19)?.parse().ok()?,
+        parent_pid: parse_field(&fields, 1)?,
+        total_ticks: parse_field::<u64>(&fields, 11)?.saturating_add(parse_field(&fields, 12)?),
+        start_ticks: parse_field(&fields, 19)?,
         memory_bytes,
         disk_read_bytes,
         disk_write_bytes,
     })
+}
+
+fn process_stat_fields(value: &str) -> Option<Vec<&str>> {
+    let command_end = value.rfind(')')?;
+    Some(value.get(command_end + 1..)?.split_whitespace().collect())
+}
+
+fn parse_field<T: std::str::FromStr>(fields: &[&str], index: usize) -> Option<T> {
+    fields.get(index)?.parse().ok()
 }
 
 fn read_process_io(path: &Path) -> (u64, u64) {
@@ -755,6 +812,14 @@ fn finite_nonnegative(value: f64) -> f64 {
     }
 }
 
+fn rate(numerator: f64, denominator: f64, decimals: i32) -> f64 {
+    if denominator > 0.0 {
+        rounded(numerator / denominator, decimals)
+    } else {
+        0.0
+    }
+}
+
 fn rounded(value: f64, decimals: i32) -> f64 {
     let value = finite_nonnegative(value);
     let scale = 10_f64.powi(decimals);
@@ -764,83 +829,57 @@ fn rounded(value: f64, decimals: i32) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::{DiskFileId, ProcessUsage, ResourceSnapshot, parse_gpu_fdinfo, parse_process_stat};
+    use anyhow::Context;
     use std::collections::HashMap;
 
     #[test]
-    fn parses_proc_stat_with_spaces_in_command() {
+    fn parses_proc_stat_with_spaces_in_command() -> anyhow::Result<()> {
         let stat = "42 (application helper) S 7 0 0 0 0 0 0 0 0 0 120 30 0 0 0 0 0 0 99 0 0";
-        let process = parse_process_stat(stat, 4096, 8192, 16384).expect("valid stat");
+        let process = parse_process_stat(stat, 4096, 8192, 16384).context("valid stat")?;
         assert_eq!(process.parent_pid, 7);
         assert_eq!(process.total_ticks, 150);
         assert_eq!(process.start_ticks, 99);
         assert_eq!(process.memory_bytes, 4096);
         assert_eq!(process.disk_read_bytes, 8192);
         assert_eq!(process.disk_write_bytes, 16384);
+        Ok(())
     }
 
     #[test]
     fn totals_process_trees_without_double_counting_shared_roots() {
+        let file = |inode, bytes| (DiskFileId { device: 1, inode }, bytes);
+        let process = |parent_pid,
+                       cpu_percent,
+                       memory_bytes,
+                       disk_read_bytes,
+                       disk_write_bytes,
+                       open_files| ProcessUsage {
+            parent_pid,
+            cpu_percent,
+            memory_bytes,
+            gpu_percent: 0.0,
+            gpu_memory_bytes: 0,
+            disk_read_bytes,
+            disk_write_bytes,
+            open_files,
+        };
         let processes = HashMap::from([
             (
                 10,
-                ProcessUsage {
-                    parent_pid: 1,
-                    cpu_percent: 2.0,
-                    memory_bytes: 100,
-                    gpu_percent: 0.0,
-                    gpu_memory_bytes: 0,
-                    disk_read_bytes: 10,
-                    disk_write_bytes: 20,
-                    open_files: HashMap::from([
-                        (
-                            DiskFileId {
-                                device: 1,
-                                inode: 1,
-                            },
-                            1024,
-                        ),
-                        (
-                            DiskFileId {
-                                device: 1,
-                                inode: 2,
-                            },
-                            2048,
-                        ),
-                    ]),
-                },
+                process(
+                    1,
+                    2.0,
+                    100,
+                    10,
+                    20,
+                    HashMap::from([file(1, 1024), file(2, 2048)]),
+                ),
             ),
             (
                 11,
-                ProcessUsage {
-                    parent_pid: 10,
-                    cpu_percent: 3.5,
-                    memory_bytes: 200,
-                    gpu_percent: 0.0,
-                    gpu_memory_bytes: 0,
-                    disk_read_bytes: 30,
-                    disk_write_bytes: 40,
-                    open_files: HashMap::from([(
-                        DiskFileId {
-                            device: 1,
-                            inode: 1,
-                        },
-                        1024,
-                    )]),
-                },
+                process(10, 3.5, 200, 30, 40, HashMap::from([file(1, 1024)])),
             ),
-            (
-                20,
-                ProcessUsage {
-                    parent_pid: 1,
-                    cpu_percent: 1.0,
-                    memory_bytes: 50,
-                    gpu_percent: 0.0,
-                    gpu_memory_bytes: 0,
-                    disk_read_bytes: 50,
-                    disk_write_bytes: 60,
-                    open_files: HashMap::new(),
-                },
-            ),
+            (20, process(1, 1.0, 50, 50, 60, HashMap::new())),
         ]);
         let children = HashMap::from([(1, vec![10, 20]), (10, vec![11])]);
         let snapshot = ResourceSnapshot {
@@ -855,26 +894,27 @@ mod tests {
             energy_source: "rapl".into(),
         };
         let usage = snapshot.usage_for_roots([10, 10, 11]);
-        assert_eq!(usage.cpu_percent, 5.5);
-        assert_eq!(usage.cpu_percent_of_machine, 1.4);
-        assert_eq!(usage.memory_bytes, 300);
-        assert_eq!(usage.disk_read_bytes, 40);
-        assert_eq!(usage.disk_write_bytes, 60);
-        assert_eq!(usage.disk_read_bytes_per_second, 20.0);
-        assert_eq!(usage.disk_write_bytes_per_second, 30.0);
-        assert_eq!(usage.open_file_disk_bytes, 3072);
-        assert_eq!(usage.energy_mwh, 2.75);
-        assert_eq!(usage.energy_source, "rapl");
+        assert_eq!(usage.compute.cpu_percent, 5.5);
+        assert_eq!(usage.compute.cpu_percent_of_machine, 1.4);
+        assert_eq!(usage.compute.memory_bytes, 300);
+        assert_eq!(usage.storage.disk_read_bytes, 40);
+        assert_eq!(usage.storage.disk_write_bytes, 60);
+        assert_eq!(usage.storage.disk_read_bytes_per_second, 20.0);
+        assert_eq!(usage.storage.disk_write_bytes_per_second, 30.0);
+        assert_eq!(usage.storage.open_file_disk_bytes, 3072);
+        assert_eq!(usage.energy.energy_mwh, 2.75);
+        assert_eq!(usage.energy.energy_source, "rapl");
     }
 
     #[test]
-    fn parses_standard_drm_fdinfo_metrics() {
+    fn parses_standard_drm_fdinfo_metrics() -> anyhow::Result<()> {
         let fdinfo = "pos:\t0\ndrm-driver:\tamdgpu\ndrm-pdev:\t0000:03:00.0\ndrm-client-id:\t7\ndrm-engine-gfx:\t250000000 ns\ndrm-engine-compute:\t10 ms\ndrm-memory-vram:\t64 MiB\ndrm-resident-vram:\t32 MiB\n";
-        let (id, client) = parse_gpu_fdinfo(fdinfo).expect("DRM client metrics");
+        let (id, client) = parse_gpu_fdinfo(fdinfo).context("DRM client metrics")?;
         assert_eq!(id, "0000:03:00.0/7");
         assert_eq!(client.engine_nanoseconds["gfx"], 250_000_000);
         assert_eq!(client.engine_nanoseconds["compute"], 10_000_000);
         assert_eq!(client.resident_regions["vram"], 32 * 1024 * 1024);
         assert_eq!(client.allocated_regions["vram"], 64 * 1024 * 1024);
+        Ok(())
     }
 }
