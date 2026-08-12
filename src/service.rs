@@ -415,15 +415,33 @@ fn display_name(catalog: &Catalog, target_id: &str) -> String {
 }
 
 async fn launch(catalog: &Catalog, target_id: &str) -> anyhow::Result<()> {
-    anyhow::ensure!(
-        catalog.by_id(target_id).is_some(),
-        "application is no longer available"
-    );
+    let entry = catalog
+        .by_id(target_id)
+        .context("application is no longer available")?;
+    if entry.requires_terminal() {
+        return launch_in_terminal(entry.launch_command()?).await;
+    }
     let first = run_gtk_launch(target_id).await;
     if first.is_ok() {
         return first;
     }
     run_gtk_launch(target_id.trim_end_matches(".desktop")).await
+}
+
+async fn launch_in_terminal(command: Vec<String>) -> anyhow::Result<()> {
+    let (program, arguments) = command
+        .split_first()
+        .context("desktop application command is empty")?;
+    Command::new("xdg-terminal-exec")
+        .arg("--")
+        .arg(program)
+        .args(arguments)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .context("start application in the default terminal")?;
+    Ok(())
 }
 
 async fn run_gtk_launch(id: &str) -> anyhow::Result<()> {

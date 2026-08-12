@@ -37,6 +37,7 @@
                     pkgs.gtk3
                     pkgs.hyprland
                     pkgs.util-linux
+                    pkgs.xdg-terminal-exec
                   ]
                 }
             '';

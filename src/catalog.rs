@@ -26,6 +26,14 @@ pub struct CatalogEntry {
 }
 
 impl CatalogEntry {
+    pub fn launch_command(&self) -> anyhow::Result<Vec<String>> {
+        self.entry.parse_exec().map_err(anyhow::Error::from)
+    }
+
+    pub fn requires_terminal(&self) -> bool {
+        self.entry.terminal()
+    }
+
     pub fn parse_action(&self, action_id: &str) -> anyhow::Result<Vec<String>> {
         anyhow::ensure!(
             self.actions.iter().any(|action| action.id == action_id),
@@ -226,6 +234,21 @@ mod tests {
     use std::fs;
 
     use super::Catalog;
+
+    #[test]
+    fn identifies_terminal_applications_and_parses_their_commands() -> anyhow::Result<()> {
+        let directory = tempfile::tempdir()?;
+        fs::write(
+            directory.path().join("terminal.desktop"),
+            "[Desktop Entry]\nType=Application\nName=Terminal app\nExec=btop --utf-force\nTerminal=true\n",
+        )?;
+
+        let catalog = Catalog::from_paths(vec![directory.path().into()]);
+        let entry = &catalog.entries[0];
+        assert!(entry.requires_terminal());
+        assert_eq!(entry.launch_command()?, ["btop", "--utf-force"]);
+        Ok(())
+    }
 
     #[test]
     fn preserves_empty_optional_fields_and_honors_precedence() -> anyhow::Result<()> {
