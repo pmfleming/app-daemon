@@ -144,43 +144,77 @@ async fn sample_resources(service: &ApplicationService, sampler: &mut ResourceSa
     *service.resources.write().await = snapshot;
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ApplicationAction {
+    Activate,
+    Launch,
+    FocusWindow,
+    Close,
+    CloseWindow,
+    DesktopAction,
+}
+
+impl std::str::FromStr for ApplicationAction {
+    type Err = anyhow::Error;
+
+    fn from_str(value: &str) -> anyhow::Result<Self> {
+        match value {
+            "activate" => Ok(Self::Activate),
+            "launch" => Ok(Self::Launch),
+            "focus-window" => Ok(Self::FocusWindow),
+            "close" => Ok(Self::Close),
+            "close-window" => Ok(Self::CloseWindow),
+            "desktop-action" => Ok(Self::DesktopAction),
+            _ => anyhow::bail!("unsupported application action"),
+        }
+    }
+}
+
 async fn execute_action(
     catalog: &Catalog,
     windows: &Snapshot,
     params: &ExecuteParams,
 ) -> anyhow::Result<String> {
-    let verb = match params.action.as_str() {
-        "activate" => activate(catalog, windows, &params.target_id).await?,
-        "launch" => {
-            launch(catalog, &params.target_id).await?;
-            "Launched"
-        }
-        "focus-window" => {
-            focus_window(catalog, windows, params).await?;
-            "Focused"
-        }
-        "close" => {
-            close_application(catalog, windows, &params.target_id).await?;
-            "Closed"
-        }
-        "close-window" => {
-            close_window(catalog, windows, params).await?;
-            "Closed"
-        }
-        "desktop-action" => {
-            let action = params
-                .desktop_action_id
-                .as_deref()
-                .context("desktop_action_id is required")?;
-            launch_action(catalog, &params.target_id, action).await?;
-            "Started"
-        }
-        _ => anyhow::bail!("unsupported application action"),
-    };
+    let action: ApplicationAction = params.action.parse()?;
+    let verb = action.execute(catalog, windows, params).await?;
     Ok(format!(
         "{verb} {}",
         display_name(catalog, &params.target_id)
     ))
+}
+
+impl ApplicationAction {
+    async fn execute(
+        self,
+        catalog: &Catalog,
+        windows: &Snapshot,
+        params: &ExecuteParams,
+    ) -> anyhow::Result<&'static str> {
+        match self {
+            Self::Activate => activate(catalog, windows, &params.target_id).await,
+            Self::Launch => launch(catalog, &params.target_id)
+                .await
+                .map(|()| "Launched"),
+            Self::FocusWindow => focus_window(catalog, windows, params)
+                .await
+                .map(|()| "Focused"),
+            Self::Close => close_application(catalog, windows, &params.target_id)
+                .await
+                .map(|()| "Closed"),
+            Self::CloseWindow => close_window(catalog, windows, params)
+                .await
+                .map(|()| "Closed"),
+            Self::DesktopAction => desktop_action(catalog, params).await.map(|()| "Started"),
+        }
+    }
+}
+
+async fn desktop_action(catalog: &Catalog, params: &ExecuteParams) -> anyhow::Result<()> {
+    let action = params
+        .desktop_action_id
+        .as_deref()
+        .context("desktop_action_id is required")?;
+    launch_action(catalog, &params.target_id, action).await
 }
 
 async fn activate(
@@ -629,7 +663,17 @@ mod tests {
         hyprland::{Client, Workspace},
     };
 
-    use super::{application_window_addresses, resolve_target, running_score};
+    use super::{ApplicationAction, application_window_addresses, resolve_target, running_score};
+
+    #[test]
+    fn parses_application_actions() -> anyhow::Result<()> {
+        assert_eq!(
+            "activate".parse::<ApplicationAction>()?,
+            ApplicationAction::Activate
+        );
+        assert!("unknown".parse::<ApplicationAction>().is_err());
+        Ok(())
+    }
 
     #[test]
     fn focused_and_recent_windows_rank_first() {

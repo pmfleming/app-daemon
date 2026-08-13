@@ -670,16 +670,19 @@ fn read_process_io(path: &Path) -> (u64, u64) {
     let Ok(value) = fs::read_to_string(path) else {
         return (0, 0);
     };
-    let mut read_bytes = 0;
-    let mut write_bytes = 0;
-    for line in value.lines() {
-        if let Some(value) = line.strip_prefix("read_bytes:") {
-            read_bytes = value.trim().parse().unwrap_or(0);
-        } else if let Some(value) = line.strip_prefix("write_bytes:") {
-            write_bytes = value.trim().parse().unwrap_or(0);
-        }
-    }
-    (read_bytes, write_bytes)
+    let values = numeric_key_values(&value);
+    (
+        values.get("read_bytes").copied().unwrap_or(0),
+        values.get("write_bytes").copied().unwrap_or(0),
+    )
+}
+
+fn numeric_key_values(value: &str) -> HashMap<&str, u64> {
+    value
+        .lines()
+        .filter_map(|line| line.split_once(':'))
+        .filter_map(|(key, value)| Some((key, value.trim().parse().ok()?)))
+        .collect()
 }
 
 fn read_system_cpu() -> (u64, usize) {

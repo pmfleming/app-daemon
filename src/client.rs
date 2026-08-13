@@ -42,25 +42,37 @@ pub async fn run() -> Result<()> {
     if let Some(connection) = connection.as_ref().cloned() {
         spawn_events(connection, Arc::clone(&output));
     }
+    request_loop(&connection, &output).await
+}
 
+async fn request_loop(connection: &Option<zbus::Connection>, output: &Output) -> Result<()> {
     let mut lines = BufReader::new(tokio::io::stdin()).lines();
     while let Some(line) = lines.next_line().await.context("read client request")? {
-        if line.trim().is_empty() {
+        let Some(request) = parse_request(&line, output).await? else {
             continue;
-        }
-        let request = match serde_json::from_str(&line) {
-            Ok(request) => request,
-            Err(error) => {
-                let value = json!({"kind":"protocol-error","error":error.to_string()});
-                emit(&output, &value).await?;
-                continue;
-            }
         };
-        if handle(request, &connection, &output).await? {
+        if handle(request, connection, output).await? {
             break;
         }
     }
     Ok(())
+}
+
+async fn parse_request(line: &str, output: &Output) -> Result<Option<Request>> {
+    if line.trim().is_empty() {
+        return Ok(None);
+    }
+    match serde_json::from_str(line) {
+        Ok(request) => Ok(Some(request)),
+        Err(error) => {
+            emit(
+                output,
+                &json!({"kind":"protocol-error","error":error.to_string()}),
+            )
+            .await?;
+            Ok(None)
+        }
+    }
 }
 
 async fn handle(

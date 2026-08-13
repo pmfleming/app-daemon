@@ -129,19 +129,7 @@ async fn poll_revisions(
     loop {
         interval.tick().await;
         let current = applications.revisions().await;
-        let changes = [
-            (
-                selected.0 && current.0 != previous.0,
-                protocol::stream::APPLICATIONS,
-                current.0,
-            ),
-            (
-                selected.1 && current.1 != previous.1,
-                protocol::stream::WINDOWS,
-                current.1,
-            ),
-        ];
-        for (_, stream, revision) in changes.into_iter().filter(|change| change.0) {
+        for (stream, revision) in revision_changes(selected, previous, current) {
             emit_event(
                 &emitter,
                 stream,
@@ -153,6 +141,27 @@ async fn poll_revisions(
         }
         previous = current;
     }
+}
+
+fn revision_changes(
+    selected: (bool, bool),
+    previous: (u64, u64),
+    current: (u64, u64),
+) -> impl Iterator<Item = (&'static str, u64)> {
+    [
+        (
+            selected.0 && current.0 != previous.0,
+            protocol::stream::APPLICATIONS,
+            current.0,
+        ),
+        (
+            selected.1 && current.1 != previous.1,
+            protocol::stream::WINDOWS,
+            current.1,
+        ),
+    ]
+    .into_iter()
+    .filter_map(|(changed, stream, revision)| changed.then_some((stream, revision)))
 }
 
 async fn emit_event(

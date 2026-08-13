@@ -158,14 +158,21 @@ fn current_desktops() -> Vec<String> {
 }
 
 fn visible(entry: &DesktopEntry, desktops: &[String]) -> bool {
+    launchable(entry) && shown_on_desktop(entry, desktops)
+}
+
+fn launchable(entry: &DesktopEntry) -> bool {
     entry.type_() == Some("Application")
         && !entry.hidden()
         && !entry.no_display()
         && entry.exec().is_some_and(|value| !value.is_empty())
         && entry.try_exec().is_none_or(executable_available)
-        && entry
-            .only_show_in()
-            .is_none_or(|only| list_matches(only, desktops))
+}
+
+fn shown_on_desktop(entry: &DesktopEntry, desktops: &[String]) -> bool {
+    entry
+        .only_show_in()
+        .is_none_or(|only| list_matches(only, desktops))
         && entry
             .not_show_in()
             .is_none_or(|excluded| !list_matches(excluded, desktops))
