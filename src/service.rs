@@ -53,7 +53,9 @@ impl ApplicationService {
     pub async fn revisions(&self) -> (u64, u64) {
         self.refresh().await;
         let catalog = self.catalog.read().await.revision;
-        let windows = self.windows.read().await.revision;
+        let snapshot = Arc::new(Snapshot::load().await);
+        let windows = snapshot.revision;
+        *self.windows.write().await = snapshot;
         (catalog, windows)
     }
 
