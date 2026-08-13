@@ -236,8 +236,8 @@ async fn focus_window(
     windows: &Snapshot,
     params: &ExecuteParams,
 ) -> anyhow::Result<()> {
-    let window = target_instance(catalog, windows, params)?;
-    hyprland::focus(&window.address).await
+    let address = target_address(catalog, windows, params)?;
+    hyprland::focus(address).await
 }
 
 async fn close_window(
@@ -245,8 +245,16 @@ async fn close_window(
     windows: &Snapshot,
     params: &ExecuteParams,
 ) -> anyhow::Result<()> {
-    let window = target_instance(catalog, windows, params)?;
-    hyprland::close(&window.address).await
+    let address = target_address(catalog, windows, params)?;
+    hyprland::close(address).await
+}
+
+fn target_address<'a>(
+    catalog: &Catalog,
+    windows: &'a Snapshot,
+    params: &ExecuteParams,
+) -> anyhow::Result<&'a str> {
+    Ok(&target_instance(catalog, windows, params)?.address)
 }
 
 async fn close_application(
@@ -666,13 +674,12 @@ mod tests {
     use super::{ApplicationAction, application_window_addresses, resolve_target, running_score};
 
     #[test]
-    fn parses_application_actions() -> anyhow::Result<()> {
-        assert_eq!(
-            "activate".parse::<ApplicationAction>()?,
-            ApplicationAction::Activate
-        );
+    fn parses_application_actions() {
+        assert!(matches!(
+            "activate".parse::<ApplicationAction>(),
+            Ok(ApplicationAction::Activate)
+        ));
         assert!("unknown".parse::<ApplicationAction>().is_err());
-        Ok(())
     }
 
     #[test]
