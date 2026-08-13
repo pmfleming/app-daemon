@@ -236,10 +236,31 @@ async fn activate(
 ) -> anyhow::Result<&'static str> {
     if let Some(window) = target_window(catalog, windows, target_id) {
         hyprland::focus(&window.address).await?;
-        Ok("Focused")
+        return Ok("Focused");
+    }
+    launch(catalog, target_id).await?;
+    if focus_launched_window(catalog, target_id).await? {
+        Ok("Launched and focused")
     } else {
-        launch(catalog, target_id).await?;
         Ok("Launched")
+    }
+}
+
+async fn focus_launched_window(catalog: &Catalog, target_id: &str) -> anyhow::Result<bool> {
+    const FOCUS_TIMEOUT: Duration = Duration::from_secs(8);
+    const FOCUS_RETRY_INTERVAL: Duration = Duration::from_millis(100);
+
+    let deadline = Instant::now() + FOCUS_TIMEOUT;
+    loop {
+        let windows = Snapshot::load().await;
+        if let Some(window) = target_window(catalog, &windows, target_id) {
+            hyprland::focus(&window.address).await?;
+            return Ok(true);
+        }
+        if Instant::now() >= deadline {
+            return Ok(false);
+        }
+        time::sleep(FOCUS_RETRY_INTERVAL).await;
     }
 }
 
