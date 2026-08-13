@@ -27,6 +27,7 @@ use crate::{
 
 pub struct ApplicationService {
     catalog: RwLock<Arc<Catalog>>,
+    windows: RwLock<Arc<Snapshot>>,
     resources: RwLock<ResourceSnapshot>,
     history: Mutex<HistoryStore>,
 }
@@ -35,6 +36,7 @@ impl ApplicationService {
     pub fn new() -> Arc<Self> {
         let service = Arc::new(Self {
             catalog: RwLock::new(Arc::new(Catalog::load())),
+            windows: RwLock::new(Arc::new(Snapshot::default())),
             resources: RwLock::new(ResourceSnapshot::default()),
             history: Mutex::new(HistoryStore::load_default()),
         });
@@ -51,15 +53,15 @@ impl ApplicationService {
     pub async fn revisions(&self) -> (u64, u64) {
         self.refresh().await;
         let catalog = self.catalog.read().await.revision;
-        let windows = Snapshot::load().await.revision;
+        let windows = self.windows.read().await.revision;
         (catalog, windows)
     }
 
     pub async fn query(&self, params: QueryParams) -> ApplicationPage {
-        let windows = Snapshot::load().await;
+        let windows = Arc::clone(&*self.windows.read().await);
         let catalog = Arc::clone(&*self.catalog.read().await);
         let resources = self.resources.read().await;
-        page(&catalog, windows, &resources, &params)
+        page(&catalog, (*windows).clone(), &resources, &params)
     }
 
     pub async fn resource_history(
@@ -85,7 +87,7 @@ impl ApplicationService {
     }
 
     pub async fn execute(&self, params: ExecuteParams) -> anyhow::Result<OperationResult> {
-        let windows = Snapshot::load().await;
+        let windows = Arc::clone(&*self.windows.read().await);
         let catalog = Arc::clone(&*self.catalog.read().await);
         let message = execute_action(&catalog, &windows, &params).await?;
         Ok(OperationResult {
@@ -120,7 +122,7 @@ async fn track_resources(service: std::sync::Weak<ApplicationService>) {
 }
 
 async fn sample_resources(service: &ApplicationService, sampler: &mut ResourceSampler) {
-    let windows = Snapshot::load().await;
+    let windows = Arc::new(Snapshot::load().await);
     let catalog = Arc::clone(&*service.catalog.read().await);
     let mut roots: HashMap<String, Vec<u32>> = HashMap::new();
     for window in &windows.clients {
@@ -129,7 +131,14 @@ async fn sample_resources(service: &ApplicationService, sampler: &mut ResourceSa
             .or_default()
             .push(window.pid);
     }
+    let started = Instant::now();
     let snapshot = sampler.sample_for_roots(roots.values().flatten().copied());
+    let sample_milliseconds = started.elapsed().as_millis();
+    tracing::debug!(
+        active_applications = roots.len(),
+        sample_milliseconds,
+        "application resources sampled"
+    );
     let mut history = service.history.lock().await;
     for (target_id, pids) in roots {
         let usage = snapshot.usage_for_roots(pids);
@@ -141,6 +150,7 @@ async fn sample_resources(service: &ApplicationService, sampler: &mut ResourceSa
         );
     }
     drop(history);
+    *service.windows.write().await = windows;
     *service.resources.write().await = snapshot;
 }
 

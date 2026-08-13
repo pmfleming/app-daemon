@@ -7,7 +7,7 @@ use std::{
 use serde::Deserialize;
 use tokio::process::Command;
 
-#[derive(Debug, Default, Deserialize, Hash)]
+#[derive(Debug, Clone, Default, Deserialize, Hash)]
 pub struct Workspace {
     #[serde(default)]
     pub id: i64,
@@ -15,7 +15,7 @@ pub struct Workspace {
     pub name: String,
 }
 
-#[derive(Debug, Deserialize, Hash)]
+#[derive(Debug, Clone, Deserialize, Hash)]
 pub struct Client {
     #[serde(default)]
     pub address: String,
@@ -42,7 +42,7 @@ const fn mapped() -> bool {
     true
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct Snapshot {
     pub available: bool,
     pub revision: u64,

@@ -178,8 +178,18 @@ pub struct ResourceSampler {
     previous_gpu_engines: HashMap<(u32, u64, String), u64>,
     previous_system_ticks: Option<u64>,
     previous_sample: Option<Instant>,
+    open_files: OpenFileCache,
     energy: EnergySampler,
 }
+
+#[derive(Debug, Default)]
+struct OpenFileCache {
+    samples: HashMap<u32, HashMap<DiskFileId, u64>>,
+    next_refresh: InstantSlot,
+}
+
+#[derive(Debug, Default)]
+struct InstantSlot(Option<Instant>);
 
 impl ResourceSampler {
     pub fn sample_for_roots(
@@ -201,7 +211,7 @@ impl ResourceSampler {
         let process_children = process_children(&current);
         let active_processes = descendants(active_roots, &process_children);
         let current_gpu = read_gpu_processes(&active_processes);
-        let mut current_open_files = read_open_files(&active_processes);
+        let mut current_open_files = self.open_files.read(&active_processes, now);
         let energy = self.energy.sample(interval_seconds);
         let mut snapshot = ResourceSnapshot {
             logical_cpus,
@@ -320,6 +330,22 @@ impl ResourceSampler {
         self.previous_gpu_engines = gpu_engines;
         self.previous_system_ticks = Some(system_ticks);
         self.previous_sample = Some(now);
+    }
+}
+
+impl OpenFileCache {
+    fn read(
+        &mut self,
+        pids: &HashSet<u32>,
+        now: Instant,
+    ) -> HashMap<u32, HashMap<DiskFileId, u64>> {
+        let refresh = self.next_refresh.0.is_none_or(|deadline| now >= deadline);
+        self.samples.retain(|pid, _| pids.contains(pid));
+        if refresh {
+            self.samples = read_open_files(pids);
+            self.next_refresh.0 = Some(now + std::time::Duration::from_secs(10));
+        }
+        self.samples.clone()
     }
 }
 
