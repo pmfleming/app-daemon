@@ -65,9 +65,8 @@ pub struct WindowSummary {
 }
 
 #[derive(Debug, PartialEq, Serialize, Deserialize)]
-pub struct ApplicationSummary {
+pub struct ApplicationIdentity {
     pub id: String,
-    pub revision: u64,
     pub kind: String,
     pub name: String,
     pub generic_name: String,
@@ -76,12 +75,25 @@ pub struct ApplicationSummary {
     pub keywords: Vec<String>,
     pub categories: Vec<String>,
     pub startup_class: String,
+}
+
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
+pub struct ApplicationRuntime {
     pub running: bool,
     pub focused: bool,
     pub running_count: usize,
     #[serde(flatten)]
     pub resources: ResourceUsage,
     pub instances: Vec<WindowSummary>,
+}
+
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
+pub struct ApplicationSummary {
+    #[serde(flatten)]
+    pub identity: ApplicationIdentity,
+    pub revision: u64,
+    #[serde(flatten)]
+    pub runtime: ApplicationRuntime,
     pub desktop_actions: Vec<DesktopActionSummary>,
     pub score: i64,
 }

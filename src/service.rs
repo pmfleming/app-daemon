@@ -19,8 +19,8 @@ use crate::{
     history::{HistoryStore, now_milliseconds},
     hyprland::{self, Client, Snapshot},
     model::{
-        ApplicationPage, ApplicationResourceHistory, ApplicationSummary, OperationResult,
-        ResourceUsage, WindowSummary,
+        ApplicationIdentity, ApplicationPage, ApplicationResourceHistory, ApplicationRuntime,
+        ApplicationSummary, OperationResult, ResourceUsage, WindowSummary,
     },
     resources::{ResourceSampler, ResourceSnapshot},
 };
@@ -377,8 +377,13 @@ fn page(
         right
             .score
             .cmp(&left.score)
-            .then_with(|| left.name.to_lowercase().cmp(&right.name.to_lowercase()))
-            .then_with(|| left.id.cmp(&right.id))
+            .then_with(|| {
+                left.identity
+                    .name
+                    .to_lowercase()
+                    .cmp(&right.identity.name.to_lowercase())
+            })
+            .then_with(|| left.identity.id.cmp(&right.identity.id))
     });
     let limit = params.limit.clamp(1, 1000);
     let has_more = applications.len() > limit;
@@ -493,21 +498,25 @@ fn summary_for_entry(
     let (instances, focused, best_rank, usage) = instance_state(clients, resources);
     let running = !instances.is_empty();
     ApplicationSummary {
-        id: entry.id.clone(),
+        identity: ApplicationIdentity {
+            id: entry.id.clone(),
+            kind: "desktop-application".into(),
+            name: entry.name.clone(),
+            generic_name: entry.generic_name.clone(),
+            comment: entry.comment.clone(),
+            icon: entry.icon.clone(),
+            keywords: entry.keywords.clone(),
+            categories: entry.categories.clone(),
+            startup_class: entry.startup_class.clone(),
+        },
         revision,
-        kind: "desktop-application".into(),
-        name: entry.name.clone(),
-        generic_name: entry.generic_name.clone(),
-        comment: entry.comment.clone(),
-        icon: entry.icon.clone(),
-        keywords: entry.keywords.clone(),
-        categories: entry.categories.clone(),
-        startup_class: entry.startup_class.clone(),
-        running,
-        focused,
-        running_count: instances.len(),
-        resources: usage,
-        instances,
+        runtime: ApplicationRuntime {
+            running,
+            focused,
+            running_count: instances.len(),
+            resources: usage,
+            instances,
+        },
         desktop_actions: entry.actions.clone(),
         score: running_score(focused, best_rank),
     }
@@ -526,24 +535,28 @@ fn summary_for_unmatched(
         .to_owned();
     let (instances, focused, best_rank, usage) = instance_state(clients, resources);
     ApplicationSummary {
-        id,
+        identity: ApplicationIdentity {
+            id,
+            kind: "window-group".into(),
+            name,
+            generic_name: "Running window".into(),
+            comment: String::new(),
+            icon: String::new(),
+            keywords: instances
+                .iter()
+                .flat_map(|window| [window.title.clone(), window.class.clone()])
+                .collect(),
+            categories: Vec::new(),
+            startup_class: String::new(),
+        },
         revision,
-        kind: "window-group".into(),
-        name,
-        generic_name: "Running window".into(),
-        comment: String::new(),
-        icon: String::new(),
-        keywords: instances
-            .iter()
-            .flat_map(|window| [window.title.clone(), window.class.clone()])
-            .collect(),
-        categories: Vec::new(),
-        startup_class: String::new(),
-        running: true,
-        focused,
-        running_count: instances.len(),
-        resources: usage,
-        instances,
+        runtime: ApplicationRuntime {
+            running: true,
+            focused,
+            running_count: instances.len(),
+            resources: usage,
+            instances,
+        },
         desktop_actions: Vec::new(),
         score: running_score(focused, best_rank),
     }
@@ -569,17 +582,18 @@ fn matches_query(application: &ApplicationSummary, query: &str) -> bool {
         return true;
     }
     let searchable = [
-        application.name.as_str(),
-        application.generic_name.as_str(),
-        application.comment.as_str(),
-        application.id.as_str(),
-        application.startup_class.as_str(),
+        application.identity.name.as_str(),
+        application.identity.generic_name.as_str(),
+        application.identity.comment.as_str(),
+        application.identity.id.as_str(),
+        application.identity.startup_class.as_str(),
     ]
     .into_iter()
-    .chain(application.keywords.iter().map(String::as_str))
-    .chain(application.categories.iter().map(String::as_str))
+    .chain(application.identity.keywords.iter().map(String::as_str))
+    .chain(application.identity.categories.iter().map(String::as_str))
     .chain(
         application
+            .runtime
             .instances
             .iter()
             .flat_map(|window| [window.title.as_str(), window.class.as_str()]),
