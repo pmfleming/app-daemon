@@ -907,6 +907,44 @@ mod tests {
     }
 
     #[test]
+    fn rejects_malformed_drm_metrics() {
+        assert!(parse_gpu_fdinfo("drm-engine-gfx: nope\n").is_none());
+        assert!(parse_gpu_fdinfo("drm-client-id: 4\ndrm-engine-gfx: nope\n").is_none());
+    }
+
+    #[test]
+    fn handles_energy_counter_rollover() {
+        assert_eq!(super::counter_delta(900, 100, 1_000), 200);
+        assert_eq!(super::counter_delta(100, 250, 1_000), 150);
+    }
+
+    #[test]
+    fn ignores_previous_counters_after_pid_reuse() {
+        let sampler = super::ResourceSampler {
+            previous_processes: HashMap::from([(
+                42,
+                super::PreviousProcess {
+                    total_ticks: 100,
+                    start_ticks: 7,
+                    disk_read_bytes: 1_000,
+                    disk_write_bytes: 2_000,
+                },
+            )]),
+            ..Default::default()
+        };
+        let process = super::ProcessStat {
+            parent_pid: 1,
+            total_ticks: 500,
+            start_ticks: 8,
+            memory_bytes: 0,
+            disk_read_bytes: 4_000,
+            disk_write_bytes: 8_000,
+        };
+        assert_eq!(sampler.cpu_percent(42, &process, Some(100), 4), 0.0);
+        assert_eq!(sampler.disk_delta(42, &process), (0, 0));
+    }
+
+    #[test]
     fn parses_standard_drm_fdinfo_metrics() -> anyhow::Result<()> {
         let fdinfo = "pos:\t0\ndrm-driver:\tamdgpu\ndrm-pdev:\t0000:03:00.0\ndrm-client-id:\t7\ndrm-engine-gfx:\t250000000 ns\ndrm-engine-compute:\t10 ms\ndrm-memory-vram:\t64 MiB\ndrm-resident-vram:\t32 MiB\n";
         let (id, client) = parse_gpu_fdinfo(fdinfo).context("DRM client metrics")?;

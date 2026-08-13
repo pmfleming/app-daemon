@@ -292,6 +292,27 @@ mod tests {
     use crate::model::{ComputeUsage, EnergyUsage, ResourceUsage, StorageUsage};
 
     #[test]
+    fn ignores_unknown_and_future_history_formats() -> anyhow::Result<()> {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("history.json");
+        std::fs::write(&path, br#"{"version":99,"applications":{"app":[]}}"#)?;
+        assert!(
+            HistoryStore::load(Some(path.clone()))
+                .query("app", None, 10)
+                .0
+                .is_empty()
+        );
+        std::fs::write(&path, b"not json")?;
+        assert!(
+            HistoryStore::load(Some(path))
+                .query("app", None, 10)
+                .0
+                .is_empty()
+        );
+        Ok(())
+    }
+
+    #[test]
     fn aggregates_and_persists_resource_buckets() -> anyhow::Result<()> {
         let directory = tempfile::tempdir()?;
         let path = directory.path().join("history.json");

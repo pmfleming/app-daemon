@@ -73,11 +73,13 @@
           default = pkgs.mkShell {
             packages = with pkgs; [
               cargo
+              cargo-llvm-cov
               clippy
               jq
               rust-analyzer
               rustc
               rustfmt
+              llvmPackages.llvm
             ];
             RUST_BACKTRACE = "1";
             RUST_LOG = "app_daemon=debug";
