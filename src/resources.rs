@@ -1,8 +1,10 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, VecDeque},
+    fmt::Debug,
     fs,
     os::unix::fs::MetadataExt,
     path::{Path, PathBuf},
+    sync::{Arc, Mutex},
     time::Instant,
 };
 
@@ -64,6 +66,7 @@ struct MemoryUsage {
     pss_bytes: u64,
     private_bytes: u64,
     swap_bytes: u64,
+    rss_available: bool,
     pss_available: bool,
 }
 
@@ -83,6 +86,7 @@ struct ProcessUsage {
     open_files: HashMap<DiskFileId, DiskFile>,
     referenced_files: HashMap<DiskFileId, DiskFile>,
     network_sockets: HashSet<u64>,
+    network_available: bool,
     storage_available: bool,
 }
 
@@ -98,9 +102,119 @@ struct DiskFile {
     temporary: bool,
 }
 
+mod energy;
 mod gpu;
 
+use energy::{BatterySample, EnergyProvider, EnergySampler};
 use gpu::{GpuProcessStat, read_gpu_processes};
+
+const MAX_SAMPLING_WORKERS: usize = 6;
+
+trait ResourceProvider: Debug + EnergyProvider + Send + Sync {
+    fn system_cpu(&self) -> (u64, usize);
+    fn processes(&self) -> HashMap<u32, ProcessStat>;
+    fn process_memory(&self, pid: u32) -> MemoryUsage;
+    fn process_io(&self, pid: u32) -> Option<ProcessIo>;
+    fn process_files(&self, pid: u32) -> ProcessFiles;
+    fn gpu_processes(&self, pids: &HashSet<u32>) -> HashMap<u32, GpuProcessStat>;
+    fn process_cgroup(&self, pid: u32) -> Option<String>;
+    fn cgroup_counters(&self, path: &str) -> Option<CgroupCounters>;
+    fn cgroup_members(&self, path: &str) -> HashSet<u32>;
+    fn application_disk_usage(&self, target_id: &str) -> DiskBreakdown;
+}
+
+#[derive(Debug, Default)]
+struct LinuxResourceProvider;
+
+impl EnergyProvider for LinuxResourceProvider {
+    fn rapl_zones(&self) -> HashMap<PathBuf, (u64, u64)> {
+        energy::read_rapl_zones()
+    }
+
+    fn batteries(&self) -> BatterySample {
+        energy::read_batteries()
+    }
+}
+
+impl ResourceProvider for LinuxResourceProvider {
+    fn system_cpu(&self) -> (u64, usize) {
+        read_system_cpu()
+    }
+
+    fn processes(&self) -> HashMap<u32, ProcessStat> {
+        read_processes()
+    }
+
+    fn process_memory(&self, pid: u32) -> MemoryUsage {
+        read_process_memory(pid)
+    }
+
+    fn process_io(&self, pid: u32) -> Option<ProcessIo> {
+        read_process_io(pid)
+    }
+
+    fn process_files(&self, pid: u32) -> ProcessFiles {
+        read_process_file_sets(pid)
+    }
+
+    fn gpu_processes(&self, pids: &HashSet<u32>) -> HashMap<u32, GpuProcessStat> {
+        read_gpu_processes(pids)
+    }
+
+    fn process_cgroup(&self, pid: u32) -> Option<String> {
+        process_cgroup(pid)
+    }
+
+    fn cgroup_counters(&self, path: &str) -> Option<CgroupCounters> {
+        read_cgroup_counters(path)
+    }
+
+    fn cgroup_members(&self, path: &str) -> HashSet<u32> {
+        read_cgroup_members(path)
+    }
+
+    fn application_disk_usage(&self, target_id: &str) -> DiskBreakdown {
+        application_disk_usage(target_id)
+    }
+}
+
+fn bounded_map<T, R>(items: Vec<T>, operation: impl Fn(T) -> R + Sync) -> Vec<R>
+where
+    T: Send,
+    R: Send,
+{
+    let workers = items.len().min(MAX_SAMPLING_WORKERS);
+    if workers <= 1 {
+        return items.into_iter().map(operation).collect();
+    }
+    let queue = Mutex::new(VecDeque::from(items));
+    let results = Mutex::new(Vec::new());
+    std::thread::scope(|scope| {
+        for _ in 0..workers {
+            let operation = &operation;
+            let queue = &queue;
+            let results = &results;
+            scope.spawn(move || {
+                loop {
+                    let item = queue
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .pop_front();
+                    let Some(item) = item else {
+                        break;
+                    };
+                    results
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .push(operation(item));
+                }
+            });
+        }
+    });
+    results
+        .into_inner()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
 
 #[derive(Debug, Clone)]
 pub struct ResourceSnapshot {
@@ -183,18 +297,28 @@ impl ResourceSnapshot {
         let mut referenced_files = HashMap::new();
         let mut network_sockets = HashSet::<u64>::new();
         let mut covered_processes = 0_u64;
+        let mut memory_processes = 0_u64;
         let mut pss_processes = 0_u64;
         let mut gpu_processes = 0_u64;
+        let mut network_processes = 0_u64;
         for process in pids.iter().filter_map(|pid| self.processes.get(pid)) {
             usage.add_process(process);
             covered_processes += 1;
+            memory_processes += u64::from(process.memory.rss_available);
             pss_processes += u64::from(process.memory.pss_available);
             gpu_processes += u64::from(process.gpu_available);
+            network_processes += u64::from(process.network_available);
             merge_disk_files(&mut open_files, &process.open_files);
             merge_disk_files(&mut referenced_files, &process.referenced_files);
             network_sockets.extend(process.network_sockets.iter().copied());
         }
-        if !roots.is_empty() && cgroup_roots == roots.len() {
+        let process_cpu_percent = usage.compute.cpu_percent;
+        let complete_cgroup = !roots.is_empty()
+            && cgroup_roots == roots.len()
+            && cgroup_paths
+                .iter()
+                .all(|path| self.cgroup_usage.contains_key(*path));
+        if complete_cgroup {
             let mut cgroup = CgroupUsage::default();
             for usage in cgroup_paths
                 .iter()
@@ -237,14 +361,14 @@ impl ResourceSnapshot {
             }
         }
         usage.measurement.sample_interval_ms = (self.interval_seconds * 1000.0).round() as u64;
-        usage.measurement.attribution_method = if !roots.is_empty() && cgroup_roots == roots.len() {
+        usage.measurement.attribution_method = if complete_cgroup {
             "cgroup".into()
         } else if cgroup_roots > 0 {
             "mixed".into()
         } else {
             "process-tree".into()
         };
-        usage.measurement.coverage = if !roots.is_empty() && cgroup_roots == roots.len() {
+        usage.measurement.coverage = if complete_cgroup {
             1.0
         } else if pids.is_empty() {
             0.0
@@ -254,27 +378,26 @@ impl ResourceSnapshot {
         usage.measurement.memory_source =
             if covered_processes > 0 && pss_processes == covered_processes {
                 "pss".into()
-            } else if covered_processes > 0 {
+            } else if memory_processes > 0 {
                 "rss-fallback".into()
             } else {
                 "unavailable".into()
             };
         usage.measurement.gpu_available = gpu_processes > 0;
-        usage.measurement.storage_available = (!cgroup_paths.is_empty()
-            && cgroup_roots == roots.len())
+        usage.measurement.storage_available = complete_cgroup
             || pids
                 .iter()
                 .filter_map(|pid| self.processes.get(pid))
                 .any(|process| process.storage_available);
         usage.network.network_connection_count = network_sockets.len() as u64;
-        usage.measurement.network_available = covered_processes > 0;
+        usage.measurement.network_available = network_processes > 0;
         usage.measurement.network_bytes_available = false;
-        usage.measurement.network_connections_available = covered_processes > 0;
+        usage.measurement.network_connections_available = network_processes > 0;
         usage.measurement.resources_shared = pids.iter().any(|pid| self.shared_pids.contains(pid));
-        self.complete(usage)
+        self.complete(usage, process_cpu_percent)
     }
 
-    fn complete(&self, mut usage: ResourceUsage) -> ResourceUsage {
+    fn complete(&self, mut usage: ResourceUsage, energy_cpu_percent: f64) -> ResourceUsage {
         usage.compute.major_faults_per_second = rate(
             usage.compute.major_faults_per_second,
             self.interval_seconds,
@@ -282,8 +405,7 @@ impl ResourceSnapshot {
         );
         usage.compute.normalize_cpu(self.logical_cpus);
         usage.storage.normalize_rates(self.interval_seconds);
-        usage.energy =
-            self.estimated_energy(usage.compute.cpu_percent, self.total_process_cpu_percent);
+        usage.energy = self.estimated_energy(energy_cpu_percent, self.total_process_cpu_percent);
         usage
     }
 
@@ -427,12 +549,9 @@ impl StorageUsage {
     }
 }
 
-mod energy;
-
-use energy::EnergySampler;
-
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct ResourceSampler {
+    provider: Arc<dyn ResourceProvider>,
     previous_processes: HashMap<u32, PreviousProcess>,
     previous_gpu_engines: HashMap<(u32, u64, String), u64>,
     previous_system_ticks: Option<u64>,
@@ -441,6 +560,22 @@ pub struct ResourceSampler {
     open_files: OpenFileCache,
     app_disk: AppDiskCache,
     energy: EnergySampler,
+}
+
+impl Default for ResourceSampler {
+    fn default() -> Self {
+        Self {
+            provider: Arc::new(LinuxResourceProvider),
+            previous_processes: HashMap::new(),
+            previous_gpu_engines: HashMap::new(),
+            previous_system_ticks: None,
+            previous_cgroups: HashMap::new(),
+            previous_sample: None,
+            open_files: OpenFileCache::default(),
+            app_disk: AppDiskCache::default(),
+            energy: EnergySampler::default(),
+        }
+    }
 }
 
 #[derive(Debug, Default)]
@@ -454,6 +589,7 @@ struct ProcessFiles {
     open: HashMap<DiskFileId, DiskFile>,
     referenced: HashMap<DiskFileId, DiskFile>,
     sockets: HashSet<u64>,
+    fd_available: bool,
 }
 
 #[derive(Debug, Default)]
@@ -473,6 +609,14 @@ struct AppDiskCache {
 }
 
 impl ResourceSampler {
+    #[cfg(test)]
+    fn with_provider(provider: Arc<dyn ResourceProvider>) -> Self {
+        Self {
+            provider,
+            ..Self::default()
+        }
+    }
+
     pub fn sample_for_targets(
         &mut self,
         active_targets: &HashMap<String, Vec<u32>>,
@@ -483,12 +627,13 @@ impl ResourceSampler {
             .map(|previous| now.duration_since(previous).as_secs_f64())
             .filter(|seconds| *seconds > 0.0)
             .unwrap_or(0.0);
-        let (system_ticks, logical_cpus) = read_system_cpu();
+        let provider = Arc::clone(&self.provider);
+        let (system_ticks, logical_cpus) = provider.system_cpu();
         let system_delta = self
             .previous_system_ticks
             .map(|previous| system_ticks.saturating_sub(previous))
             .filter(|delta| *delta > 0);
-        let current = read_processes();
+        let current = provider.processes();
         let process_children = process_children(&current);
         let active_roots = active_targets
             .values()
@@ -496,23 +641,34 @@ impl ResourceSampler {
             .copied()
             .filter(|pid| *pid > 0)
             .collect::<HashSet<_>>();
-        let cgroup_path_by_root = cgroup_paths_for_roots(&active_roots);
-        let cgroup_members_by_root = cgroup_members_for_paths(&cgroup_path_by_root);
+        let cgroup_path_by_root = cgroup_paths_for_roots(provider.as_ref(), &active_roots);
+        let cgroup_members_by_root =
+            cgroup_members_for_paths(provider.as_ref(), &cgroup_path_by_root);
         let current_cgroups = cgroup_path_by_root
             .values()
             .collect::<HashSet<_>>()
             .into_iter()
-            .map(|path| (path.clone(), read_cgroup_counters(path)))
+            .filter_map(|path| Some((path.clone(), provider.cgroup_counters(path)?)))
             .collect::<HashMap<_, _>>();
         let cgroup_usage = self.cgroup_usage(&current_cgroups, interval_seconds);
         let mut active_processes = descendants(active_roots.iter().copied(), &process_children);
         for members in cgroup_members_by_root.values() {
             active_processes.extend(members);
         }
-        let current_gpu = read_gpu_processes(&active_processes);
-        let mut current_open_files = self.open_files.read(&active_processes, now);
-        let energy = self.energy.sample(interval_seconds);
-        let app_disk_by_target = self.app_disk.read(active_targets.keys(), now);
+        let current_gpu = provider.gpu_processes(&active_processes);
+        let mut current_open_files =
+            self.open_files
+                .read(provider.as_ref(), &active_processes, now);
+        let sampled_details = bounded_map(active_processes.iter().copied().collect(), |pid| {
+            (pid, provider.process_memory(pid), provider.process_io(pid))
+        })
+        .into_iter()
+        .map(|(pid, memory, io)| (pid, (memory, io)))
+        .collect::<HashMap<_, _>>();
+        let energy = self.energy.sample(interval_seconds, provider.as_ref());
+        let app_disk_by_target = self
+            .app_disk
+            .read(provider.as_ref(), active_targets.keys(), now);
         let shared_pids =
             shared_target_pids(active_targets, &process_children, &cgroup_members_by_root);
         let mut snapshot = ResourceSnapshot {
@@ -536,14 +692,8 @@ impl ResourceSampler {
         let mut next_gpu_engines = HashMap::new();
         let mut current_io = HashMap::new();
         for (&pid, process) in &current {
-            let active = active_processes.contains(&pid);
             let cpu_percent = self.cpu_percent(pid, process, system_delta, logical_cpus);
-            let memory = if active {
-                read_process_memory(pid)
-            } else {
-                MemoryUsage::default()
-            };
-            let sampled_io = active.then(|| read_process_io(pid)).flatten();
+            let (memory, sampled_io) = sampled_details.get(&pid).copied().unwrap_or_default();
             let io = self.io_delta(pid, process, sampled_io.unwrap_or_default());
             if let Some(value) = sampled_io {
                 current_io.insert(pid, value);
@@ -575,6 +725,7 @@ impl ResourceSampler {
                     open_files: files.open,
                     referenced_files: files.referenced,
                     network_sockets: files.sockets,
+                    network_available: files.fd_available,
                     storage_available: sampled_io.is_some(),
                 },
             );
@@ -745,21 +896,28 @@ impl ResourceSampler {
 }
 
 impl OpenFileCache {
-    fn read(&mut self, pids: &HashSet<u32>, now: Instant) -> HashMap<u32, ProcessFiles> {
+    fn read(
+        &mut self,
+        provider: &dyn ResourceProvider,
+        pids: &HashSet<u32>,
+        now: Instant,
+    ) -> HashMap<u32, ProcessFiles> {
         let refresh = self.next_refresh.0.is_none_or(|deadline| now >= deadline);
         self.samples.retain(|pid, _| pids.contains(pid));
-        if refresh {
-            self.samples = read_process_files(pids);
-            self.next_refresh.0 = Some(now + std::time::Duration::from_secs(10));
+        let requested = if refresh {
+            pids.iter().copied().collect()
         } else {
-            let missing = pids
-                .iter()
+            pids.iter()
                 .filter(|pid| !self.samples.contains_key(pid))
                 .copied()
-                .collect::<Vec<_>>();
-            for pid in missing {
-                self.samples.insert(pid, read_process_file_sets(pid));
-            }
+                .collect()
+        };
+        let sampled = bounded_map(requested, |pid| (pid, provider.process_files(pid)));
+        if refresh {
+            self.samples = sampled.into_iter().collect();
+            self.next_refresh.0 = Some(now + std::time::Duration::from_secs(10));
+        } else {
+            self.samples.extend(sampled);
         }
         self.samples.clone()
     }
@@ -768,30 +926,30 @@ impl OpenFileCache {
 impl AppDiskCache {
     fn read<'a>(
         &mut self,
+        provider: &dyn ResourceProvider,
         targets: impl IntoIterator<Item = &'a String>,
         now: Instant,
     ) -> HashMap<String, DiskBreakdown> {
         let targets = targets.into_iter().cloned().collect::<HashSet<_>>();
         let refresh = self.next_refresh.0.is_none_or(|deadline| now >= deadline);
         self.samples.retain(|target, _| targets.contains(target));
-        if refresh {
-            self.samples = targets
-                .into_iter()
-                .map(|target| {
-                    let usage = application_disk_usage(&target);
-                    (target, usage)
-                })
-                .collect();
-            self.next_refresh.0 = Some(now + std::time::Duration::from_secs(30));
+        let requested = if refresh {
+            targets.into_iter().collect()
         } else {
-            let missing = targets
+            targets
                 .into_iter()
                 .filter(|target| !self.samples.contains_key(target))
-                .collect::<Vec<_>>();
-            for target in missing {
-                self.samples
-                    .insert(target.clone(), application_disk_usage(&target));
-            }
+                .collect()
+        };
+        let sampled = bounded_map(requested, |target| {
+            let usage = provider.application_disk_usage(&target);
+            (target, usage)
+        });
+        if refresh {
+            self.samples = sampled.into_iter().collect();
+            self.next_refresh.0 = Some(now + std::time::Duration::from_secs(30));
+        } else {
+            self.samples.extend(sampled);
         }
         self.samples.clone()
     }
@@ -939,25 +1097,32 @@ fn shared_target_pids(
         .collect()
 }
 
-fn cgroup_paths_for_roots(roots: &HashSet<u32>) -> HashMap<u32, String> {
+fn cgroup_paths_for_roots(
+    provider: &dyn ResourceProvider,
+    roots: &HashSet<u32>,
+) -> HashMap<u32, String> {
     roots
         .iter()
         .filter_map(|&root| {
-            process_cgroup(root)
+            provider
+                .process_cgroup(root)
                 .filter(|path| specific_application_cgroup(path))
                 .map(|path| (root, path))
         })
         .collect()
 }
 
-fn cgroup_members_for_paths(paths: &HashMap<u32, String>) -> HashMap<u32, HashSet<u32>> {
+fn cgroup_members_for_paths(
+    provider: &dyn ResourceProvider,
+    paths: &HashMap<u32, String>,
+) -> HashMap<u32, HashSet<u32>> {
     let mut by_path = HashMap::<String, HashSet<u32>>::new();
     paths
         .iter()
         .filter_map(|(&root, path)| {
             let members = by_path
                 .entry(path.clone())
-                .or_insert_with_key(|path| read_cgroup_members(path))
+                .or_insert_with_key(|path| provider.cgroup_members(path))
                 .clone();
             (!members.is_empty()).then_some((root, members))
         })
@@ -980,12 +1145,11 @@ fn specific_application_cgroup(path: &str) -> bool {
         && (name.starts_with("app-") || name.contains("flatpak") || name.contains("snap."))
 }
 
-fn read_cgroup_counters(path: &str) -> CgroupCounters {
+fn read_cgroup_counters(path: &str) -> Option<CgroupCounters> {
     let root = Path::new("/sys/fs/cgroup").join(path.trim_start_matches('/'));
     let cpu = fs::read_to_string(root.join("cpu.stat"))
         .ok()
-        .map(|value| whitespace_key_values(&value))
-        .unwrap_or_default();
+        .map(|value| whitespace_key_values(&value))?;
     let mut counters = CgroupCounters {
         cpu_usage_usec: cpu.get("usage_usec").copied().unwrap_or(0),
         memory_bytes: read_number(&root.join("memory.current")),
@@ -1008,7 +1172,7 @@ fn read_cgroup_counters(path: &str) -> CgroupCounters {
                 .saturating_add(values.get("wios").copied().unwrap_or(0));
         }
     }
-    counters
+    Some(counters)
 }
 
 fn whitespace_key_values(value: &str) -> HashMap<String, u64> {
@@ -1067,16 +1231,11 @@ fn descendants(
     included
 }
 
-fn read_process_files(pids: &HashSet<u32>) -> HashMap<u32, ProcessFiles> {
-    pids.iter()
-        .map(|&pid| (pid, read_process_file_sets(pid)))
-        .collect()
-}
-
 fn read_process_file_sets(pid: u32) -> ProcessFiles {
     let fd_directory = format!("/proc/{pid}/fd");
-    let open = read_regular_files(&fd_directory);
-    let sockets = read_socket_inodes(&fd_directory);
+    let Some((open, sockets)) = read_open_files_and_sockets(&fd_directory) else {
+        return ProcessFiles::default();
+    };
     let mut referenced = open.clone();
     merge_disk_files(
         &mut referenced,
@@ -1086,24 +1245,45 @@ fn read_process_file_sets(pid: u32) -> ProcessFiles {
         open,
         referenced,
         sockets,
+        fd_available: true,
     }
 }
 
-fn read_socket_inodes(directory: &str) -> HashSet<u64> {
-    let Ok(entries) = fs::read_dir(directory) else {
-        return HashSet::new();
-    };
-    entries
-        .filter_map(Result::ok)
-        .filter_map(|entry| fs::read_link(entry.path()).ok())
-        .filter_map(|target| {
-            let value = target
-                .to_str()?
-                .strip_prefix("socket:[")?
-                .strip_suffix(']')?;
-            value.parse().ok()
-        })
-        .collect()
+fn read_open_files_and_sockets(
+    directory: &str,
+) -> Option<(HashMap<DiskFileId, DiskFile>, HashSet<u64>)> {
+    let entries = fs::read_dir(directory).ok()?;
+    let mut files = HashMap::new();
+    let mut sockets = HashSet::new();
+    for entry in entries.filter_map(Result::ok) {
+        let Ok(link) = fs::read_link(entry.path()) else {
+            continue;
+        };
+        if let Some(inode) = link
+            .to_str()
+            .and_then(|value| value.strip_prefix("socket:["))
+            .and_then(|value| value.strip_suffix(']'))
+            .and_then(|value| value.parse().ok())
+        {
+            sockets.insert(inode);
+        }
+        let Ok(metadata) = fs::metadata(entry.path()) else {
+            continue;
+        };
+        if metadata.file_type().is_file() {
+            files.insert(
+                DiskFileId {
+                    device: metadata.dev(),
+                    inode: metadata.ino(),
+                },
+                DiskFile {
+                    bytes: metadata.blocks().saturating_mul(512),
+                    temporary: temporary_path(&link),
+                },
+            );
+        }
+    }
+    Some((files, sockets))
 }
 
 fn read_regular_files(directory: &str) -> HashMap<DiskFileId, DiskFile> {
@@ -1245,6 +1425,7 @@ fn read_process_memory(pid: u32) -> MemoryUsage {
                 .copied()
                 .unwrap_or(0)
                 .saturating_mul(1024),
+            rss_available: values.contains_key("Rss"),
             pss_available: values.contains_key("Pss"),
         };
     }
@@ -1263,6 +1444,7 @@ fn read_process_memory(pid: u32) -> MemoryUsage {
             .copied()
             .unwrap_or(0)
             .saturating_mul(1024),
+        rss_available: values.contains_key("VmRSS"),
         ..MemoryUsage::default()
     }
 }
@@ -1305,11 +1487,103 @@ fn rounded(value: f64, decimals: i32) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::{
-        DiskFile, DiskFileId, MemoryUsage, ProcessIo, ProcessUsage, ResourceSnapshot,
-        equals_key_values, parse_process_stat, whitespace_key_values,
+        BatterySample, CgroupCounters, DiskBreakdown, DiskFile, DiskFileId, EnergyProvider,
+        GpuProcessStat, MemoryUsage, ProcessFiles, ProcessIo, ProcessStat, ProcessUsage,
+        ResourceProvider, ResourceSampler, ResourceSnapshot, equals_key_values, parse_process_stat,
+        whitespace_key_values,
     };
     use anyhow::Context;
-    use std::collections::{HashMap, HashSet};
+    use std::{
+        collections::{HashMap, HashSet},
+        path::PathBuf,
+        sync::Arc,
+    };
+
+    #[derive(Debug)]
+    struct FakeProvider;
+
+    impl EnergyProvider for FakeProvider {
+        fn rapl_zones(&self) -> HashMap<PathBuf, (u64, u64)> {
+            HashMap::new()
+        }
+
+        fn batteries(&self) -> BatterySample {
+            BatterySample::default()
+        }
+    }
+
+    impl ResourceProvider for FakeProvider {
+        fn system_cpu(&self) -> (u64, usize) {
+            (100, 8)
+        }
+
+        fn processes(&self) -> HashMap<u32, ProcessStat> {
+            HashMap::from([(
+                42,
+                ProcessStat {
+                    parent_pid: 1,
+                    total_ticks: 10,
+                    start_ticks: 5,
+                    major_faults: 0,
+                    thread_count: 2,
+                },
+            )])
+        }
+
+        fn process_memory(&self, _pid: u32) -> MemoryUsage {
+            MemoryUsage {
+                rss_bytes: 2_048,
+                pss_bytes: 1_024,
+                rss_available: true,
+                pss_available: true,
+                ..MemoryUsage::default()
+            }
+        }
+
+        fn process_io(&self, _pid: u32) -> Option<ProcessIo> {
+            Some(ProcessIo::default())
+        }
+
+        fn process_files(&self, _pid: u32) -> ProcessFiles {
+            ProcessFiles {
+                fd_available: true,
+                ..ProcessFiles::default()
+            }
+        }
+
+        fn gpu_processes(&self, _pids: &HashSet<u32>) -> HashMap<u32, GpuProcessStat> {
+            HashMap::new()
+        }
+
+        fn process_cgroup(&self, _pid: u32) -> Option<String> {
+            None
+        }
+
+        fn cgroup_counters(&self, _path: &str) -> Option<CgroupCounters> {
+            None
+        }
+
+        fn cgroup_members(&self, _path: &str) -> HashSet<u32> {
+            HashSet::new()
+        }
+
+        fn application_disk_usage(&self, _target_id: &str) -> DiskBreakdown {
+            DiskBreakdown::default()
+        }
+    }
+
+    #[test]
+    fn samples_through_an_injected_provider() {
+        let mut sampler = ResourceSampler::with_provider(Arc::new(FakeProvider));
+        let targets = HashMap::from([("example.desktop".into(), vec![42])]);
+        let snapshot = sampler.sample_for_targets(&targets);
+        let usage = snapshot.usage_for_target("example.desktop", [42]);
+        assert_eq!(snapshot.logical_cpus, 8);
+        assert_eq!(usage.compute.memory_bytes, 1_024);
+        assert_eq!(usage.compute.thread_count, 2);
+        assert_eq!(usage.measurement.memory_source, "pss");
+        assert!(usage.measurement.network_connections_available);
+    }
 
     #[test]
     fn parses_proc_stat_with_spaces_in_command() -> anyhow::Result<()> {
@@ -1369,6 +1643,7 @@ mod tests {
             referenced_files: open_files.clone(),
             open_files,
             network_sockets: HashSet::new(),
+            network_available: true,
             storage_available: true,
         };
         let processes = HashMap::from([

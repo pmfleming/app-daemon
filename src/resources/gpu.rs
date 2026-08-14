@@ -18,11 +18,14 @@ struct GpuClientStat {
 }
 
 pub(super) fn read_gpu_processes(pids: &HashSet<u32>) -> HashMap<u32, GpuProcessStat> {
+    let clients = super::bounded_map(pids.iter().copied().collect(), |pid| {
+        (pid, read_gpu_clients(pid))
+    });
+    let mut clients = clients;
+    clients.sort_unstable_by_key(|(pid, _)| *pid);
     let mut unique = HashMap::<String, (u32, GpuClientStat)>::new();
-    let mut ordered = pids.iter().copied().collect::<Vec<_>>();
-    ordered.sort_unstable();
-    for pid in ordered {
-        for (id, client) in read_gpu_clients(pid) {
+    for (pid, clients) in clients {
+        for (id, client) in clients {
             unique
                 .entry(id)
                 .and_modify(|(_, current)| current.merge(client.clone()))

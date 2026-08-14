@@ -49,7 +49,11 @@ impl ApiService {
 
     async fn history(&self, params: Value) -> Result<Value, ApiError> {
         let query: ResourceHistoryParams = decode(params)?;
-        Ok(json!({ "history": self.applications.resource_history(query).await }))
+        self.applications
+            .resource_history(query)
+            .await
+            .map(|history| json!({ "history": history }))
+            .map_err(|error| ("validation-error", error.to_string()))
     }
 
     async fn refresh(&self, params: Value) -> Result<Value, ApiError> {

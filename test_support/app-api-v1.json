@@ -14,10 +14,17 @@
         "params_example": {
           "target_id": "org.example.App.desktop",
           "since_ms": 0,
+          "cursor": null,
           "limit": 1000
         },
         "response_key": "history",
-        "stream": "applications.changed"
+        "stream": "applications.changed",
+        "pagination": {
+          "kind": "opaque-cursor",
+          "request_field": "cursor",
+          "response_field": "next_cursor",
+          "order": "oldest-first"
+        }
       },
       {
         "name": "applications.refresh",

@@ -217,8 +217,11 @@ pub struct ResourceHistoryPoint {
 #[derive(Debug, PartialEq, Serialize, Deserialize)]
 pub struct ApplicationResourceHistory {
     pub target_id: String,
+    /// Chronological page ordered from oldest to newest.
     pub points: Vec<ResourceHistoryPoint>,
     pub has_more: bool,
+    /// Opaque forward-pagination cursor. Pass it back as `cursor` to fetch the next page.
+    pub next_cursor: Option<String>,
 }
 
 #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]

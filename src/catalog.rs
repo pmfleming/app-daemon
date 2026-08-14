@@ -226,12 +226,17 @@ fn catalog_revision(entries: &[CatalogEntry]) -> u64 {
     for entry in entries {
         entry.id.hash(&mut hasher);
         entry.name.hash(&mut hasher);
+        entry.generic_name.hash(&mut hasher);
+        entry.comment.hash(&mut hasher);
         entry.icon.hash(&mut hasher);
+        entry.keywords.hash(&mut hasher);
+        entry.categories.hash(&mut hasher);
         entry.startup_class.hash(&mut hasher);
-        entry
-            .actions
-            .iter()
-            .for_each(|action| action.id.hash(&mut hasher));
+        for action in &entry.actions {
+            action.id.hash(&mut hasher);
+            action.name.hash(&mut hasher);
+            action.icon.hash(&mut hasher);
+        }
     }
     hasher.finish()
 }
@@ -254,6 +259,24 @@ mod tests {
         let entry = &catalog.entries[0];
         assert!(entry.requires_terminal());
         assert_eq!(entry.launch_command()?, ["btop", "--utf-force"]);
+        Ok(())
+    }
+
+    #[test]
+    fn revision_tracks_all_visible_catalog_metadata() -> anyhow::Result<()> {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("example.desktop");
+        fs::write(
+            &path,
+            "[Desktop Entry]\nType=Application\nName=Example\nComment=Before\nExec=true\n",
+        )?;
+        let before = Catalog::from_paths(vec![directory.path().into()]).revision;
+        fs::write(
+            path,
+            "[Desktop Entry]\nType=Application\nName=Example\nComment=After\nExec=true\n",
+        )?;
+        let after = Catalog::from_paths(vec![directory.path().into()]).revision;
+        assert_ne!(before, after);
         Ok(())
     }
 

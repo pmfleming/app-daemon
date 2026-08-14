@@ -4,16 +4,25 @@ use std::{
     path::{Path, PathBuf},
 };
 
+pub(super) trait EnergyProvider {
+    fn rapl_zones(&self) -> HashMap<PathBuf, (u64, u64)>;
+    fn batteries(&self) -> BatterySample;
+}
+
 #[derive(Debug, Default)]
 pub(super) struct EnergySampler {
     previous_rapl: HashMap<PathBuf, (u64, u64)>,
 }
 
 impl EnergySampler {
-    pub(super) fn sample(&mut self, seconds: f64) -> EnergySample {
-        let battery = read_batteries();
-        let rapl_mwh = self.rapl_energy_mwh();
-        let (energy_mwh, source) = if rapl_mwh > 0.0 {
+    pub(super) fn sample<P: EnergyProvider + ?Sized>(
+        &mut self,
+        seconds: f64,
+        provider: &P,
+    ) -> EnergySample {
+        let battery = provider.batteries();
+        let rapl_mwh = self.rapl_energy_mwh(provider);
+        let (energy_mwh, source) = if let Some(rapl_mwh) = rapl_mwh {
             (rapl_mwh, "rapl")
         } else if battery.discharge_watts > 0.0 && seconds > 0.0 {
             (battery.discharge_watts * seconds / 3.6, "battery")
@@ -27,17 +36,17 @@ impl EnergySampler {
         }
     }
 
-    fn rapl_energy_mwh(&mut self) -> f64 {
-        let current = read_rapl_zones();
-        let microjoules = current
+    fn rapl_energy_mwh<P: EnergyProvider + ?Sized>(&mut self, provider: &P) -> Option<f64> {
+        let current = provider.rapl_zones();
+        let deltas = current
             .iter()
             .filter_map(|(path, &(value, maximum))| {
                 let &(previous, _) = self.previous_rapl.get(path)?;
                 Some(counter_delta(previous, value, maximum))
             })
-            .sum::<u64>();
+            .collect::<Vec<_>>();
         self.previous_rapl = current;
-        microjoules as f64 / 3_600_000.0
+        (!deltas.is_empty()).then(|| deltas.into_iter().sum::<u64>() as f64 / 3_600_000.0)
     }
 }
 
@@ -57,12 +66,12 @@ pub(super) struct EnergySample {
 }
 
 #[derive(Debug, Default)]
-struct BatterySample {
+pub(super) struct BatterySample {
     full_mwh: f64,
     discharge_watts: f64,
 }
 
-fn read_rapl_zones() -> HashMap<PathBuf, (u64, u64)> {
+pub(super) fn read_rapl_zones() -> HashMap<PathBuf, (u64, u64)> {
     let root = Path::new("/sys/class/powercap");
     let Ok(entries) = fs::read_dir(root) else {
         return HashMap::new();
@@ -99,7 +108,7 @@ fn read_rapl_zones() -> HashMap<PathBuf, (u64, u64)> {
         .collect()
 }
 
-fn read_batteries() -> BatterySample {
+pub(super) fn read_batteries() -> BatterySample {
     let Ok(entries) = fs::read_dir("/sys/class/power_supply") else {
         return BatterySample::default();
     };

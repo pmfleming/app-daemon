@@ -5,6 +5,8 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+use anyhow::Context;
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde::{Deserialize, Serialize};
 
 use crate::model::{
@@ -304,6 +306,20 @@ struct HistoryFile {
     applications: HashMap<String, Vec<ResourceHistoryPoint>>,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+struct HistoryCursor {
+    version: u8,
+    target_id: String,
+    after_timestamp_ms: u64,
+}
+
+#[derive(Debug)]
+pub struct HistoryPage {
+    pub points: Vec<ResourceHistoryPoint>,
+    pub has_more: bool,
+    pub next_cursor: Option<String>,
+}
+
 #[derive(Debug)]
 pub struct HistoryStore {
     path: Option<PathBuf>,
@@ -348,21 +364,16 @@ impl HistoryStore {
         if !duration_seconds.is_finite() || duration_seconds <= 0.0 {
             return;
         }
+        self.flush_expired(timestamp_ms);
         let duration_ms = (duration_seconds * 1000.0).round().max(1.0) as u64;
         let bucket_start = timestamp_ms - timestamp_ms % BUCKET_MILLISECONDS;
-        let previous_bucket = self.pending.get(target_id).is_some_and(|pending| {
-            pending.timestamp_ms != 0 && pending.timestamp_ms != bucket_start
-        });
-        if previous_bucket
-            && let Some(point) = self
-                .pending
-                .remove(target_id)
-                .and_then(PendingPoint::finish)
+        if self
+            .pending
+            .get(target_id)
+            .is_some_and(|pending| pending.timestamp_ms != bucket_start)
+            && let Some(pending) = self.pending.remove(target_id)
         {
-            self.points
-                .entry(target_id.to_owned())
-                .or_default()
-                .push_back(point);
+            self.finish_pending(target_id.to_owned(), pending);
         }
         let pending = self.pending.entry(target_id.to_owned()).or_default();
         pending.timestamp_ms = bucket_start;
@@ -371,28 +382,40 @@ impl HistoryStore {
     }
 
     pub fn query(
-        &self,
+        &mut self,
         target_id: &str,
         since_ms: Option<u64>,
+        cursor: Option<&str>,
         limit: usize,
-    ) -> (Vec<ResourceHistoryPoint>, bool) {
-        let Some(points) = self.points.get(target_id) else {
-            return (Vec::new(), false);
-        };
-        let matching = points
-            .iter()
-            .filter(|point| since_ms.is_none_or(|since| point.timestamp_ms >= since))
-            .collect::<Vec<_>>();
+    ) -> anyhow::Result<HistoryPage> {
+        self.flush_expired(now_milliseconds());
+        let after = cursor
+            .map(|value| decode_cursor(value, target_id))
+            .transpose()?
+            .map(|cursor| cursor.after_timestamp_ms);
         let limit = limit.clamp(1, 10_000);
-        let has_more = matching.len() > limit;
-        let skip = matching.len().saturating_sub(limit);
-        (
-            matching.into_iter().skip(skip).cloned().collect::<Vec<_>>(),
+        let mut matching = self
+            .points
+            .get(target_id)
+            .into_iter()
+            .flatten()
+            .filter(|point| since_ms.is_none_or(|since| point.timestamp_ms >= since))
+            .filter(|point| after.is_none_or(|timestamp| point.timestamp_ms > timestamp));
+        let points = matching.by_ref().take(limit).cloned().collect::<Vec<_>>();
+        let has_more = matching.next().is_some();
+        let next_cursor = points
+            .last()
+            .map(|point| encode_cursor(target_id, point.timestamp_ms))
+            .transpose()?;
+        Ok(HistoryPage {
+            points,
             has_more,
-        )
+            next_cursor,
+        })
     }
 
     pub fn save(&mut self) -> std::io::Result<()> {
+        self.flush_expired(now_milliseconds());
         self.persist()
     }
 
@@ -425,9 +448,29 @@ impl HistoryStore {
 
     fn flush_pending(&mut self) {
         for (id, pending) in std::mem::take(&mut self.pending) {
-            if let Some(point) = pending.finish() {
-                self.points.entry(id).or_default().push_back(point);
+            self.finish_pending(id, pending);
+        }
+    }
+
+    fn flush_expired(&mut self, timestamp_ms: u64) {
+        let expired = self
+            .pending
+            .iter()
+            .filter_map(|(id, pending)| {
+                (pending.timestamp_ms.saturating_add(BUCKET_MILLISECONDS) <= timestamp_ms)
+                    .then_some(id.clone())
+            })
+            .collect::<Vec<_>>();
+        for id in expired {
+            if let Some(pending) = self.pending.remove(&id) {
+                self.finish_pending(id, pending);
             }
+        }
+    }
+
+    fn finish_pending(&mut self, id: String, pending: PendingPoint) {
+        if let Some(point) = pending.finish() {
+            self.points.entry(id).or_default().push_back(point);
         }
     }
 
@@ -443,6 +486,32 @@ impl HistoryStore {
             !points.is_empty()
         });
     }
+}
+
+fn encode_cursor(target_id: &str, timestamp_ms: u64) -> anyhow::Result<String> {
+    let cursor = HistoryCursor {
+        version: FILE_VERSION,
+        target_id: target_id.to_owned(),
+        after_timestamp_ms: timestamp_ms,
+    };
+    Ok(URL_SAFE_NO_PAD.encode(serde_json::to_vec(&cursor)?))
+}
+
+fn decode_cursor(value: &str, target_id: &str) -> anyhow::Result<HistoryCursor> {
+    let bytes = URL_SAFE_NO_PAD
+        .decode(value)
+        .context("history cursor is not valid base64url")?;
+    let cursor: HistoryCursor =
+        serde_json::from_slice(&bytes).context("history cursor is not valid JSON")?;
+    anyhow::ensure!(
+        cursor.version == FILE_VERSION,
+        "history cursor version is unsupported"
+    );
+    anyhow::ensure!(
+        cursor.target_id == target_id,
+        "history cursor belongs to another target"
+    );
+    Ok(cursor)
 }
 
 pub fn now_milliseconds() -> u64 {
@@ -485,19 +554,11 @@ mod tests {
         let directory = tempfile::tempdir()?;
         let path = directory.path().join("history.json");
         std::fs::write(&path, br#"{"version":99,"applications":{"app":[]}}"#)?;
-        assert!(
-            HistoryStore::load(Some(path.clone()))
-                .query("app", None, 10)
-                .0
-                .is_empty()
-        );
+        let mut unknown = HistoryStore::load(Some(path.clone()));
+        assert!(unknown.query("app", None, None, 10)?.points.is_empty());
         std::fs::write(&path, b"not json")?;
-        assert!(
-            HistoryStore::load(Some(path))
-                .query("app", None, 10)
-                .0
-                .is_empty()
-        );
+        let mut malformed = HistoryStore::load(Some(path));
+        assert!(malformed.query("app", None, None, 10)?.points.is_empty());
         Ok(())
     }
 
@@ -546,10 +607,10 @@ mod tests {
             2.0,
             &ResourceUsage::default(),
         );
-        let (points, more) = store.query("example.desktop", None, 10);
-        assert!(!more);
-        assert_eq!(points.len(), 1);
-        let point = &points[0].resources;
+        let page = store.query("example.desktop", None, None, 10)?;
+        assert!(!page.has_more);
+        assert_eq!(page.points.len(), 1);
+        let point = &page.points[0].resources;
         assert_eq!(point.compute.cpu_percent, 50.0);
         assert_eq!(point.compute.gpu_percent, 25.0);
         assert_eq!(point.compute.gpu_memory_bytes, 2048);
@@ -561,8 +622,44 @@ mod tests {
         assert_eq!(point.energy_mwh, 6.0);
         store.save()?;
 
-        let loaded = HistoryStore::load(Some(path));
-        assert_eq!(loaded.query("example.desktop", None, 10).0, points);
+        let points = page.points;
+        let mut loaded = HistoryStore::load(Some(path));
+        assert_eq!(
+            loaded.query("example.desktop", None, None, 10)?.points,
+            points
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn paginates_forward_with_target_bound_cursors() -> anyhow::Result<()> {
+        let mut store = HistoryStore::load(None);
+        let now = super::now_milliseconds();
+        let first_bucket = now.saturating_sub(4 * super::BUCKET_MILLISECONDS)
+            / super::BUCKET_MILLISECONDS
+            * super::BUCKET_MILLISECONDS;
+        for index in 0..3 {
+            store.record(
+                "example.desktop",
+                first_bucket + index * super::BUCKET_MILLISECONDS + 1_000,
+                1.0,
+                &ResourceUsage::default(),
+            );
+        }
+
+        let first = store.query("example.desktop", None, None, 2)?;
+        assert_eq!(first.points.len(), 2);
+        assert!(first.has_more);
+        let cursor = first.next_cursor.as_deref().expect("next cursor");
+        let second = store.query("example.desktop", None, Some(cursor), 2)?;
+        assert_eq!(second.points.len(), 1);
+        assert!(!second.has_more);
+        assert!(second.next_cursor.is_some());
+        assert!(
+            store
+                .query("another.desktop", None, Some(cursor), 2)
+                .is_err()
+        );
         Ok(())
     }
 }

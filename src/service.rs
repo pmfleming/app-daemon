@@ -69,17 +69,19 @@ impl ApplicationService {
     pub async fn resource_history(
         &self,
         params: ResourceHistoryParams,
-    ) -> ApplicationResourceHistory {
-        let (points, has_more) =
-            self.history
-                .lock()
-                .await
-                .query(&params.target_id, params.since_ms, params.limit);
-        ApplicationResourceHistory {
+    ) -> anyhow::Result<ApplicationResourceHistory> {
+        let page = self.history.lock().await.query(
+            &params.target_id,
+            params.since_ms,
+            params.cursor.as_deref(),
+            params.limit,
+        )?;
+        Ok(ApplicationResourceHistory {
             target_id: params.target_id,
-            points,
-            has_more,
-        }
+            points: page.points,
+            has_more: page.has_more,
+            next_cursor: page.next_cursor,
+        })
     }
 
     pub async fn save_history(&self) {
@@ -371,6 +373,9 @@ pub struct ResourceHistoryParams {
     pub target_id: String,
     #[serde(default)]
     pub since_ms: Option<u64>,
+    /// Opaque cursor returned as `next_cursor` by the previous page.
+    #[serde(default)]
+    pub cursor: Option<String>,
     #[serde(default = "default_history_limit")]
     pub limit: usize,
 }
