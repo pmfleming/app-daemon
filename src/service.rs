@@ -88,6 +88,12 @@ impl ApplicationService {
         }
     }
 
+    pub async fn save_history_final(&self) {
+        if let Err(error) = self.history.lock().await.save_final() {
+            tracing::warn!(%error, "final resource history could not be saved");
+        }
+    }
+
     pub async fn execute(&self, params: ExecuteParams) -> anyhow::Result<OperationResult> {
         let windows = Arc::clone(&*self.windows.read().await);
         let catalog = Arc::clone(&*self.catalog.read().await);
@@ -134,7 +140,18 @@ async fn sample_resources(service: &ApplicationService, sampler: &mut ResourceSa
             .push(window.pid);
     }
     let started = Instant::now();
-    let snapshot = sampler.sample_for_roots(roots.values().flatten().copied());
+    let mut owned_sampler = std::mem::take(sampler);
+    let sample_targets = roots.clone();
+    let sampled = tokio::task::spawn_blocking(move || {
+        let snapshot = owned_sampler.sample_for_targets(&sample_targets);
+        (owned_sampler, snapshot)
+    })
+    .await;
+    let Ok((next_sampler, snapshot)) = sampled else {
+        tracing::warn!("application resource sampler task failed");
+        return;
+    };
+    *sampler = next_sampler;
     let sample_milliseconds = started.elapsed().as_millis();
     tracing::debug!(
         active_applications = roots.len(),
@@ -143,7 +160,7 @@ async fn sample_resources(service: &ApplicationService, sampler: &mut ResourceSa
     );
     let mut history = service.history.lock().await;
     for (target_id, pids) in roots {
-        let usage = snapshot.usage_for_roots(pids);
+        let usage = snapshot.usage_for_target(&target_id, pids);
         history.record(
             &target_id,
             now_milliseconds(),
@@ -488,11 +505,15 @@ fn target_window<'a>(
         .find(|window| resolve_target(catalog, window) == target_id)
 }
 
-fn instances(clients: &[Client], resources: &ResourceSnapshot) -> Vec<WindowSummary> {
+fn instances(
+    target_id: &str,
+    clients: &[Client],
+    resources: &ResourceSnapshot,
+) -> Vec<WindowSummary> {
     clients
         .iter()
         .map(|window| {
-            let usage = resources.usage_for_roots([window.pid]);
+            let usage = resources.usage_for_target(target_id, [window.pid]);
             WindowSummary {
                 id: hyprland::window_id(&window.address),
                 title: window.title.clone(),
@@ -508,11 +529,12 @@ fn instances(clients: &[Client], resources: &ResourceSnapshot) -> Vec<WindowSumm
 }
 
 fn instance_state(
+    target_id: &str,
     clients: Vec<Client>,
     resources: &ResourceSnapshot,
 ) -> (Vec<WindowSummary>, bool, i64, ResourceUsage) {
-    let usage = resources.usage_for_roots(clients.iter().map(|window| window.pid));
-    let instances = instances(&clients, resources);
+    let usage = resources.usage_for_target(target_id, clients.iter().map(|window| window.pid));
+    let instances = instances(target_id, &clients, resources);
     let focused = instances.iter().any(|window| window.focused);
     let best_rank = instances
         .iter()
@@ -528,7 +550,7 @@ fn summary_for_entry(
     resources: &ResourceSnapshot,
     revision: u64,
 ) -> ApplicationSummary {
-    let (instances, focused, best_rank, usage) = instance_state(clients, resources);
+    let (instances, focused, best_rank, usage) = instance_state(&entry.id, clients, resources);
     let running = !instances.is_empty();
     ApplicationSummary {
         identity: ApplicationIdentity {
@@ -566,7 +588,7 @@ fn summary_for_unmatched(
         .filter(|window| !window.class.is_empty())
         .map_or("Untitled", |window| &window.class)
         .to_owned();
-    let (instances, focused, best_rank, usage) = instance_state(clients, resources);
+    let (instances, focused, best_rank, usage) = instance_state(&id, clients, resources);
     ApplicationSummary {
         identity: ApplicationIdentity {
             id,

@@ -12,15 +12,23 @@ nix build
 
 ## Resource metrics
 
-The daemon samples active application process trees every two seconds, independently of API queries. `cpu_percent` follows `top` semantics (100% is one logical CPU), while `cpu_percent_of_machine` is normalized to the whole machine. PID start times and `/proc/stat` deltas are used to avoid PID-reuse errors and wall-clock/suspend skew.
+The daemon samples active applications every two seconds, independently of API queries. A specific systemd/Flatpak application cgroup is used to discover members when one is available; otherwise the Hyprland window PID and its descendants are used. Every result includes its attribution method, sample interval, process coverage, capability flags, and whether processes are shared by multiple application targets.
 
-GPU usage comes from per-process DRM client counters in `/proc/<pid>/fdinfo`. `gpu_percent` uses 100% for one fully occupied GPU engine and may exceed 100% when multiple engines are busy; `gpu_memory_bytes` prefers resident DRM memory and falls back to allocated memory. Unsupported drivers or inaccessible fdinfo report zero.
+`cpu_percent` follows `top` semantics (100% is one logical CPU), while `cpu_percent_of_machine` is normalized to the whole machine. Cgroup `cpu.stat` and `io.stat` deltas are preferred for specific application scopes, preserving completed work from short-lived children; PID start times and `/proc/stat` deltas provide the fallback and avoid PID-reuse errors and wall-clock/suspend skew. Process and thread counts plus major-fault rates are also reported. Procfs sampling is two-stage: the daemon reads lightweight process identity and CPU fields globally, then reads expensive memory, I/O, fd, and DRM details only for attributed processes.
 
-Storage I/O comes from `/proc/<pid>/io`. `disk_read_bytes` and `disk_write_bytes` are block-storage bytes completed during the sample, so cached reads are intentionally excluded; the corresponding `*_per_second` fields normalize them by sample duration. `open_file_disk_bytes` is the allocated size of unique regular files currently open by an app's process tree. It is a live disk-footprint indicator—not the app's installed size—and shared files are counted once per application.
+Memory prefers proportional set size from `/proc/<pid>/smaps_rollup`, avoiding repeated charging of shared pages in multi-process applications. RSS is the fallback. RSS, PSS, private memory, and swap remain separately available, and `memory_source` identifies the source used by the compatible `memory_bytes` field.
 
-Energy is an estimate: package energy from Linux powercap/RAPL is preferred and battery discharge power is the fallback. It is attributed by each process tree's share of observed CPU and GPU engine activity. `battery_percent` is the interval's estimated energy divided by full battery capacity; `battery_percent_per_hour` is the equivalent sustained drain rate. `energy_source` is `rapl`, `battery`, or `unavailable`.
+GPU usage comes from DRM client counters in `/proc/<pid>/fdinfo`. DRM clients duplicated across file descriptors or processes are counted once. `gpu_percent` is aggregate engine occupancy and may exceed 100%; `gpu_busy_percent` is the busiest engine and is capped at 100%. Resident and allocated GPU memory are reported separately. Capability metadata distinguishes an idle supported GPU from unavailable DRM accounting.
 
-CPU, GPU, resident CPU/GPU memory, storage I/O, open-file disk footprint, energy, and battery-equivalent history for active applications is aggregated into 15-second points and retained for 24 hours in `$XDG_STATE_HOME/app-daemon/resource-history-v1.json` (or `~/.local/state/...`). Query it with `applications.history`:
+Physical storage I/O comes from `/proc/<pid>/io`; logical cached I/O, operation counts, cancelled writes, and normalized rates are also exposed. Open and memory-mapped files are deduplicated by device and inode. Referenced-file footprint is split between temporary/cache paths and other files.
+
+Application-owned disk space is measured separately by scanning matching directories under XDG config, data, state, cache, runtime, and Flatpak application roots. `disk_space_permanent_bytes` covers config/data/state, `disk_space_temporary_bytes` covers cache/runtime data, and `disk_space_total_bytes` is their sum. This is application data footprint, not package-installed size; unidentified directories and arbitrary `/tmp` names are intentionally not guessed. Directory measurements refresh every 30 seconds.
+
+Network connection count is derived from unique sockets held by the attributed processes. Per-application network byte accounting is explicitly marked unavailable until an optional cgroup eBPF collector is present; network-namespace totals are not misreported as process traffic.
+
+Energy remains an estimate. Linux powercap/RAPL package energy is attributed by observed CPU-time share and marked low confidence. Battery discharge is exposed only as system power context because it includes the display, radios, storage, and idle losses; it is no longer assigned to individual applications. `energy_source`, `energy_confidence`, and `attributed_fraction` describe every value.
+
+Resource history is aligned to 15-second wall-clock buckets and retained for 24 hours in `$XDG_STATE_HOME/app-daemon/resource-history-v1.json` (or `~/.local/state/...`). Points include averages, peaks, sample count, coverage, and mixed-source metadata. Query it with `applications.history`:
 
 ```json
 {"target_id":"org.example.App.desktop","since_ms":0,"limit":1000}

@@ -208,6 +208,6 @@ pub async fn run() -> Result<()> {
         result = ctrl_c() => result.context("wait for Ctrl-C"),
         _ = terminate.recv() => Ok(()),
     };
-    shutdown_applications.save_history().await;
+    shutdown_applications.save_history_final().await;
     result
 }

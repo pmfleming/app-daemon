@@ -6,10 +6,11 @@ use std::{
 #[derive(Debug, Default)]
 pub(super) struct GpuProcessStat {
     pub(super) engine_nanoseconds: HashMap<String, u64>,
-    pub(super) memory_bytes: u64,
+    pub(super) resident_memory_bytes: u64,
+    pub(super) allocated_memory_bytes: u64,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 struct GpuClientStat {
     engine_nanoseconds: HashMap<String, u64>,
     resident_regions: HashMap<String, u64>,
@@ -17,14 +18,32 @@ struct GpuClientStat {
 }
 
 pub(super) fn read_gpu_processes(pids: &HashSet<u32>) -> HashMap<u32, GpuProcessStat> {
-    pids.iter()
-        .filter_map(|&pid| read_gpu_process(pid).map(|usage| (pid, usage)))
+    let mut unique = HashMap::<String, (u32, GpuClientStat)>::new();
+    let mut ordered = pids.iter().copied().collect::<Vec<_>>();
+    ordered.sort_unstable();
+    for pid in ordered {
+        for (id, client) in read_gpu_clients(pid) {
+            unique
+                .entry(id)
+                .and_modify(|(_, current)| current.merge(client.clone()))
+                .or_insert((pid, client));
+        }
+    }
+    let mut by_process = HashMap::<u32, HashMap<String, GpuClientStat>>::new();
+    for (id, (pid, client)) in unique {
+        by_process.entry(pid).or_default().insert(id, client);
+    }
+    by_process
+        .into_iter()
+        .map(|(pid, clients)| (pid, aggregate_gpu_clients(clients)))
         .collect()
 }
 
-fn read_gpu_process(pid: u32) -> Option<GpuProcessStat> {
-    let entries = fs::read_dir(format!("/proc/{pid}/fdinfo")).ok()?;
-    let clients = entries
+fn read_gpu_clients(pid: u32) -> HashMap<String, GpuClientStat> {
+    let Ok(entries) = fs::read_dir(format!("/proc/{pid}/fdinfo")) else {
+        return HashMap::new();
+    };
+    entries
         .filter_map(Result::ok)
         .filter_map(|entry| fs::read_to_string(entry.path()).ok())
         .filter_map(|value| parse_gpu_fdinfo(&value))
@@ -34,14 +53,18 @@ fn read_gpu_process(pid: u32) -> Option<GpuProcessStat> {
                 clients.entry(id).or_default().merge(client);
                 clients
             },
-        );
-    (!clients.is_empty()).then(|| aggregate_gpu_clients(clients))
+        )
 }
 
 fn aggregate_gpu_clients(clients: HashMap<String, GpuClientStat>) -> GpuProcessStat {
     let mut process = GpuProcessStat::default();
     for (client_id, client) in clients {
-        process.memory_bytes = process.memory_bytes.saturating_add(client.memory_bytes());
+        process.resident_memory_bytes = process
+            .resident_memory_bytes
+            .saturating_add(client.resident_memory_bytes());
+        process.allocated_memory_bytes = process
+            .allocated_memory_bytes
+            .saturating_add(client.allocated_memory_bytes());
         process.engine_nanoseconds.extend(
             client
                 .engine_nanoseconds
@@ -117,13 +140,12 @@ impl GpuClientStat {
             && self.allocated_regions.is_empty()
     }
 
-    fn memory_bytes(&self) -> u64 {
-        let regions = if self.resident_regions.is_empty() {
-            &self.allocated_regions
-        } else {
-            &self.resident_regions
-        };
-        regions.values().copied().sum()
+    fn resident_memory_bytes(&self) -> u64 {
+        self.resident_regions.values().copied().sum()
+    }
+
+    fn allocated_memory_bytes(&self) -> u64 {
+        self.allocated_regions.values().copied().sum()
     }
 }
 
