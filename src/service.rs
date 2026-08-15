@@ -682,7 +682,23 @@ fn page(
             .into_iter()
             .map(|(id, clients)| summary_for_unmatched(id, clients, resources, revision)),
     );
-    applications.retain(|application| matches_query(application, &params.query));
+    applications = applications
+        .into_iter()
+        .filter_map(|mut application| {
+            let matched = search_match(&application, &params.query)?;
+            application.match_score = matched.score;
+            application.match_kind = matched.kind.into();
+            application.score = if params.query.trim().is_empty() {
+                application.runtime_score
+            } else {
+                matched
+                    .score
+                    .saturating_mul(100_000)
+                    .saturating_add(application.runtime_score)
+            };
+            Some(application)
+        })
+        .collect();
     applications.sort_by(|left, right| {
         right
             .score
@@ -833,6 +849,9 @@ fn summary_for_entry(
             instances,
         },
         desktop_actions: entry.actions.clone(),
+        match_score: 0,
+        match_kind: "none".into(),
+        runtime_score: running_score(focused, best_rank),
         score: running_score(focused, best_rank),
     }
 }
@@ -873,6 +892,9 @@ fn summary_for_unmatched(
             instances,
         },
         desktop_actions: Vec::new(),
+        match_score: 0,
+        match_kind: "none".into(),
+        runtime_score: running_score(focused, best_rank),
         score: running_score(focused, best_rank),
     }
 }
@@ -887,16 +909,86 @@ fn running_score(focused: bool, focus_rank: i64) -> i64 {
     }
 }
 
-fn matches_query(application: &ApplicationSummary, query: &str) -> bool {
-    let tokens: Vec<_> = query
-        .to_lowercase()
-        .split_whitespace()
-        .map(str::to_owned)
-        .collect();
-    if tokens.is_empty() {
-        return true;
+struct SearchMatch {
+    score: i64,
+    kind: &'static str,
+}
+
+fn search_match(application: &ApplicationSummary, query: &str) -> Option<SearchMatch> {
+    let query = query.trim().to_lowercase();
+    if query.is_empty() {
+        return Some(SearchMatch {
+            score: 0,
+            kind: "none",
+        });
     }
-    let searchable = [
+
+    let name = application.identity.name.to_lowercase();
+    let id = application.identity.id.to_lowercase();
+    let id_stem = id.trim_end_matches(".desktop");
+    let searchable = search_values(application).join(" ").to_lowercase();
+    let acronym = search_acronym(application);
+    let tokens = query.split_whitespace().collect::<Vec<_>>();
+    if !tokens
+        .iter()
+        .all(|token| searchable.contains(token) || (token.len() <= 5 && acronym.contains(token)))
+    {
+        return None;
+    }
+
+    if name == query {
+        return Some(ranked_match(12_000, name.len(), "exact-name"));
+    }
+    if id == query || id_stem == query {
+        return Some(ranked_match(11_800, id.len(), "exact-id"));
+    }
+    if name.starts_with(&query) {
+        return Some(ranked_match(11_500, name.len(), "name-prefix"));
+    }
+    if id.starts_with(&query) || id_stem.starts_with(&query) {
+        return Some(ranked_match(11_000, id.len(), "id-prefix"));
+    }
+    if let Some(index) = name.find(&query) {
+        return Some(SearchMatch {
+            score: 9_500 - index as i64 * 10 - name.len().min(500) as i64,
+            kind: "name-substring",
+        });
+    }
+    if let Some(index) = id.find(&query) {
+        return Some(SearchMatch {
+            score: 9_000 - index as i64 * 10 - id.len().min(500) as i64,
+            kind: "id-substring",
+        });
+    }
+    if let Some(index) = searchable.find(&query) {
+        return Some(SearchMatch {
+            score: 7_500 - index.min(500) as i64,
+            kind: "metadata",
+        });
+    }
+    if query.len() <= 5
+        && let Some(index) = acronym.find(&query)
+    {
+        return Some(SearchMatch {
+            score: 6_500 - index as i64 * 10 - acronym.len().min(500) as i64,
+            kind: "acronym",
+        });
+    }
+    Some(SearchMatch {
+        score: 5_000 - tokens.len() as i64,
+        kind: "terms",
+    })
+}
+
+fn ranked_match(base: i64, length: usize, kind: &'static str) -> SearchMatch {
+    SearchMatch {
+        score: base - length.min(500) as i64,
+        kind,
+    }
+}
+
+fn search_values(application: &ApplicationSummary) -> Vec<&str> {
+    [
         application.identity.name.as_str(),
         application.identity.generic_name.as_str(),
         application.identity.comment.as_str(),
@@ -913,10 +1005,25 @@ fn matches_query(application: &ApplicationSummary, query: &str) -> bool {
             .iter()
             .flat_map(|window| [window.title.as_str(), window.class.as_str()]),
     )
-    .collect::<Vec<_>>()
-    .join(" ")
-    .to_lowercase();
-    tokens.iter().all(|token| searchable.contains(token))
+    .collect()
+}
+
+fn search_acronym(application: &ApplicationSummary) -> String {
+    let mut acronym = String::new();
+    for value in search_values(application) {
+        let mut previous_alphanumeric = false;
+        let mut previous_lowercase = false;
+        for character in value.chars() {
+            let boundary =
+                !previous_alphanumeric || (character.is_ascii_uppercase() && previous_lowercase);
+            if character.is_ascii_alphanumeric() && boundary {
+                acronym.push(character.to_ascii_lowercase());
+            }
+            previous_alphanumeric = character.is_ascii_alphanumeric();
+            previous_lowercase = character.is_ascii_lowercase();
+        }
+    }
+    acronym
 }
 
 fn display_name(catalog: &Catalog, target_id: &str) -> String {
@@ -977,12 +1084,13 @@ mod tests {
 
     use crate::{
         catalog::Catalog,
-        hyprland::{Client, Workspace},
+        hyprland::{Client, Snapshot, Workspace},
+        resources::ResourceSnapshot,
     };
 
     use super::{
-        ApplicationAction, ApplicationService, ExecuteParams, application_window_addresses,
-        resolve_target, running_score,
+        ApplicationAction, ApplicationService, ExecuteParams, QueryParams,
+        application_window_addresses, page, resolve_target, running_score,
     };
 
     #[test]
@@ -1040,6 +1148,44 @@ mod tests {
         assert!(running_score(true, 0) > running_score(false, 1));
         assert!(running_score(false, 1) > running_score(false, 8));
         assert!(running_score(false, 8) > running_score(false, i64::MAX));
+    }
+
+    #[test]
+    fn ranks_prefix_acronym_and_metadata_matches() -> anyhow::Result<()> {
+        let directory = tempfile::tempdir()?;
+        fs::write(
+            directory.path().join("google-contacts.desktop"),
+            "[Desktop Entry]\nType=Application\nName=Google Contacts\nGenericName=Address Book\nKeywords=people;friends;\nExec=true\n",
+        )?;
+        fs::write(
+            directory.path().join("calculator.desktop"),
+            "[Desktop Entry]\nType=Application\nName=Calculator\nComment=Perform arithmetic\nExec=true\n",
+        )?;
+        let catalog = Catalog::from_paths(vec![directory.path().into()]);
+        let resources = ResourceSnapshot::default();
+        let search = |query: &str| {
+            page(
+                &catalog,
+                Snapshot::default(),
+                &resources,
+                &QueryParams {
+                    query: query.into(),
+                    generation: 1,
+                    limit: 100,
+                },
+            )
+        };
+
+        let acronym = search("gc");
+        assert_eq!(acronym.applications.len(), 1);
+        assert_eq!(acronym.applications[0].identity.name, "Google Contacts");
+        assert_eq!(acronym.applications[0].match_kind, "acronym");
+        let prefix = search("calc");
+        assert_eq!(prefix.applications[0].match_kind, "name-prefix");
+        let metadata = search("people");
+        assert_eq!(metadata.applications[0].match_kind, "metadata");
+        assert!(metadata.applications[0].match_score > 0);
+        Ok(())
     }
 
     #[test]

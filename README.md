@@ -14,6 +14,8 @@ Application execution returns an accepted operation immediately. Subscribe to `a
 
 Graphical launches, terminal applications, and desktop actions prefer `uwsm-app` scopes under `app-graphical.slice`, falling back to direct execution when UWSM is unavailable.
 
+Application queries rank exact names, desktop IDs, prefixes, substrings, metadata, and short acronyms in descending tiers. Results expose `match_score`, `match_kind`, `runtime_score`, and the compatible combined `score`, so launchers can explain or customize their ordering.
+
 ## Resource metrics
 
 The daemon samples active applications every two seconds, independently of API queries. A specific systemd/Flatpak application cgroup is used to discover members when one is available; otherwise the Hyprland window PID and its descendants are used. Every result includes its attribution method, sample interval, process coverage, capability flags, and whether processes are shared by multiple application targets.

@@ -160,6 +160,13 @@ pub struct ApplicationSummary {
     #[serde(flatten)]
     pub runtime: ApplicationRuntime,
     pub desktop_actions: Vec<DesktopActionSummary>,
+    /// Textual relevance for the active query.
+    pub match_score: i64,
+    /// The strongest textual match tier, such as `exact-name` or `acronym`.
+    pub match_kind: String,
+    /// Focus/recency score independent of textual relevance.
+    pub runtime_score: i64,
+    /// Combined sort score retained for clients that consume a single value.
     pub score: i64,
 }
 
