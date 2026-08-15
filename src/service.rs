@@ -5,15 +5,16 @@ use std::{
 };
 
 use anyhow::Context;
+use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use serde::Deserialize;
 use tokio::{
-    sync::{Mutex, RwLock},
+    sync::{Mutex, RwLock, broadcast, mpsc},
     time::{self, MissedTickBehavior},
 };
 use uuid::Uuid;
 
 use crate::{
-    catalog::{Catalog, CatalogEntry},
+    catalog::{Catalog, CatalogEntry, default_catalog_paths},
     history::{HistoryStore, now_milliseconds},
     hyprland::{self, Client, Snapshot},
     launch::{self, LaunchReceipt},
@@ -24,38 +25,75 @@ use crate::{
     resources::{ResourceSampler, ResourceSnapshot},
 };
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StateRevision {
+    pub catalog: u64,
+    pub windows: u64,
+}
+
 pub struct ApplicationService {
     catalog: RwLock<Arc<Catalog>>,
     windows: RwLock<Arc<Snapshot>>,
     resources: RwLock<ResourceSnapshot>,
     history: Mutex<HistoryStore>,
+    state_changes: broadcast::Sender<StateRevision>,
 }
 
 impl ApplicationService {
     pub fn new() -> Arc<Self> {
+        let (state_changes, _) = broadcast::channel(32);
         let service = Arc::new(Self {
             catalog: RwLock::new(Arc::new(Catalog::load())),
             windows: RwLock::new(Arc::new(Snapshot::default())),
             resources: RwLock::new(ResourceSnapshot::default()),
             history: Mutex::new(HistoryStore::load_default()),
+            state_changes,
         });
         if tokio::runtime::Handle::try_current().is_ok() {
+            tokio::spawn(track_state(Arc::downgrade(&service)));
             tokio::spawn(track_resources(Arc::downgrade(&service)));
         }
         service
     }
 
     pub async fn refresh(&self) {
-        *self.catalog.write().await = Arc::new(Catalog::load());
+        self.refresh_catalog().await;
+        self.refresh_windows().await;
     }
 
-    pub async fn revisions(&self) -> (u64, u64) {
-        self.refresh().await;
-        let catalog = self.catalog.read().await.revision;
-        let snapshot = Arc::new(Snapshot::load().await);
-        let windows = snapshot.revision;
-        *self.windows.write().await = snapshot;
-        (catalog, windows)
+    pub async fn revisions(&self) -> StateRevision {
+        StateRevision {
+            catalog: self.catalog.read().await.revision,
+            windows: self.windows.read().await.revision,
+        }
+    }
+
+    pub fn subscribe_state(&self) -> broadcast::Receiver<StateRevision> {
+        self.state_changes.subscribe()
+    }
+
+    async fn refresh_catalog(&self) {
+        let next = Arc::new(Catalog::load());
+        let changed = next.revision != self.catalog.read().await.revision;
+        if changed {
+            *self.catalog.write().await = next;
+            self.publish_state().await;
+        }
+    }
+
+    async fn refresh_windows(&self) {
+        let next = Arc::new(Snapshot::load().await);
+        let current = self.windows.read().await;
+        let changed = next.available != current.available || next.revision != current.revision;
+        drop(current);
+        if changed {
+            *self.windows.write().await = next;
+            self.publish_state().await;
+        }
+    }
+
+    async fn publish_state(&self) {
+        let _ = self.state_changes.send(self.revisions().await);
     }
 
     pub async fn query(&self, params: QueryParams) -> ApplicationPage {
@@ -112,7 +150,74 @@ impl ApplicationService {
 }
 
 const RESOURCE_SAMPLE_INTERVAL: Duration = Duration::from_secs(2);
+const WINDOW_RECOVERY_INTERVAL: Duration = Duration::from_secs(5);
+const CATALOG_RECOVERY_INTERVAL: Duration = Duration::from_secs(30);
+const EVENT_DEBOUNCE: Duration = Duration::from_millis(75);
 const HISTORY_SAVE_INTERVAL: Duration = Duration::from_secs(60);
+
+async fn track_state(service: std::sync::Weak<ApplicationService>) {
+    let (window_sender, mut window_events) = mpsc::channel(64);
+    tokio::spawn(hyprland::watch_events(window_sender));
+    let (catalog_sender, mut catalog_events) = mpsc::channel(64);
+    let _catalog_watcher = match catalog_watcher(catalog_sender) {
+        Ok(watcher) => Some(watcher),
+        Err(error) => {
+            tracing::warn!(%error, "application catalog watcher could not start");
+            None
+        }
+    };
+    let mut window_poll = time::interval(WINDOW_RECOVERY_INTERVAL);
+    let mut catalog_poll = time::interval(CATALOG_RECOVERY_INTERVAL);
+    window_poll.set_missed_tick_behavior(MissedTickBehavior::Skip);
+    catalog_poll.set_missed_tick_behavior(MissedTickBehavior::Skip);
+    window_poll.tick().await;
+    catalog_poll.tick().await;
+
+    let Some(initial) = service.upgrade() else {
+        return;
+    };
+    initial.refresh_windows().await;
+    drop(initial);
+
+    loop {
+        let Some(service) = service.upgrade() else {
+            return;
+        };
+        tokio::select! {
+            event = window_events.recv() => {
+                if event.is_none() { return; }
+                time::sleep(EVENT_DEBOUNCE).await;
+                while window_events.try_recv().is_ok() {}
+                service.refresh_windows().await;
+            }
+            event = catalog_events.recv() => {
+                if event.is_none() { return; }
+                time::sleep(EVENT_DEBOUNCE).await;
+                while catalog_events.try_recv().is_ok() {}
+                service.refresh_catalog().await;
+            }
+            _ = window_poll.tick() => service.refresh_windows().await,
+            _ = catalog_poll.tick() => service.refresh_catalog().await,
+        }
+    }
+}
+
+fn catalog_watcher(sender: mpsc::Sender<()>) -> notify::Result<RecommendedWatcher> {
+    let mut watcher = notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
+        if event.is_ok() {
+            let _ = sender.try_send(());
+        }
+    })?;
+    for path in default_catalog_paths()
+        .into_iter()
+        .filter(|path| path.exists())
+    {
+        if let Err(error) = watcher.watch(&path, RecursiveMode::Recursive) {
+            tracing::warn!(%error, path = %path.display(), "application directory could not be watched");
+        }
+    }
+    Ok(watcher)
+}
 
 async fn track_resources(service: std::sync::Weak<ApplicationService>) {
     let mut sampler = ResourceSampler::default();
@@ -133,7 +238,7 @@ async fn track_resources(service: std::sync::Weak<ApplicationService>) {
 }
 
 async fn sample_resources(service: &ApplicationService, sampler: &mut ResourceSampler) {
-    let windows = Arc::new(Snapshot::load().await);
+    let windows = Arc::clone(&*service.windows.read().await);
     let catalog = Arc::clone(&*service.catalog.read().await);
     let mut roots: HashMap<String, Vec<u32>> = HashMap::new();
     for window in &windows.clients {
@@ -172,7 +277,6 @@ async fn sample_resources(service: &ApplicationService, sampler: &mut ResourceSa
         );
     }
     drop(history);
-    *service.windows.write().await = windows;
     *service.resources.write().await = snapshot;
 }
 

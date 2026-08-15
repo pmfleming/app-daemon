@@ -4,7 +4,6 @@ use std::{
         Arc,
         atomic::{AtomicU64, Ordering},
     },
-    time::Duration,
 };
 
 use anyhow::{Context, Result};
@@ -14,16 +13,15 @@ use tokio::{
         ctrl_c,
         unix::{SignalKind, signal},
     },
-    sync::Mutex,
+    sync::{Mutex, broadcast},
     task::JoinHandle,
-    time,
 };
 use zbus::{connection, object_server::SignalEmitter};
 
 use crate::{
     api::{self, ApiService, BUS_NAME, OBJECT_PATH},
     protocol,
-    service::ApplicationService,
+    service::{ApplicationService, StateRevision},
 };
 
 pub struct AppDaemon {
@@ -65,8 +63,10 @@ impl AppDaemon {
             "subscription-{}",
             self.sequence.fetch_add(1, Ordering::Relaxed)
         );
-        let task = tokio::spawn(poll_revisions(
+        let changes = self.applications.subscribe_state();
+        let task = tokio::spawn(forward_state_events(
             Arc::clone(&self.applications),
+            changes,
             emitter.to_owned(),
             id.clone(),
             selected,
@@ -110,25 +110,38 @@ fn selected_streams(streams: &[String]) -> Result<(bool, bool), &str> {
     ))
 }
 
-async fn poll_revisions(
+async fn forward_state_events(
     applications: Arc<ApplicationService>,
+    mut changes: broadcast::Receiver<StateRevision>,
     emitter: SignalEmitter<'static>,
     subscription_id: String,
     selected: (bool, bool),
 ) {
-    let mut interval = time::interval(Duration::from_millis(900));
     let mut previous = applications.revisions().await;
-    emit_event(
-        &emitter,
-        protocol::stream::APPLICATIONS,
-        "subscribed",
-        &subscription_id,
-        json!({ "catalog_revision": previous.0, "window_revision": previous.1 }),
-    )
-    .await;
+    for (stream, enabled) in [
+        (protocol::stream::APPLICATIONS, selected.0),
+        (protocol::stream::WINDOWS, selected.1),
+    ] {
+        if enabled {
+            emit_event(
+                &emitter,
+                stream,
+                "subscribed",
+                &subscription_id,
+                json!({
+                    "catalog_revision": previous.catalog,
+                    "window_revision": previous.windows
+                }),
+            )
+            .await;
+        }
+    }
     loop {
-        interval.tick().await;
-        let current = applications.revisions().await;
+        let current = match changes.recv().await {
+            Ok(current) => current,
+            Err(broadcast::error::RecvError::Lagged(_)) => applications.revisions().await,
+            Err(broadcast::error::RecvError::Closed) => return,
+        };
         for (stream, revision) in revision_changes(selected, previous, current) {
             emit_event(
                 &emitter,
@@ -145,19 +158,19 @@ async fn poll_revisions(
 
 fn revision_changes(
     selected: (bool, bool),
-    previous: (u64, u64),
-    current: (u64, u64),
+    previous: StateRevision,
+    current: StateRevision,
 ) -> impl Iterator<Item = (&'static str, u64)> {
     [
         (
-            selected.0 && current.0 != previous.0,
+            selected.0 && current.catalog != previous.catalog,
             protocol::stream::APPLICATIONS,
-            current.0,
+            current.catalog,
         ),
         (
-            selected.1 && current.1 != previous.1,
+            selected.1 && current.windows != previous.windows,
             protocol::stream::WINDOWS,
-            current.1,
+            current.windows,
         ),
     ]
     .into_iter()
@@ -210,4 +223,31 @@ pub async fn run() -> Result<()> {
     };
     shutdown_applications.save_history_final().await;
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::{protocol, service::StateRevision};
+
+    use super::revision_changes;
+
+    #[test]
+    fn filters_shared_state_changes_by_selected_streams() {
+        let previous = StateRevision {
+            catalog: 1,
+            windows: 2,
+        };
+        let current = StateRevision {
+            catalog: 3,
+            windows: 4,
+        };
+        assert_eq!(
+            revision_changes((true, false), previous, current).collect::<Vec<_>>(),
+            [(protocol::stream::APPLICATIONS, 3)]
+        );
+        assert_eq!(
+            revision_changes((false, true), previous, current).collect::<Vec<_>>(),
+            [(protocol::stream::WINDOWS, 4)]
+        );
+    }
 }

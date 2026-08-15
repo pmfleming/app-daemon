@@ -53,7 +53,7 @@ pub struct Catalog {
 
 impl Catalog {
     pub fn load() -> Self {
-        Self::from_paths(default_paths().collect())
+        Self::from_paths(default_catalog_paths())
     }
 
     pub fn from_paths(paths: Vec<PathBuf>) -> Self {
@@ -88,6 +88,10 @@ impl Catalog {
     pub fn by_id(&self, id: &str) -> Option<&CatalogEntry> {
         self.entries.iter().find(|entry| entry.id == id)
     }
+}
+
+pub fn default_catalog_paths() -> Vec<PathBuf> {
+    default_paths().collect()
 }
 
 fn catalog_entry(
