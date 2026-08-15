@@ -4,6 +4,7 @@ pub mod client;
 pub mod daemon;
 pub mod history;
 pub mod hyprland;
+pub mod launch;
 pub mod model;
 pub mod protocol;
 pub mod resources;

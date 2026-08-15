@@ -1,6 +1,5 @@
 use std::{
     collections::HashMap,
-    process::Stdio,
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -8,7 +7,6 @@ use std::{
 use anyhow::Context;
 use serde::Deserialize;
 use tokio::{
-    process::Command,
     sync::{Mutex, RwLock},
     time::{self, MissedTickBehavior},
 };
@@ -18,6 +16,7 @@ use crate::{
     catalog::{Catalog, CatalogEntry},
     history::{HistoryStore, now_milliseconds},
     hyprland::{self, Client, Snapshot},
+    launch::{self, LaunchReceipt},
     model::{
         ApplicationIdentity, ApplicationPage, ApplicationResourceHistory, ApplicationRuntime,
         ApplicationSummary, OperationResult, ResourceUsage, WindowSummary,
@@ -99,13 +98,15 @@ impl ApplicationService {
     pub async fn execute(&self, params: ExecuteParams) -> anyhow::Result<OperationResult> {
         let windows = Arc::clone(&*self.windows.read().await);
         let catalog = Arc::clone(&*self.catalog.read().await);
-        let message = execute_action(&catalog, &windows, &params).await?;
+        let outcome = execute_action(&catalog, &windows, &params).await?;
         Ok(OperationResult {
             id: format!("operation-{}", Uuid::new_v4()),
             action: params.action,
             target_id: params.target_id,
             status: "completed".into(),
-            message,
+            message: outcome.message,
+            launch_backend: outcome.launch.as_ref().map(|launch| launch.backend.clone()),
+            launch_scope: outcome.launch.map(|launch| launch.scope),
         })
     }
 }
@@ -201,17 +202,34 @@ impl std::str::FromStr for ApplicationAction {
     }
 }
 
+struct ActionOutcome {
+    message: String,
+    launch: Option<LaunchReceipt>,
+}
+
+impl ActionOutcome {
+    fn new(catalog: &Catalog, target_id: &str, verb: &str) -> Self {
+        Self {
+            message: format!("{verb} {}", display_name(catalog, target_id)),
+            launch: None,
+        }
+    }
+
+    fn launched(catalog: &Catalog, target_id: &str, verb: &str, launch: LaunchReceipt) -> Self {
+        Self {
+            message: format!("{verb} {}", display_name(catalog, target_id)),
+            launch: Some(launch),
+        }
+    }
+}
+
 async fn execute_action(
     catalog: &Catalog,
     windows: &Snapshot,
     params: &ExecuteParams,
-) -> anyhow::Result<String> {
+) -> anyhow::Result<ActionOutcome> {
     let action: ApplicationAction = params.action.parse()?;
-    let verb = action.execute(catalog, windows, params).await?;
-    Ok(format!(
-        "{verb} {}",
-        display_name(catalog, &params.target_id)
-    ))
+    action.execute(catalog, windows, params).await
 }
 
 impl ApplicationAction {
@@ -220,27 +238,33 @@ impl ApplicationAction {
         catalog: &Catalog,
         windows: &Snapshot,
         params: &ExecuteParams,
-    ) -> anyhow::Result<&'static str> {
+    ) -> anyhow::Result<ActionOutcome> {
+        let target_id = &params.target_id;
         match self {
-            Self::Activate => activate(catalog, windows, &params.target_id).await,
-            Self::Launch => launch(catalog, &params.target_id)
+            Self::Activate => activate(catalog, windows, target_id).await,
+            Self::Launch => launch(catalog, target_id)
                 .await
-                .map(|()| "Launched"),
+                .map(|launch| ActionOutcome::launched(catalog, target_id, "Launched", launch)),
             Self::FocusWindow => focus_window(catalog, windows, params)
                 .await
-                .map(|()| "Focused"),
-            Self::Close => close_application(catalog, windows, &params.target_id)
+                .map(|()| ActionOutcome::new(catalog, target_id, "Focused")),
+            Self::Close => close_application(catalog, windows, target_id)
                 .await
-                .map(|()| "Closed"),
+                .map(|()| ActionOutcome::new(catalog, target_id, "Closed")),
             Self::CloseWindow => close_window(catalog, windows, params)
                 .await
-                .map(|()| "Closed"),
-            Self::DesktopAction => desktop_action(catalog, params).await.map(|()| "Started"),
+                .map(|()| ActionOutcome::new(catalog, target_id, "Closed")),
+            Self::DesktopAction => desktop_action(catalog, params)
+                .await
+                .map(|launch| ActionOutcome::launched(catalog, target_id, "Started", launch)),
         }
     }
 }
 
-async fn desktop_action(catalog: &Catalog, params: &ExecuteParams) -> anyhow::Result<()> {
+async fn desktop_action(
+    catalog: &Catalog,
+    params: &ExecuteParams,
+) -> anyhow::Result<LaunchReceipt> {
     let action = params
         .desktop_action_id
         .as_deref()
@@ -252,17 +276,18 @@ async fn activate(
     catalog: &Catalog,
     windows: &Snapshot,
     target_id: &str,
-) -> anyhow::Result<&'static str> {
+) -> anyhow::Result<ActionOutcome> {
     if let Some(window) = target_window(catalog, windows, target_id) {
         hyprland::focus(&window.address).await?;
-        return Ok("Focused");
+        return Ok(ActionOutcome::new(catalog, target_id, "Focused"));
     }
-    launch(catalog, target_id).await?;
-    if focus_launched_window(catalog, target_id).await? {
-        Ok("Launched and focused")
+    let launch = launch(catalog, target_id).await?;
+    let verb = if focus_launched_window(catalog, target_id).await? {
+        "Launched and focused"
     } else {
-        Ok("Launched")
-    }
+        "Launched"
+    };
+    Ok(ActionOutcome::launched(catalog, target_id, verb, launch))
 }
 
 async fn focus_launched_window(catalog: &Catalog, target_id: &str) -> anyhow::Result<bool> {
@@ -676,49 +701,36 @@ fn display_name(catalog: &Catalog, target_id: &str) -> String {
     )
 }
 
-async fn launch(catalog: &Catalog, target_id: &str) -> anyhow::Result<()> {
+async fn launch(catalog: &Catalog, target_id: &str) -> anyhow::Result<LaunchReceipt> {
     let entry = catalog
         .by_id(target_id)
         .context("application is no longer available")?;
     if entry.requires_terminal() {
-        return launch_in_terminal(entry.launch_command()?).await;
+        return launch_in_terminal(entry.launch_command()?);
     }
-    let first = run_gtk_launch(target_id).await;
+    let first = launch::launch_desktop(target_id).await;
     if first.is_ok() {
         return first;
     }
-    run_gtk_launch(target_id.trim_end_matches(".desktop")).await
+    launch::launch_desktop(target_id.trim_end_matches(".desktop")).await
 }
 
-async fn launch_in_terminal(command: Vec<String>) -> anyhow::Result<()> {
-    let (program, arguments) = command
+fn launch_in_terminal(command: Vec<String>) -> anyhow::Result<LaunchReceipt> {
+    let (program, command_arguments) = command
         .split_first()
         .context("desktop application command is empty")?;
-    Command::new("xdg-terminal-exec")
-        .arg("--")
-        .arg(program)
-        .args(arguments)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .context("start application in the default terminal")?;
-    Ok(())
+    let mut arguments = Vec::with_capacity(command_arguments.len() + 2);
+    arguments.extend(["--", program.as_str()]);
+    arguments.extend(command_arguments.iter().map(String::as_str));
+    launch::spawn("xdg-terminal-exec", arguments)
+        .context("start application in the default terminal")
 }
 
-async fn run_gtk_launch(id: &str) -> anyhow::Result<()> {
-    let status = Command::new("gtk-launch")
-        .arg(id)
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .status()
-        .await
-        .context("start gtk-launch")?;
-    anyhow::ensure!(status.success(), "desktop application launch failed");
-    Ok(())
-}
-
-async fn launch_action(catalog: &Catalog, target_id: &str, action_id: &str) -> anyhow::Result<()> {
+async fn launch_action(
+    catalog: &Catalog,
+    target_id: &str,
+    action_id: &str,
+) -> anyhow::Result<LaunchReceipt> {
     let entry = catalog
         .by_id(target_id)
         .context("application is no longer available")?;
@@ -726,14 +738,7 @@ async fn launch_action(catalog: &Catalog, target_id: &str, action_id: &str) -> a
     let (program, arguments) = args
         .split_first()
         .context("desktop action command is empty")?;
-    Command::new(program)
-        .args(arguments)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .context("start desktop action")?;
-    Ok(())
+    launch::spawn(program, arguments).context("start desktop action")
 }
 
 #[cfg(test)]

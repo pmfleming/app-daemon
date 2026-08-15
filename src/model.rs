@@ -231,4 +231,8 @@ pub struct OperationResult {
     pub target_id: String,
     pub status: String,
     pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub launch_backend: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub launch_scope: Option<String>,
 }
