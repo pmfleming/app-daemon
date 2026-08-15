@@ -224,7 +224,7 @@ pub struct ApplicationResourceHistory {
     pub next_cursor: Option<String>,
 }
 
-#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OperationResult {
     pub id: String,
     pub action: String,

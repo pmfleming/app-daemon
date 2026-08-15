@@ -10,6 +10,10 @@ nix build
 
 `app-daemon daemon` exports `org.laufan.AppDaemon`; `app-daemon client` bridges JSONL requests to the session service using `app-api` v1. Resource collection is isolated behind an injectable Linux provider so procfs, cgroup, and energy edge cases can be tested without relying on the host.
 
+Application execution returns an accepted operation immediately. Subscribe to `applications.operation` for `running`, `completed`, `failed`, or `cancelled` updates, and cancel an active operation through the transport's existing `cancel` request. Passing `expected_revision` rejects stale actions; `move-to-workspace` also accepts `window_id` and `workspace_id`.
+
+Graphical launches, terminal applications, and desktop actions prefer `uwsm-app` scopes under `app-graphical.slice`, falling back to direct execution when UWSM is unavailable.
+
 ## Resource metrics
 
 The daemon samples active applications every two seconds, independently of API queries. A specific systemd/Flatpak application cgroup is used to discover members when one is available; otherwise the Hyprland window PID and its descendants are used. Every result includes its attribution method, sample interval, process coverage, capability flags, and whether processes are shared by multiple application targets.

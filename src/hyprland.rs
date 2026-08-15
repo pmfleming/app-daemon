@@ -174,9 +174,31 @@ pub async fn close(address: &str) -> anyhow::Result<()> {
     anyhow::bail!("Hyprland rejected the close request")
 }
 
+pub async fn move_to_workspace(address: &str, workspace: &str) -> anyhow::Result<()> {
+    let selector = address_selector(address)?;
+    let workspace = workspace_selector(workspace)?;
+    let argument = format!("{workspace},{selector}");
+    anyhow::ensure!(
+        dispatch(&["dispatch", "movetoworkspacesilent", &argument]).await,
+        "Hyprland rejected the workspace move request"
+    );
+    Ok(())
+}
+
 fn address_selector(address: &str) -> anyhow::Result<String> {
     anyhow::ensure!(valid_address(address), "window address is invalid");
     Ok(format!("address:{address}"))
+}
+
+fn workspace_selector(workspace: &str) -> anyhow::Result<&str> {
+    anyhow::ensure!(
+        !workspace.is_empty()
+            && workspace
+                .chars()
+                .all(|character| character.is_ascii_alphanumeric() || "_-.+:".contains(character)),
+        "workspace is invalid"
+    );
+    Ok(workspace)
 }
 
 async fn dispatch(arguments: &[&str]) -> bool {
@@ -202,7 +224,7 @@ fn valid_address(address: &str) -> bool {
 mod tests {
     use std::{ffi::OsStr, path::PathBuf};
 
-    use super::{address_selector, event_socket_paths_for, window_id};
+    use super::{address_selector, event_socket_paths_for, window_id, workspace_selector};
 
     #[test]
     fn creates_protocol_safe_window_ids() {
@@ -213,6 +235,11 @@ mod tests {
     fn validates_window_selectors_for_dispatch() -> anyhow::Result<()> {
         assert_eq!(address_selector("0xAb12")?, "address:0xAb12");
         assert!(address_selector("not-an-address").is_err());
+        assert_eq!(
+            workspace_selector("special:scratchpad")?,
+            "special:scratchpad"
+        );
+        assert!(workspace_selector("2,address:0x1").is_err());
         Ok(())
     }
 

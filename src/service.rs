@@ -8,7 +8,8 @@ use anyhow::Context;
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use serde::Deserialize;
 use tokio::{
-    sync::{Mutex, RwLock, broadcast, mpsc},
+    sync::{Mutex, RwLock, broadcast, mpsc, oneshot},
+    task::AbortHandle,
     time::{self, MissedTickBehavior},
 };
 use uuid::Uuid;
@@ -31,23 +32,33 @@ pub struct StateRevision {
     pub windows: u64,
 }
 
+struct ActiveOperation {
+    abort: AbortHandle,
+    accepted: OperationResult,
+}
+
 pub struct ApplicationService {
     catalog: RwLock<Arc<Catalog>>,
     windows: RwLock<Arc<Snapshot>>,
     resources: RwLock<ResourceSnapshot>,
     history: Mutex<HistoryStore>,
     state_changes: broadcast::Sender<StateRevision>,
+    operation_changes: broadcast::Sender<OperationResult>,
+    operations: Mutex<HashMap<String, ActiveOperation>>,
 }
 
 impl ApplicationService {
     pub fn new() -> Arc<Self> {
         let (state_changes, _) = broadcast::channel(32);
+        let (operation_changes, _) = broadcast::channel(64);
         let service = Arc::new(Self {
             catalog: RwLock::new(Arc::new(Catalog::load())),
             windows: RwLock::new(Arc::new(Snapshot::default())),
             resources: RwLock::new(ResourceSnapshot::default()),
             history: Mutex::new(HistoryStore::load_default()),
             state_changes,
+            operation_changes,
+            operations: Mutex::new(HashMap::new()),
         });
         if tokio::runtime::Handle::try_current().is_ok() {
             tokio::spawn(track_state(Arc::downgrade(&service)));
@@ -70,6 +81,10 @@ impl ApplicationService {
 
     pub fn subscribe_state(&self) -> broadcast::Receiver<StateRevision> {
         self.state_changes.subscribe()
+    }
+
+    pub fn subscribe_operations(&self) -> broadcast::Receiver<OperationResult> {
+        self.operation_changes.subscribe()
     }
 
     async fn refresh_catalog(&self) {
@@ -133,19 +148,86 @@ impl ApplicationService {
         }
     }
 
-    pub async fn execute(&self, params: ExecuteParams) -> anyhow::Result<OperationResult> {
+    pub async fn execute(
+        self: &Arc<Self>,
+        params: ExecuteParams,
+    ) -> anyhow::Result<OperationResult> {
         let windows = Arc::clone(&*self.windows.read().await);
         let catalog = Arc::clone(&*self.catalog.read().await);
-        let outcome = execute_action(&catalog, &windows, &params).await?;
-        Ok(OperationResult {
-            id: format!("operation-{}", Uuid::new_v4()),
-            action: params.action,
-            target_id: params.target_id,
-            status: "completed".into(),
-            message: outcome.message,
-            launch_backend: outcome.launch.as_ref().map(|launch| launch.backend.clone()),
-            launch_scope: outcome.launch.map(|launch| launch.scope),
-        })
+        params.action.parse::<ApplicationAction>()?;
+        if let Some(expected) = params.expected_revision {
+            anyhow::ensure!(
+                expected == combined_revision(&catalog, &windows),
+                "application state changed; refresh and retry"
+            );
+        }
+
+        let accepted = operation_result(
+            format!("operation-{}", Uuid::new_v4()),
+            &params,
+            "accepted",
+            "Operation accepted".into(),
+            None,
+        );
+        let operation_id = accepted.id.clone();
+        let service = Arc::clone(self);
+        let (start_sender, start_receiver) = oneshot::channel();
+        let task = tokio::spawn(async move {
+            let _ = start_receiver.await;
+            let running = operation_result(
+                operation_id.clone(),
+                &params,
+                "running",
+                "Operation running".into(),
+                None,
+            );
+            let _ = service.operation_changes.send(running);
+            let result = execute_action(&catalog, &windows, &params).await;
+            let completed = match result {
+                Ok(outcome) => operation_result(
+                    operation_id.clone(),
+                    &params,
+                    "completed",
+                    outcome.message,
+                    outcome.launch,
+                ),
+                Err(error) => operation_result(
+                    operation_id.clone(),
+                    &params,
+                    "failed",
+                    error.to_string(),
+                    None,
+                ),
+            };
+            if service
+                .operations
+                .lock()
+                .await
+                .remove(&operation_id)
+                .is_some()
+            {
+                let _ = service.operation_changes.send(completed);
+            }
+        });
+        self.operations.lock().await.insert(
+            accepted.id.clone(),
+            ActiveOperation {
+                abort: task.abort_handle(),
+                accepted: accepted.clone(),
+            },
+        );
+        let _ = start_sender.send(());
+        Ok(accepted)
+    }
+
+    pub async fn cancel_operation(&self, operation_id: &str) -> Option<OperationResult> {
+        let active = self.operations.lock().await.remove(operation_id)?;
+        active.abort.abort();
+        let mut cancelled = active.accepted;
+        cancelled.status = "cancelled".into();
+        cancelled.message = "Operation cancelled".into();
+        let _ = self.operation_changes.send(cancelled.clone());
+        Some(cancelled)
     }
 }
 
@@ -287,6 +369,7 @@ enum ApplicationAction {
     FocusWindow,
     Close,
     CloseWindow,
+    MoveToWorkspace,
     DesktopAction,
 }
 
@@ -300,6 +383,7 @@ impl std::str::FromStr for ApplicationAction {
             "focus-window" => Ok(Self::FocusWindow),
             "close" => Ok(Self::Close),
             "close-window" => Ok(Self::CloseWindow),
+            "move-to-workspace" => Ok(Self::MoveToWorkspace),
             "desktop-action" => Ok(Self::DesktopAction),
             _ => anyhow::bail!("unsupported application action"),
         }
@@ -309,6 +393,24 @@ impl std::str::FromStr for ApplicationAction {
 struct ActionOutcome {
     message: String,
     launch: Option<LaunchReceipt>,
+}
+
+fn operation_result(
+    id: String,
+    params: &ExecuteParams,
+    status: &str,
+    message: String,
+    launch: Option<LaunchReceipt>,
+) -> OperationResult {
+    OperationResult {
+        id,
+        action: params.action.clone(),
+        target_id: params.target_id.clone(),
+        status: status.into(),
+        message,
+        launch_backend: launch.as_ref().map(|receipt| receipt.backend.clone()),
+        launch_scope: launch.map(|receipt| receipt.scope),
+    }
 }
 
 impl ActionOutcome {
@@ -358,6 +460,9 @@ impl ApplicationAction {
             Self::CloseWindow => close_window(catalog, windows, params)
                 .await
                 .map(|()| ActionOutcome::new(catalog, target_id, "Closed")),
+            Self::MoveToWorkspace => move_to_workspace(catalog, windows, params)
+                .await
+                .map(|()| ActionOutcome::new(catalog, target_id, "Moved")),
             Self::DesktopAction => desktop_action(catalog, params)
                 .await
                 .map(|launch| ActionOutcome::launched(catalog, target_id, "Started", launch)),
@@ -428,6 +533,19 @@ async fn close_window(
 ) -> anyhow::Result<()> {
     let address = target_address(catalog, windows, params)?;
     hyprland::close(address).await
+}
+
+async fn move_to_workspace(
+    catalog: &Catalog,
+    windows: &Snapshot,
+    params: &ExecuteParams,
+) -> anyhow::Result<()> {
+    let address = target_address(catalog, windows, params)?;
+    let workspace = params
+        .workspace_id
+        .as_deref()
+        .context("workspace_id is required")?;
+    hyprland::move_to_workspace(address, workspace).await
 }
 
 fn target_address<'a>(
@@ -513,7 +631,7 @@ const fn default_history_limit() -> usize {
     1_000
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct ExecuteParams {
     pub target_id: String,
     pub action: String,
@@ -521,6 +639,14 @@ pub struct ExecuteParams {
     pub window_id: Option<String>,
     #[serde(default)]
     pub desktop_action_id: Option<String>,
+    #[serde(default)]
+    pub expected_revision: Option<u64>,
+    #[serde(default)]
+    pub workspace_id: Option<String>,
+}
+
+fn combined_revision(catalog: &Catalog, windows: &Snapshot) -> u64 {
+    catalog.revision.rotate_left(17) ^ windows.revision
 }
 
 fn page(
@@ -529,7 +655,7 @@ fn page(
     resources: &ResourceSnapshot,
     params: &QueryParams,
 ) -> ApplicationPage {
-    let revision = catalog.revision.rotate_left(17) ^ windows.revision;
+    let revision = combined_revision(catalog, &windows);
     let available = windows.available;
     let mut grouped: HashMap<String, Vec<Client>> = HashMap::new();
     for window in windows.clients {
@@ -854,7 +980,10 @@ mod tests {
         hyprland::{Client, Workspace},
     };
 
-    use super::{ApplicationAction, application_window_addresses, resolve_target, running_score};
+    use super::{
+        ApplicationAction, ApplicationService, ExecuteParams, application_window_addresses,
+        resolve_target, running_score,
+    };
 
     #[test]
     fn parses_application_actions() {
@@ -862,7 +991,48 @@ mod tests {
             "activate".parse::<ApplicationAction>(),
             Ok(ApplicationAction::Activate)
         ));
+        assert!(matches!(
+            "move-to-workspace".parse::<ApplicationAction>(),
+            Ok(ApplicationAction::MoveToWorkspace)
+        ));
         assert!("unknown".parse::<ApplicationAction>().is_err());
+    }
+
+    #[tokio::test]
+    async fn accepts_operations_before_reporting_their_result() -> anyhow::Result<()> {
+        let service = ApplicationService::new();
+        let mut events = service.subscribe_operations();
+        let params = ExecuteParams {
+            target_id: "missing-window-group".into(),
+            action: "close".into(),
+            window_id: None,
+            desktop_action_id: None,
+            expected_revision: None,
+            workspace_id: None,
+        };
+        let accepted = service.execute(params).await?;
+        assert_eq!(accepted.status, "accepted");
+        let running = events.recv().await?;
+        let failed = events.recv().await?;
+        assert_eq!(running.id, accepted.id);
+        assert_eq!(running.status, "running");
+        assert_eq!(failed.id, accepted.id);
+        assert_eq!(failed.status, "failed");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn rejects_operations_for_stale_revisions() {
+        let service = ApplicationService::new();
+        let params = ExecuteParams {
+            target_id: "missing-window-group".into(),
+            action: "close".into(),
+            window_id: None,
+            desktop_action_id: None,
+            expected_revision: Some(u64::MAX),
+            workspace_id: None,
+        };
+        assert!(service.execute(params).await.is_err());
     }
 
     #[test]

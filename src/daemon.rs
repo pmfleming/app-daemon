@@ -64,9 +64,11 @@ impl AppDaemon {
             self.sequence.fetch_add(1, Ordering::Relaxed)
         );
         let changes = self.applications.subscribe_state();
-        let task = tokio::spawn(forward_state_events(
+        let operations = self.applications.subscribe_operations();
+        let task = tokio::spawn(forward_events(
             Arc::clone(&self.applications),
             changes,
+            operations,
             emitter.to_owned(),
             id.clone(),
             selected,
@@ -81,6 +83,15 @@ impl AppDaemon {
             return api::success(json!({ "cancelled": request_id, "kind": "subscription" }))
                 .to_string();
         }
+        if self
+            .applications
+            .cancel_operation(request_id)
+            .await
+            .is_some()
+        {
+            return api::success(json!({ "cancelled": request_id, "kind": "operation" }))
+                .to_string();
+        }
         api::error(
             "request-not-found",
             format!("No active request named {request_id}"),
@@ -93,7 +104,7 @@ impl AppDaemon {
     -> zbus::Result<()>;
 }
 
-fn selected_streams(streams: &[String]) -> Result<(bool, bool), &str> {
+fn selected_streams(streams: &[String]) -> Result<(bool, bool, bool), &str> {
     if let Some(stream) = streams
         .iter()
         .find(|stream| !protocol::STREAMS.contains(&stream.as_str()))
@@ -107,20 +118,25 @@ fn selected_streams(streams: &[String]) -> Result<(bool, bool), &str> {
         streams
             .iter()
             .any(|value| value == protocol::stream::WINDOWS),
+        streams
+            .iter()
+            .any(|value| value == protocol::stream::OPERATION),
     ))
 }
 
-async fn forward_state_events(
+async fn forward_events(
     applications: Arc<ApplicationService>,
     mut changes: broadcast::Receiver<StateRevision>,
+    mut operations: broadcast::Receiver<crate::model::OperationResult>,
     emitter: SignalEmitter<'static>,
     subscription_id: String,
-    selected: (bool, bool),
+    selected: (bool, bool, bool),
 ) {
     let mut previous = applications.revisions().await;
     for (stream, enabled) in [
         (protocol::stream::APPLICATIONS, selected.0),
         (protocol::stream::WINDOWS, selected.1),
+        (protocol::stream::OPERATION, selected.2),
     ] {
         if enabled {
             emit_event(
@@ -137,27 +153,49 @@ async fn forward_state_events(
         }
     }
     loop {
-        let current = match changes.recv().await {
-            Ok(current) => current,
-            Err(broadcast::error::RecvError::Lagged(_)) => applications.revisions().await,
-            Err(broadcast::error::RecvError::Closed) => return,
-        };
-        for (stream, revision) in revision_changes(selected, previous, current) {
-            emit_event(
-                &emitter,
-                stream,
-                "changed",
-                &subscription_id,
-                json!({ "revision": revision }),
-            )
-            .await;
+        tokio::select! {
+            state = changes.recv() => {
+                let current = match state {
+                    Ok(current) => current,
+                    Err(broadcast::error::RecvError::Lagged(_)) => applications.revisions().await,
+                    Err(broadcast::error::RecvError::Closed) => return,
+                };
+                for (stream, revision) in revision_changes(selected, previous, current) {
+                    emit_event(
+                        &emitter,
+                        stream,
+                        "changed",
+                        &subscription_id,
+                        json!({ "revision": revision }),
+                    )
+                    .await;
+                }
+                previous = current;
+            }
+            operation = operations.recv(), if selected.2 => {
+                match operation {
+                    Ok(operation) => {
+                        emit_event(
+                            &emitter,
+                            protocol::stream::OPERATION,
+                            &operation.status,
+                            &subscription_id,
+                            json!({ "operation": operation }),
+                        )
+                        .await;
+                    }
+                    Err(broadcast::error::RecvError::Lagged(count)) => {
+                        tracing::warn!(count, "application operation subscriber lagged");
+                    }
+                    Err(broadcast::error::RecvError::Closed) => return,
+                }
+            }
         }
-        previous = current;
     }
 }
 
 fn revision_changes(
-    selected: (bool, bool),
+    selected: (bool, bool, bool),
     previous: StateRevision,
     current: StateRevision,
 ) -> impl Iterator<Item = (&'static str, u64)> {
@@ -242,11 +280,11 @@ mod tests {
             windows: 4,
         };
         assert_eq!(
-            revision_changes((true, false), previous, current).collect::<Vec<_>>(),
+            revision_changes((true, false, false), previous, current).collect::<Vec<_>>(),
             [(protocol::stream::APPLICATIONS, 3)]
         );
         assert_eq!(
-            revision_changes((false, true), previous, current).collect::<Vec<_>>(),
+            revision_changes((false, true, false), previous, current).collect::<Vec<_>>(),
             [(protocol::stream::WINDOWS, 4)]
         );
     }
