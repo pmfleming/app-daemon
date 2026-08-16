@@ -118,27 +118,40 @@ pub(super) fn read_batteries() -> BatterySample {
             continue;
         }
         let voltage_uv = read_u64(&path.join("voltage_now")).unwrap_or(0) as f64;
-        let full_mwh = read_u64(&path.join("energy_full"))
-            .map(|value| value as f64 / 1000.0)
-            .or_else(|| {
-                read_u64(&path.join("charge_full"))
-                    .map(|charge| charge as f64 * voltage_uv / 1_000_000_000.0)
-            })
-            .unwrap_or(0.0);
+        let full_mwh = battery_metric(
+            &path,
+            ("energy_full", 1_000.0),
+            ("charge_full", 1_000_000_000.0),
+            voltage_uv,
+        );
         result.full_mwh += full_mwh;
         if read_trimmed(&path.join("status")).as_deref() != Some("Discharging") {
             continue;
         }
-        let watts = read_u64(&path.join("power_now"))
-            .map(|value| value as f64 / 1_000_000.0)
-            .or_else(|| {
-                read_u64(&path.join("current_now"))
-                    .map(|current| current as f64 * voltage_uv / 1_000_000_000_000.0)
-            })
-            .unwrap_or(0.0);
+        let watts = battery_metric(
+            &path,
+            ("power_now", 1_000_000.0),
+            ("current_now", 1_000_000_000_000.0),
+            voltage_uv,
+        );
         result.discharge_watts += watts;
     }
     result
+}
+
+fn battery_metric(
+    path: &Path,
+    direct: (&str, f64),
+    voltage_based: (&str, f64),
+    voltage_uv: f64,
+) -> f64 {
+    read_u64(&path.join(direct.0))
+        .map(|value| value as f64 / direct.1)
+        .or_else(|| {
+            read_u64(&path.join(voltage_based.0))
+                .map(|value| value as f64 * voltage_uv / voltage_based.1)
+        })
+        .unwrap_or(0.0)
 }
 
 fn read_u64(path: &Path) -> Option<u64> {

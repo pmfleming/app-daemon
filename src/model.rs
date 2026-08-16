@@ -109,7 +109,7 @@ pub struct ResourceUsage {
     pub measurement: ResourceMeasurement,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct DesktopActionSummary {
     pub id: String,
     pub name: String,

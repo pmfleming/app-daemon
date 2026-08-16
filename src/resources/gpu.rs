@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, hash_map::Entry},
     fs,
 };
 
@@ -26,10 +26,12 @@ pub(super) fn read_gpu_processes(pids: &HashSet<u32>) -> HashMap<u32, GpuProcess
     let mut unique = HashMap::<String, (u32, GpuClientStat)>::new();
     for (pid, clients) in clients {
         for (id, client) in clients {
-            unique
-                .entry(id)
-                .and_modify(|(_, current)| current.merge(client.clone()))
-                .or_insert((pid, client));
+            match unique.entry(id) {
+                Entry::Occupied(mut entry) => entry.get_mut().1.merge(client),
+                Entry::Vacant(entry) => {
+                    entry.insert((pid, client));
+                }
+            }
         }
     }
     let mut by_process = HashMap::<u32, HashMap<String, GpuClientStat>>::new();

@@ -1,8 +1,10 @@
-use std::{env, os::unix::fs::PermissionsExt, path::Path, process::Stdio};
+use std::process::Stdio;
 
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
 use tokio::process::Command;
+
+use crate::platform::command_available;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LaunchBackend {
@@ -23,18 +25,19 @@ impl LaunchBackend {
         }
     }
 
-    pub const fn name(self) -> &'static str {
+    const fn description(self) -> (&'static str, &'static str) {
         match self {
-            Self::Uwsm => "uwsm-app",
-            Self::Direct => "direct",
+            Self::Uwsm => ("uwsm-app", "app-graphical.slice"),
+            Self::Direct => ("direct", "inherited"),
         }
     }
 
+    pub const fn name(self) -> &'static str {
+        self.description().0
+    }
+
     pub const fn scope(self) -> &'static str {
-        match self {
-            Self::Uwsm => "app-graphical.slice",
-            Self::Direct => "inherited",
-        }
+        self.description().1
     }
 }
 
@@ -93,20 +96,6 @@ fn command(
     };
     command.args(arguments);
     command
-}
-
-fn command_available(command: &str) -> bool {
-    let command = Path::new(command);
-    if command.components().count() > 1 {
-        return executable(command);
-    }
-    env::var_os("PATH")
-        .is_some_and(|path| env::split_paths(&path).any(|dir| executable(&dir.join(command))))
-}
-
-fn executable(path: &Path) -> bool {
-    path.metadata()
-        .is_ok_and(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
 }
 
 #[cfg(test)]

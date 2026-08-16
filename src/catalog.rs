@@ -1,15 +1,14 @@
 use std::{
     collections::{HashSet, hash_map::DefaultHasher},
-    env, fs,
+    env,
     hash::{Hash, Hasher},
-    os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
 };
 
 use freedesktop_desktop_entry::{DesktopEntry, default_paths, get_languages_from_env};
 use walkdir::WalkDir;
 
-use crate::model::DesktopActionSummary;
+use crate::{model::DesktopActionSummary, platform::command_available};
 
 #[derive(Debug)]
 pub struct CatalogEntry {
@@ -170,7 +169,7 @@ fn launchable(entry: &DesktopEntry) -> bool {
         && !entry.hidden()
         && !entry.no_display()
         && entry.exec().is_some_and(|value| !value.is_empty())
-        && entry.try_exec().is_none_or(executable_available)
+        && entry.try_exec().is_none_or(command_available)
 }
 
 fn shown_on_desktop(entry: &DesktopEntry, desktops: &[String]) -> bool {
@@ -189,20 +188,6 @@ fn list_matches(values: Vec<&str>, desktops: &[String]) -> bool {
                 .iter()
                 .any(|desktop| value.eq_ignore_ascii_case(desktop))
     })
-}
-
-fn executable_available(value: &str) -> bool {
-    let executable = Path::new(value);
-    if executable.components().count() > 1 {
-        return is_executable(executable);
-    }
-    env::var_os("PATH")
-        .is_some_and(|path| env::split_paths(&path).any(|dir| is_executable(&dir.join(value))))
-}
-
-fn is_executable(path: &Path) -> bool {
-    fs::metadata(path)
-        .is_ok_and(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
 }
 
 fn desktop_files(root: &Path) -> Vec<PathBuf> {
@@ -228,84 +213,21 @@ fn desktop_id(root: &Path, path: &Path) -> Option<String> {
 fn catalog_revision(entries: &[CatalogEntry]) -> u64 {
     let mut hasher = DefaultHasher::new();
     for entry in entries {
-        entry.id.hash(&mut hasher);
-        entry.name.hash(&mut hasher);
-        entry.generic_name.hash(&mut hasher);
-        entry.comment.hash(&mut hasher);
-        entry.icon.hash(&mut hasher);
-        entry.keywords.hash(&mut hasher);
-        entry.categories.hash(&mut hasher);
-        entry.startup_class.hash(&mut hasher);
-        for action in &entry.actions {
-            action.id.hash(&mut hasher);
-            action.name.hash(&mut hasher);
-            action.icon.hash(&mut hasher);
-        }
+        (
+            &entry.id,
+            &entry.name,
+            &entry.generic_name,
+            &entry.comment,
+            &entry.icon,
+            &entry.keywords,
+            &entry.categories,
+            &entry.startup_class,
+            &entry.actions,
+        )
+            .hash(&mut hasher);
     }
     hasher.finish()
 }
 
 #[cfg(test)]
-mod tests {
-    use std::fs;
-
-    use super::Catalog;
-
-    #[test]
-    fn identifies_terminal_applications_and_parses_their_commands() -> anyhow::Result<()> {
-        let directory = tempfile::tempdir()?;
-        fs::write(
-            directory.path().join("terminal.desktop"),
-            "[Desktop Entry]\nType=Application\nName=Terminal app\nExec=btop --utf-force\nTerminal=true\n",
-        )?;
-
-        let catalog = Catalog::from_paths(vec![directory.path().into()]);
-        let entry = &catalog.entries[0];
-        assert!(entry.requires_terminal());
-        assert_eq!(entry.launch_command()?, ["btop", "--utf-force"]);
-        Ok(())
-    }
-
-    #[test]
-    fn revision_tracks_all_visible_catalog_metadata() -> anyhow::Result<()> {
-        let directory = tempfile::tempdir()?;
-        let path = directory.path().join("example.desktop");
-        fs::write(
-            &path,
-            "[Desktop Entry]\nType=Application\nName=Example\nComment=Before\nExec=true\n",
-        )?;
-        let before = Catalog::from_paths(vec![directory.path().into()]).revision;
-        fs::write(
-            path,
-            "[Desktop Entry]\nType=Application\nName=Example\nComment=After\nExec=true\n",
-        )?;
-        let after = Catalog::from_paths(vec![directory.path().into()]).revision;
-        assert_ne!(before, after);
-        Ok(())
-    }
-
-    #[test]
-    fn preserves_empty_optional_fields_and_honors_precedence() -> anyhow::Result<()> {
-        let high = tempfile::tempdir()?;
-        let low = tempfile::tempdir()?;
-        fs::write(
-            high.path().join("hidden.desktop"),
-            "[Desktop Entry]\nType=Application\nName=Hidden\nExec=hidden\nHidden=true\n",
-        )?;
-        fs::write(
-            low.path().join("hidden.desktop"),
-            "[Desktop Entry]\nType=Application\nName=Visible lower copy\nExec=true\n",
-        )?;
-        fs::write(
-            high.path().join("plain.desktop"),
-            "[Desktop Entry]\nType=Application\nName=Plain\nExec=true\n",
-        )?;
-
-        let catalog = Catalog::from_paths(vec![high.path().into(), low.path().into()]);
-        assert_eq!(catalog.entries.len(), 1);
-        assert_eq!(catalog.entries[0].id, "plain.desktop");
-        assert_eq!(catalog.entries[0].icon, "");
-        assert_eq!(catalog.entries[0].startup_class, "");
-        Ok(())
-    }
-}
+mod tests;
