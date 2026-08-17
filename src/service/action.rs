@@ -263,14 +263,11 @@ async fn launch(catalog: &Catalog, target_id: &str) -> anyhow::Result<LaunchRece
     let entry = catalog
         .by_id(target_id)
         .context("application is no longer available")?;
-    if entry.requires_terminal() {
+    if entry.requires_terminal() && launch::LaunchBackend::detect() == launch::LaunchBackend::Direct
+    {
         return launch_in_terminal(entry.launch_command()?);
     }
-    let first = launch::launch_desktop(target_id).await;
-    if first.is_ok() {
-        return first;
-    }
-    launch::launch_desktop(target_id.trim_end_matches(".desktop")).await
+    launch::launch_desktop(target_id).await
 }
 
 fn launch_in_terminal(command: Vec<String>) -> anyhow::Result<LaunchReceipt> {
@@ -293,6 +290,9 @@ async fn launch_action(
         .by_id(target_id)
         .context("application is no longer available")?;
     let args = entry.parse_action(action_id)?;
+    if launch::LaunchBackend::detect() == launch::LaunchBackend::Uwsm {
+        return launch::launch_desktop_action(target_id, action_id).await;
+    }
     let (program, arguments) = args
         .split_first()
         .context("desktop action command is empty")?;

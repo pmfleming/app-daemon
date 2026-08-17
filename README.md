@@ -12,7 +12,7 @@ nix build
 
 Application execution returns an accepted operation immediately. Subscribe to `applications.operation` for `running`, `completed`, `failed`, or `cancelled` updates, and cancel an active operation through the transport's existing `cancel` request. Passing `expected_revision` rejects stale actions; `move-to-workspace` also accepts `window_id` and `workspace_id`.
 
-Graphical launches, terminal applications, and desktop actions prefer `uwsm-app` scopes under `app-graphical.slice`, falling back to direct execution when UWSM is unavailable.
+Graphical launches, terminal applications, and desktop actions pass their desktop IDs directly to `uwsm-app` (the fast, drop-in client for `uwsm app`) and run in `app-graphical.slice`. This lets UWSM interpret `Terminal`, `Path`, and desktop-action metadata itself. Direct `gtk-launch`, `xdg-terminal-exec`, or parsed-command execution is used only when UWSM is unavailable.
 
 Application queries rank exact names, desktop IDs, prefixes, substrings, metadata, and short acronyms in descending tiers. Results expose `match_score`, `match_kind`, `runtime_score`, and the compatible combined `score`, so launchers can explain or customize their ordering.
 
