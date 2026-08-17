@@ -8,7 +8,8 @@ use crate::{
 
 use super::{
     ApplicationAction, ApplicationService, ExecuteParams, QueryParams,
-    application_window_addresses, page, resolve_target, resolve_target_with_cgroup, running_score,
+    application_window_addresses, combined_revision, page, resolve_target,
+    resolve_target_with_cgroup, running_score,
 };
 
 #[test]
@@ -60,6 +61,18 @@ async fn rejects_operations_for_stale_revisions() {
         workspace_id: None,
     };
     assert!(service.execute(params).await.is_err());
+}
+
+#[test]
+fn revisions_round_trip_exactly_through_javascript_numbers() {
+    let catalog = Catalog::from_paths(Vec::new());
+    let windows = Snapshot {
+        revision: u64::MAX,
+        ..Snapshot::default()
+    };
+    let revision = combined_revision(&catalog, &windows);
+    assert!(revision <= (1_u64 << 53) - 1);
+    assert_eq!(revision as f64 as u64, revision);
 }
 
 #[test]

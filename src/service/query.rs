@@ -10,8 +10,13 @@ use crate::{
     service::QueryParams,
 };
 
+const JSON_SAFE_INTEGER_MASK: u64 = (1_u64 << 53) - 1;
+
 pub(super) fn combined_revision(catalog: &Catalog, windows: &Snapshot) -> u64 {
-    catalog.revision.rotate_left(17) ^ windows.revision
+    // Revisions cross JSON into QML's JavaScript runtime. Keep this opaque hash
+    // exactly representable as a Number so an unchanged revision can be sent
+    // back in expected_revision without being rounded.
+    (catalog.revision.rotate_left(17) ^ windows.revision) & JSON_SAFE_INTEGER_MASK
 }
 
 pub(super) fn page(
