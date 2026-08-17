@@ -261,6 +261,27 @@ impl Default for ResourceSnapshot {
     }
 }
 
+struct ResourceAttribution {
+    roots: HashSet<u32>,
+    pids: HashSet<u32>,
+    cgroup_paths: HashSet<String>,
+    cgroup_roots: usize,
+}
+
+#[derive(Default)]
+struct ProcessAggregation {
+    usage: ResourceUsage,
+    open_files: HashMap<DiskFileId, DiskFile>,
+    referenced_files: HashMap<DiskFileId, DiskFile>,
+    network_sockets: HashSet<u64>,
+    covered_processes: u64,
+    memory_processes: u64,
+    pss_processes: u64,
+    gpu_processes: u64,
+    network_processes: u64,
+    storage_processes: u64,
+}
+
 impl ResourceSnapshot {
     pub fn usage_for_target(
         &self,
@@ -280,74 +301,97 @@ impl ResourceSnapshot {
     }
 
     pub fn usage_for_roots(&self, roots: impl IntoIterator<Item = u32>) -> ResourceUsage {
+        let attribution = self.resource_attribution(roots);
+        let mut aggregate = self.aggregate_processes(&attribution.pids);
+        let process_cpu_percent = aggregate.usage.compute.cpu_percent;
+        let complete_cgroup = self.has_complete_cgroup_attribution(&attribution);
+        if complete_cgroup {
+            self.apply_cgroup_usage(&mut aggregate.usage, &attribution.cgroup_paths);
+        }
+        Self::apply_file_storage(&mut aggregate);
+        self.apply_measurement(&mut aggregate, &attribution, complete_cgroup);
+        self.complete(aggregate.usage, process_cpu_percent)
+    }
+
+    fn resource_attribution(&self, roots: impl IntoIterator<Item = u32>) -> ResourceAttribution {
         let roots = roots
             .into_iter()
             .filter(|pid| *pid > 0)
             .collect::<HashSet<_>>();
-        let mut pids = HashSet::new();
-        let mut cgroup_roots = 0_usize;
-        let mut cgroup_paths = HashSet::new();
-        for root in &roots {
+        let mut attribution = ResourceAttribution {
+            roots,
+            pids: HashSet::new(),
+            cgroup_paths: HashSet::new(),
+            cgroup_roots: 0,
+        };
+        for root in &attribution.roots {
             if let Some(members) = self.cgroup_members_by_root.get(root) {
-                pids.extend(members);
+                attribution.pids.extend(members);
                 if let Some(path) = self.cgroup_path_by_root.get(root) {
-                    cgroup_paths.insert(path);
+                    attribution.cgroup_paths.insert(path.clone());
                 }
-                cgroup_roots += 1;
+                attribution.cgroup_roots += 1;
             } else {
-                pids.extend(descendants([*root], &self.children));
+                attribution
+                    .pids
+                    .extend(descendants([*root], &self.children));
             }
         }
-        let mut usage = ResourceUsage::default();
-        let mut open_files = HashMap::new();
-        let mut referenced_files = HashMap::new();
-        let mut network_sockets = HashSet::<u64>::new();
-        let mut covered_processes = 0_u64;
-        let mut memory_processes = 0_u64;
-        let mut pss_processes = 0_u64;
-        let mut gpu_processes = 0_u64;
-        let mut network_processes = 0_u64;
+        attribution
+    }
+
+    fn aggregate_processes(&self, pids: &HashSet<u32>) -> ProcessAggregation {
+        let mut aggregate = ProcessAggregation::default();
         for process in pids.iter().filter_map(|pid| self.processes.get(pid)) {
-            usage.add_process(process);
-            covered_processes += 1;
-            memory_processes += u64::from(process.memory.rss_available);
-            pss_processes += u64::from(process.memory.pss_available);
-            gpu_processes += u64::from(process.gpu_available);
-            network_processes += u64::from(process.files.fd_available);
-            merge_disk_files(&mut open_files, &process.files.open);
-            merge_disk_files(&mut referenced_files, &process.files.referenced);
-            network_sockets.extend(process.files.sockets.iter().copied());
+            aggregate.usage.add_process(process);
+            aggregate.covered_processes += 1;
+            aggregate.memory_processes += u64::from(process.memory.rss_available);
+            aggregate.pss_processes += u64::from(process.memory.pss_available);
+            aggregate.gpu_processes += u64::from(process.gpu_available);
+            aggregate.network_processes += u64::from(process.files.fd_available);
+            aggregate.storage_processes += u64::from(process.storage_available);
+            merge_disk_files(&mut aggregate.open_files, &process.files.open);
+            merge_disk_files(&mut aggregate.referenced_files, &process.files.referenced);
+            aggregate
+                .network_sockets
+                .extend(process.files.sockets.iter().copied());
         }
-        let process_cpu_percent = usage.compute.cpu_percent;
-        let complete_cgroup = !roots.is_empty()
-            && cgroup_roots == roots.len()
-            && cgroup_paths
+        aggregate
+    }
+
+    fn has_complete_cgroup_attribution(&self, attribution: &ResourceAttribution) -> bool {
+        !attribution.roots.is_empty()
+            && attribution.cgroup_roots == attribution.roots.len()
+            && attribution
+                .cgroup_paths
                 .iter()
-                .all(|path| self.cgroup_usage.contains_key(*path));
-        if complete_cgroup {
-            let mut cgroup = CgroupUsage::default();
-            for usage in cgroup_paths
-                .iter()
-                .filter_map(|path| self.cgroup_usage.get(*path))
-            {
-                cgroup.cpu_percent += usage.cpu_percent;
-                add_counter(&mut cgroup.read_bytes, usage.read_bytes);
-                add_counter(&mut cgroup.write_bytes, usage.write_bytes);
-                add_counter(&mut cgroup.read_operations, usage.read_operations);
-                add_counter(&mut cgroup.write_operations, usage.write_operations);
-                add_counter(&mut cgroup.memory_bytes, usage.memory_bytes);
-                add_counter(&mut cgroup.swap_bytes, usage.swap_bytes);
-            }
-            usage.compute.cpu_percent = cgroup.cpu_percent;
-            usage.compute.memory_cgroup_bytes = cgroup.memory_bytes;
-            usage.storage.disk_read_bytes = cgroup.read_bytes;
-            usage.storage.disk_write_bytes = cgroup.write_bytes;
-            usage.storage.read_operations = cgroup.read_operations;
-            usage.storage.write_operations = cgroup.write_operations;
+                .all(|path| self.cgroup_usage.contains_key(path))
+    }
+
+    fn apply_cgroup_usage(&self, usage: &mut ResourceUsage, paths: &HashSet<String>) {
+        let mut cgroup = CgroupUsage::default();
+        for current in paths.iter().filter_map(|path| self.cgroup_usage.get(path)) {
+            cgroup.cpu_percent += current.cpu_percent;
+            add_counter(&mut cgroup.read_bytes, current.read_bytes);
+            add_counter(&mut cgroup.write_bytes, current.write_bytes);
+            add_counter(&mut cgroup.read_operations, current.read_operations);
+            add_counter(&mut cgroup.write_operations, current.write_operations);
+            add_counter(&mut cgroup.memory_bytes, current.memory_bytes);
+            add_counter(&mut cgroup.swap_bytes, current.swap_bytes);
         }
-        usage.storage.open_file_disk_bytes = open_files.values().map(|file| file.bytes).sum();
-        for file in referenced_files.values() {
-            let storage = &mut usage.storage;
+        usage.compute.cpu_percent = cgroup.cpu_percent;
+        usage.compute.memory_cgroup_bytes = cgroup.memory_bytes;
+        usage.storage.disk_read_bytes = cgroup.read_bytes;
+        usage.storage.disk_write_bytes = cgroup.write_bytes;
+        usage.storage.read_operations = cgroup.read_operations;
+        usage.storage.write_operations = cgroup.write_operations;
+    }
+
+    fn apply_file_storage(aggregate: &mut ProcessAggregation) {
+        aggregate.usage.storage.open_file_disk_bytes =
+            aggregate.open_files.values().map(|file| file.bytes).sum();
+        for file in aggregate.referenced_files.values() {
+            let storage = &mut aggregate.usage.storage;
             add_counter(&mut storage.referenced_file_disk_bytes, file.bytes);
             let classified = if file.temporary {
                 &mut storage.referenced_file_temporary_bytes
@@ -356,41 +400,49 @@ impl ResourceSnapshot {
             };
             add_counter(classified, file.bytes);
         }
-        usage.measurement.sample_interval_ms = (self.interval_seconds * 1000.0).round() as u64;
-        usage.measurement.attribution_method = if complete_cgroup {
+    }
+
+    fn apply_measurement(
+        &self,
+        aggregate: &mut ProcessAggregation,
+        attribution: &ResourceAttribution,
+        complete_cgroup: bool,
+    ) {
+        let measurement = &mut aggregate.usage.measurement;
+        measurement.sample_interval_ms = (self.interval_seconds * 1000.0).round() as u64;
+        measurement.attribution_method = if complete_cgroup {
             "cgroup".into()
-        } else if cgroup_roots > 0 {
+        } else if attribution.cgroup_roots > 0 {
             "mixed".into()
         } else {
             "process-tree".into()
         };
-        usage.measurement.coverage = if complete_cgroup {
+        measurement.coverage = if complete_cgroup {
             1.0
-        } else if pids.is_empty() {
+        } else if attribution.pids.is_empty() {
             0.0
         } else {
-            covered_processes as f64 / pids.len() as f64
+            aggregate.covered_processes as f64 / attribution.pids.len() as f64
         };
-        usage.measurement.memory_source =
-            if covered_processes > 0 && pss_processes == covered_processes {
-                "pss".into()
-            } else if memory_processes > 0 {
-                "rss-fallback".into()
-            } else {
-                "unavailable".into()
-            };
-        usage.measurement.gpu_available = gpu_processes > 0;
-        usage.measurement.storage_available = complete_cgroup
-            || pids
-                .iter()
-                .filter_map(|pid| self.processes.get(pid))
-                .any(|process| process.storage_available);
-        usage.network.network_connection_count = network_sockets.len() as u64;
-        usage.measurement.network_available = network_processes > 0;
-        usage.measurement.network_bytes_available = false;
-        usage.measurement.network_connections_available = network_processes > 0;
-        usage.measurement.resources_shared = pids.iter().any(|pid| self.shared_pids.contains(pid));
-        self.complete(usage, process_cpu_percent)
+        measurement.memory_source = if aggregate.covered_processes > 0
+            && aggregate.pss_processes == aggregate.covered_processes
+        {
+            "pss".into()
+        } else if aggregate.memory_processes > 0 {
+            "rss-fallback".into()
+        } else {
+            "unavailable".into()
+        };
+        measurement.gpu_available = aggregate.gpu_processes > 0;
+        measurement.storage_available = complete_cgroup || aggregate.storage_processes > 0;
+        aggregate.usage.network.network_connection_count = aggregate.network_sockets.len() as u64;
+        measurement.network_available = aggregate.network_processes > 0;
+        measurement.network_bytes_available = false;
+        measurement.network_connections_available = aggregate.network_processes > 0;
+        measurement.resources_shared = attribution
+            .pids
+            .iter()
+            .any(|pid| self.shared_pids.contains(pid));
     }
 
     fn complete(&self, mut usage: ResourceUsage, energy_cpu_percent: f64) -> ResourceUsage {

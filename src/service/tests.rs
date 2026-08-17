@@ -71,7 +71,7 @@ fn revisions_round_trip_exactly_through_javascript_numbers() {
         ..Snapshot::default()
     };
     let revision = combined_revision(&catalog, &windows);
-    assert!(revision <= (1_u64 << 53) - 1);
+    assert!(revision < (1_u64 << 53));
     assert_eq!(revision as f64 as u64, revision);
 }
 
