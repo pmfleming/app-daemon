@@ -164,11 +164,11 @@ pub async fn focus(address: &str) -> anyhow::Result<()> {
 
 pub async fn close(address: &str) -> anyhow::Result<()> {
     let selector = address_selector(address)?;
-    if dispatch(&["dispatch", "closewindow", &selector]).await {
-        return Ok(());
-    }
     let lua = format!("hl.dsp.window.close({{ window = '{selector}' }})");
     if dispatch(&["dispatch", &lua]).await {
+        return Ok(());
+    }
+    if dispatch(&["dispatch", "closewindow", &selector]).await {
         return Ok(());
     }
     anyhow::bail!("Hyprland rejected the close request")
@@ -177,6 +177,12 @@ pub async fn close(address: &str) -> anyhow::Result<()> {
 pub async fn move_to_workspace(address: &str, workspace: &str) -> anyhow::Result<()> {
     let selector = address_selector(address)?;
     let workspace = workspace_selector(workspace)?;
+    let lua = format!(
+        "hl.dsp.window.move({{ workspace = '{workspace}', follow = false, window = '{selector}' }})"
+    );
+    if dispatch(&["dispatch", &lua]).await {
+        return Ok(());
+    }
     let argument = format!("{workspace},{selector}");
     anyhow::ensure!(
         dispatch(&["dispatch", "movetoworkspacesilent", &argument]).await,

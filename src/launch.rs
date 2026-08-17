@@ -1,4 +1,4 @@
-use std::process::Stdio;
+use std::{process::Stdio, time::Duration};
 
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
@@ -56,15 +56,24 @@ impl From<LaunchBackend> for LaunchReceipt {
     }
 }
 
+const LAUNCH_HANDOFF_TIMEOUT: Duration = Duration::from_secs(10);
+
 pub async fn launch_desktop(id: &str) -> anyhow::Result<LaunchReceipt> {
     let backend = LaunchBackend::detect();
     let mut command = desktop_command(backend, id);
-    let status = command
-        .stderr(Stdio::piped())
-        .status()
-        .await
-        .context("start desktop application")?;
-    anyhow::ensure!(status.success(), "desktop application launch failed");
+    if backend == LaunchBackend::Direct {
+        let mut child = command
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .context("start desktop application")?;
+        tokio::spawn(async move {
+            let _ = child.wait().await;
+        });
+    } else {
+        checked_handoff(command, "desktop application").await?;
+    }
     Ok(backend.into())
 }
 
@@ -72,13 +81,28 @@ pub async fn launch_desktop_action(id: &str, action_id: &str) -> anyhow::Result<
     let backend = LaunchBackend::detect();
     anyhow::ensure!(backend == LaunchBackend::Uwsm, "UWSM is unavailable");
     let target = format!("{id}:{action_id}");
-    let status = command(backend, &target, std::iter::empty::<&str>())
-        .stderr(Stdio::piped())
-        .status()
-        .await
-        .context("start desktop action through UWSM")?;
-    anyhow::ensure!(status.success(), "desktop action launch failed");
+    checked_handoff(
+        command(backend, &target, std::iter::empty::<&str>()),
+        "desktop action",
+    )
+    .await?;
     Ok(backend.into())
+}
+
+async fn checked_handoff(mut command: Command, description: &str) -> anyhow::Result<()> {
+    command.kill_on_drop(true);
+    let output = tokio::time::timeout(LAUNCH_HANDOFF_TIMEOUT, command.output())
+        .await
+        .with_context(|| format!("{description} launch handoff timed out"))?
+        .with_context(|| format!("start {description}"))?;
+    if output.status.success() {
+        return Ok(());
+    }
+    let detail = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+    if detail.is_empty() {
+        anyhow::bail!("{description} launch failed");
+    }
+    anyhow::bail!("{description} launch failed: {detail}")
 }
 
 pub fn spawn(
@@ -86,12 +110,15 @@ pub fn spawn(
     arguments: impl IntoIterator<Item = impl AsRef<std::ffi::OsStr>>,
 ) -> anyhow::Result<LaunchReceipt> {
     let backend = LaunchBackend::detect();
-    command(backend, program, arguments)
+    let mut child = command(backend, program, arguments)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
         .with_context(|| format!("start application command {program}"))?;
+    tokio::spawn(async move {
+        let _ = child.wait().await;
+    });
     Ok(backend.into())
 }
 
@@ -112,7 +139,10 @@ fn command(
     let mut command = match backend {
         LaunchBackend::Uwsm => {
             let mut command = Command::new("uwsm-app");
-            command.arg("--").arg(program);
+            // A scope-mode systemd-run remains attached to foreground applications.
+            // Service mode returns once exec succeeds, making operation completion a
+            // launch handoff rather than an application-lifetime notification.
+            command.args(["-t", "service", "--"]).arg(program);
             command
         }
         LaunchBackend::Direct => Command::new(program),
@@ -149,7 +179,7 @@ mod tests {
         assert_eq!(command.as_std().get_program(), OsStr::new("uwsm-app"));
         assert_eq!(
             command.as_std().get_args().collect::<Vec<_>>(),
-            ["--", "org.example.App.desktop", "--new"]
+            ["-t", "service", "--", "org.example.App.desktop", "--new"]
                 .map(OsStr::new)
                 .as_slice()
         );
@@ -160,7 +190,9 @@ mod tests {
         let uwsm = desktop_command(LaunchBackend::Uwsm, "org.example.App.desktop");
         assert_eq!(
             uwsm.as_std().get_args().collect::<Vec<_>>(),
-            ["--", "org.example.App.desktop"].map(OsStr::new).as_slice()
+            ["-t", "service", "--", "org.example.App.desktop"]
+                .map(OsStr::new)
+                .as_slice()
         );
 
         let direct = desktop_command(LaunchBackend::Direct, "org.example.App.desktop");

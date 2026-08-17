@@ -8,7 +8,7 @@ use crate::{
 
 use super::{
     ApplicationAction, ApplicationService, ExecuteParams, QueryParams,
-    application_window_addresses, page, resolve_target, running_score,
+    application_window_addresses, page, resolve_target, resolve_target_with_cgroup, running_score,
 };
 
 #[test]
@@ -139,6 +139,92 @@ fn selects_all_application_windows_for_closing() -> anyhow::Result<()> {
         application_window_addresses(&catalog, &windows, "example.desktop"),
         ["0x1", "0x2"]
     );
+    Ok(())
+}
+
+#[test]
+fn resolves_uwsm_cgroup_before_terminal_window_class() -> anyhow::Result<()> {
+    let directory = tempfile::tempdir()?;
+    fs::write(
+        directory.path().join("btop.desktop"),
+        "[Desktop Entry]\nType=Application\nName=btop\nExec=btop\nTerminal=true\n",
+    )?;
+    fs::write(
+        directory.path().join("com.mitchellh.ghostty.desktop"),
+        "[Desktop Entry]\nType=Application\nName=Ghostty\nExec=ghostty\n",
+    )?;
+    fs::write(
+        directory.path().join("android-studio.desktop"),
+        "[Desktop Entry]\nType=Application\nName=Android Studio\nExec=android-studio\n",
+    )?;
+    let catalog = Catalog::from_paths(vec![directory.path().into()]);
+    let window = Client {
+        address: "0x1".into(),
+        class: "com.mitchellh.ghostty".into(),
+        initial_class: "com.mitchellh.ghostty".into(),
+        title: "btop".into(),
+        pid: 42,
+        workspace: Workspace::default(),
+        focus_rank: 0,
+        mapped: true,
+    };
+    assert_eq!(
+        resolve_target_with_cgroup(
+            &catalog,
+            &window,
+            Some("/app.slice/app-Hyprland-btop-a1b2c3d4.scope"),
+        ),
+        "btop.desktop"
+    );
+    assert_eq!(
+        resolve_target_with_cgroup(
+            &catalog,
+            &window,
+            Some("/app.slice/app-Hyprland-com.mitchellh.ghostty@a1b2c3d4.service"),
+        ),
+        "com.mitchellh.ghostty.desktop"
+    );
+    assert_eq!(
+        resolve_target_with_cgroup(
+            &catalog,
+            &window,
+            Some(r"/app.slice/app-Hyprland-android\x2dstudio-deadbeef.scope"),
+        ),
+        "android-studio.desktop"
+    );
+    Ok(())
+}
+
+#[test]
+fn launch_only_entries_remain_shortcuts_without_claiming_windows() -> anyhow::Result<()> {
+    let directory = tempfile::tempdir()?;
+    fs::write(
+        directory.path().join("manual.desktop"),
+        "[Desktop Entry]\nType=Application\nName=Manual\nExec=xdg-open https://example.test\nStartupWMClass=browser\nX-Shelllist-LaunchOnly=true\n",
+    )?;
+    let catalog = Catalog::from_paths(vec![directory.path().into()]);
+    let window = Client {
+        address: "0x1".into(),
+        class: "browser".into(),
+        initial_class: "browser".into(),
+        title: "Manual".into(),
+        pid: 42,
+        workspace: Workspace::default(),
+        focus_rank: 0,
+        mapped: true,
+    };
+    assert_eq!(resolve_target(&catalog, &window), "window-group:browser");
+    let result = page(
+        &catalog,
+        &Snapshot::default(),
+        &ResourceSnapshot::default(),
+        &QueryParams {
+            query: String::new(),
+            generation: 1,
+            limit: 10,
+        },
+    );
+    assert_eq!(result.applications[0].identity.kind, "desktop-shortcut");
     Ok(())
 }
 

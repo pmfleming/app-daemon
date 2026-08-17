@@ -172,7 +172,7 @@ pub(super) fn cgroup_members_for_paths(
         .collect()
 }
 
-pub(super) fn process_cgroup(pid: u32) -> Option<String> {
+pub(crate) fn process_cgroup(pid: u32) -> Option<String> {
     fs::read_to_string(format!("/proc/{pid}/cgroup"))
         .ok()?
         .lines()

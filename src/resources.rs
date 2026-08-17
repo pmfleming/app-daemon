@@ -17,9 +17,10 @@ mod system;
 
 use energy::{BatterySample, EnergyProvider, EnergySampler};
 use gpu::{GpuProcessStat, read_gpu_processes};
+pub(crate) use system::process_cgroup;
 use system::{
     application_disk_usage, cgroup_members_for_paths, cgroup_paths_for_roots, descendants,
-    merge_disk_files, process_cgroup, process_children, read_cgroup_counters, read_cgroup_members,
+    merge_disk_files, process_children, read_cgroup_counters, read_cgroup_members,
     read_process_file_sets, read_process_io, read_process_memory, read_processes, read_system_cpu,
     shared_target_pids,
 };

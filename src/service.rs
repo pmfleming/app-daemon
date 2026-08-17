@@ -28,7 +28,10 @@ pub use action::ApplicationAction;
 use action::{execute_action, operation_result};
 use query::{combined_revision, page, resolve_target};
 #[cfg(test)]
-use {action::application_window_addresses, query::running_score};
+use {
+    action::application_window_addresses,
+    query::{resolve_target_with_cgroup, running_score},
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StateRevision {

@@ -21,6 +21,7 @@ pub struct CatalogEntry {
     pub categories: Vec<String>,
     pub startup_class: String,
     pub actions: Vec<DesktopActionSummary>,
+    pub launch_only: bool,
     entry: DesktopEntry,
 }
 
@@ -31,6 +32,14 @@ impl CatalogEntry {
 
     pub fn requires_terminal(&self) -> bool {
         self.entry.terminal()
+    }
+
+    pub fn kind(&self) -> &'static str {
+        if self.launch_only {
+            "desktop-shortcut"
+        } else {
+            "desktop-application"
+        }
     }
 
     pub fn parse_action(&self, action_id: &str) -> anyhow::Result<Vec<String>> {
@@ -99,7 +108,7 @@ fn catalog_entry(
     locales: &[String],
     desktops: &[String],
 ) -> Option<CatalogEntry> {
-    let entry = DesktopEntry::from_path(path, Some(locales)).ok()?;
+    let entry = DesktopEntry::from_path(&path, Some(locales)).ok()?;
     let name = entry.name(locales).filter(|value| !value.is_empty())?;
     if !visible(&entry, desktops) {
         return None;
@@ -120,6 +129,7 @@ fn catalog_entry(
             .collect(),
         startup_class: entry.startup_wm_class().unwrap_or_default().to_owned(),
         actions: desktop_actions(&entry, locales),
+        launch_only: entry.desktop_entry("X-Shelllist-LaunchOnly") == Some("true"),
         entry,
     })
 }
@@ -223,6 +233,7 @@ fn catalog_revision(entries: &[CatalogEntry]) -> u64 {
             &entry.categories,
             &entry.startup_class,
             &entry.actions,
+            entry.launch_only,
         )
             .hash(&mut hasher);
     }

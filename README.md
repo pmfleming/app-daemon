@@ -12,7 +12,9 @@ nix build
 
 Application execution returns an accepted operation immediately. Subscribe to `applications.operation` for `running`, `completed`, `failed`, or `cancelled` updates, and cancel an active operation through the transport's existing `cancel` request. Passing `expected_revision` rejects stale actions; `move-to-workspace` also accepts `window_id` and `workspace_id`.
 
-Graphical launches, terminal applications, and desktop actions pass their desktop IDs directly to `uwsm-app` (the fast, drop-in client for `uwsm app`) and run in `app-graphical.slice`. This lets UWSM interpret `Terminal`, `Path`, and desktop-action metadata itself. Direct `gtk-launch`, `xdg-terminal-exec`, or parsed-command execution is used only when UWSM is unavailable.
+Graphical launches, terminal applications, and desktop actions pass their desktop IDs directly to `uwsm-app -t service` (the fast, drop-in client for `uwsm app`) and run in `app-graphical.slice`. Service-mode handoff returns after the application executable starts instead of keeping the operation open for the process lifetime. This lets UWSM interpret `Terminal`, `Path`, and desktop-action metadata itself. The handoff is bounded to ten seconds; direct `gtk-launch`, `xdg-terminal-exec`, or parsed-command execution is asynchronous and used only when UWSM is unavailable.
+
+Window identity first uses a specific UWSM application cgroup when its generated unit maps unambiguously to a desktop ID, then falls back to `StartupWMClass`, desktop-ID, and unique reverse-DNS suffix matching. This keeps terminal-hosted and chooser-based applications attached to their launcher row instead of charging them to the terminal or a generic window group. Desktop entries marked `X-Shelllist-LaunchOnly=true` are exposed as `desktop-shortcut` results and intentionally never claim windows or resources.
 
 Application queries rank exact names, desktop IDs, prefixes, substrings, metadata, and short acronyms in descending tiers. Results expose `match_score`, `match_kind`, `runtime_score`, and the compatible combined `score`, so launchers can explain or customize their ordering.
 
