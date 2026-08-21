@@ -17,11 +17,40 @@ use aggregate::PendingPoint;
 const FILE_VERSION: u8 = 1;
 const BUCKET_MILLISECONDS: u64 = 15_000;
 const RETENTION_MILLISECONDS: u64 = 24 * 60 * 60 * 1000;
+const ENERGY_BUCKET_MILLISECONDS: u64 = 60_000;
+const ENERGY_RETENTION_MILLISECONDS: u64 = 7 * 24 * 60 * 60 * 1000;
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
 struct HistoryFile {
     version: u8,
     applications: HashMap<String, Vec<ResourceHistoryPoint>>,
+    energy_applications: HashMap<String, Vec<EnergyHistoryPoint>>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+struct EnergyHistoryPoint {
+    timestamp_ms: u64,
+    energy_mwh: f64,
+    energy_source: String,
+    energy_confidence: String,
+}
+
+#[derive(Debug, Clone, Default)]
+struct PendingEnergy {
+    timestamp_ms: u64,
+    energy_mwh: f64,
+    energy_source: String,
+    energy_confidence: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct EnergyTotal {
+    pub target_id: String,
+    pub energy_mwh: f64,
+    pub energy_source: String,
+    pub energy_confidence: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -43,6 +72,8 @@ pub struct HistoryStore {
     path: Option<PathBuf>,
     points: HashMap<String, VecDeque<ResourceHistoryPoint>>,
     pending: HashMap<String, PendingPoint>,
+    energy_points: HashMap<String, VecDeque<EnergyHistoryPoint>>,
+    pending_energy: HashMap<String, PendingEnergy>,
 }
 
 impl HistoryStore {
@@ -57,16 +88,25 @@ impl HistoryStore {
             .and_then(|bytes| serde_json::from_slice::<HistoryFile>(&bytes).ok())
             .filter(|file| file.version == FILE_VERSION)
             .map(|file| {
-                file.applications
+                let points = file
+                    .applications
                     .into_iter()
                     .map(|(id, points)| (id, points.into()))
-                    .collect()
+                    .collect();
+                let energy_points = file
+                    .energy_applications
+                    .into_iter()
+                    .map(|(id, points)| (id, points.into()))
+                    .collect();
+                (points, energy_points)
             })
             .unwrap_or_default();
         let mut store = Self {
             path,
-            points,
+            points: points.0,
             pending: HashMap::new(),
+            energy_points: points.1,
+            pending_energy: HashMap::new(),
         };
         store.prune(now_milliseconds());
         store
@@ -83,6 +123,7 @@ impl HistoryStore {
             return;
         }
         self.flush_expired(timestamp_ms);
+        self.record_energy(target_id, timestamp_ms, usage);
         let duration_ms = (duration_seconds * 1000.0).round().max(1.0) as u64;
         let bucket_start = timestamp_ms - timestamp_ms % BUCKET_MILLISECONDS;
         if self
@@ -132,6 +173,47 @@ impl HistoryStore {
         })
     }
 
+    pub fn energy_totals(&mut self, since_ms: u64, until_ms: u64) -> Vec<EnergyTotal> {
+        self.flush_expired(until_ms);
+        let mut totals = HashMap::<String, PendingEnergy>::new();
+        for (target_id, points) in &self.energy_points {
+            for point in points
+                .iter()
+                .filter(|point| point.timestamp_ms >= since_ms && point.timestamp_ms <= until_ms)
+            {
+                totals.entry(target_id.clone()).or_default().add(
+                    point.energy_mwh,
+                    &point.energy_source,
+                    &point.energy_confidence,
+                );
+            }
+        }
+        for (target_id, pending) in &self.pending_energy {
+            if pending
+                .timestamp_ms
+                .saturating_add(ENERGY_BUCKET_MILLISECONDS)
+                >= since_ms
+                && pending.timestamp_ms <= until_ms
+            {
+                totals.entry(target_id.clone()).or_default().add(
+                    pending.energy_mwh,
+                    &pending.energy_source,
+                    &pending.energy_confidence,
+                );
+            }
+        }
+        totals
+            .into_iter()
+            .filter(|(_, total)| total.energy_mwh > 0.0)
+            .map(|(target_id, total)| EnergyTotal {
+                target_id,
+                energy_mwh: rounded_energy(total.energy_mwh),
+                energy_source: available_label(total.energy_source),
+                energy_confidence: available_label(total.energy_confidence),
+            })
+            .collect()
+    }
+
     pub fn save(&mut self) -> std::io::Result<()> {
         self.flush_expired(now_milliseconds());
         self.persist()
@@ -157,6 +239,11 @@ impl HistoryStore {
                 .iter()
                 .map(|(id, points)| (id.clone(), points.iter().cloned().collect()))
                 .collect(),
+            energy_applications: self
+                .energy_points
+                .iter()
+                .map(|(id, points)| (id.clone(), points.iter().cloned().collect()))
+                .collect(),
         };
         let bytes = serde_json::to_vec(&file)?;
         let temporary = temporary_path(path);
@@ -167,6 +254,9 @@ impl HistoryStore {
     fn flush_pending(&mut self) {
         for (id, pending) in std::mem::take(&mut self.pending) {
             self.finish_pending(id, pending);
+        }
+        for (id, pending) in std::mem::take(&mut self.pending_energy) {
+            self.finish_pending_energy(id, pending);
         }
     }
 
@@ -184,6 +274,48 @@ impl HistoryStore {
                 self.finish_pending(id, pending);
             }
         }
+        let expired_energy = self
+            .pending_energy
+            .iter()
+            .filter_map(|(id, pending)| {
+                (pending
+                    .timestamp_ms
+                    .saturating_add(ENERGY_BUCKET_MILLISECONDS)
+                    <= timestamp_ms)
+                    .then_some(id.clone())
+            })
+            .collect::<Vec<_>>();
+        for id in expired_energy {
+            if let Some(pending) = self.pending_energy.remove(&id) {
+                self.finish_pending_energy(id, pending);
+            }
+        }
+    }
+
+    fn record_energy(&mut self, target_id: &str, timestamp_ms: u64, usage: &ResourceUsage) {
+        let bucket_start = timestamp_ms - timestamp_ms % ENERGY_BUCKET_MILLISECONDS;
+        if self
+            .pending_energy
+            .get(target_id)
+            .is_some_and(|pending| pending.timestamp_ms != bucket_start)
+            && let Some(pending) = self.pending_energy.remove(target_id)
+        {
+            self.finish_pending_energy(target_id.to_owned(), pending);
+        }
+        let pending = self.pending_energy.entry(target_id.to_owned()).or_default();
+        pending.timestamp_ms = bucket_start;
+        pending.add(
+            usage.energy.energy_mwh,
+            &usage.energy.energy_source,
+            &usage.energy.energy_confidence,
+        );
+    }
+
+    fn finish_pending_energy(&mut self, id: String, pending: PendingEnergy) {
+        self.energy_points
+            .entry(id)
+            .or_default()
+            .push_back(pending.finish());
     }
 
     fn finish_pending(&mut self, id: String, pending: PendingPoint) {
@@ -203,7 +335,59 @@ impl HistoryStore {
             }
             !points.is_empty()
         });
+        let energy_cutoff = timestamp_ms.saturating_sub(ENERGY_RETENTION_MILLISECONDS);
+        self.energy_points.retain(|_, points| {
+            while points
+                .front()
+                .is_some_and(|point| point.timestamp_ms < energy_cutoff)
+            {
+                points.pop_front();
+            }
+            !points.is_empty()
+        });
     }
+}
+
+impl PendingEnergy {
+    fn add(&mut self, energy_mwh: f64, source: &str, confidence: &str) {
+        if energy_mwh.is_finite() && energy_mwh > 0.0 {
+            self.energy_mwh += energy_mwh;
+        }
+        merge_label(&mut self.energy_source, source);
+        merge_label(&mut self.energy_confidence, confidence);
+    }
+
+    fn finish(self) -> EnergyHistoryPoint {
+        EnergyHistoryPoint {
+            timestamp_ms: self.timestamp_ms.saturating_add(ENERGY_BUCKET_MILLISECONDS),
+            energy_mwh: rounded_energy(self.energy_mwh),
+            energy_source: available_label(self.energy_source),
+            energy_confidence: available_label(self.energy_confidence),
+        }
+    }
+}
+
+fn merge_label(current: &mut String, next: &str) {
+    if next.is_empty() {
+        return;
+    }
+    if current.is_empty() {
+        *current = next.to_owned();
+    } else if current != next {
+        *current = "mixed".into();
+    }
+}
+
+fn available_label(value: String) -> String {
+    if value.is_empty() {
+        "unavailable".into()
+    } else {
+        value
+    }
+}
+
+fn rounded_energy(value: f64) -> f64 {
+    (value * 10_000.0).round() / 10_000.0
 }
 
 fn encode_cursor(target_id: &str, timestamp_ms: u64) -> anyhow::Result<String> {

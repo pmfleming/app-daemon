@@ -12,6 +12,7 @@ pub mod stream {
 pub const METHODS: &[&str] = &[
     "applications.query",
     "applications.history",
+    "applications.energyOverview",
     "applications.refresh",
     "applications.execute",
     "applications.settings.update",

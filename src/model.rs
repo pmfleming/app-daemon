@@ -235,6 +235,27 @@ pub struct ApplicationResourceHistory {
     pub next_cursor: Option<String>,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ApplicationEnergySummary {
+    pub target_id: String,
+    pub name: String,
+    pub icon: String,
+    pub energy_mwh: f64,
+    pub share: f64,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ApplicationEnergyOverview {
+    pub since_ms: u64,
+    pub until_ms: u64,
+    pub total_energy_mwh: f64,
+    pub energy_source: String,
+    pub energy_confidence: String,
+    pub applications: Vec<ApplicationEnergySummary>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OperationResult {
     pub id: String,

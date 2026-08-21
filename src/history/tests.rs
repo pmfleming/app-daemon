@@ -86,6 +86,40 @@ fn aggregates_and_persists_resource_buckets() -> anyhow::Result<()> {
 }
 
 #[test]
+fn keeps_compact_energy_totals_for_week_overviews() -> anyhow::Result<()> {
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join("history.json");
+    let mut store = HistoryStore::load(Some(path.clone()));
+    let usage = ResourceUsage {
+        energy: EnergyUsage {
+            energy_mwh: 1.25,
+            energy_source: "rapl".into(),
+            energy_confidence: "low".into(),
+            ..EnergyUsage::default()
+        },
+        ..ResourceUsage::default()
+    };
+    let current = super::now_milliseconds();
+    let now = current - current % super::ENERGY_BUCKET_MILLISECONDS + 1_000;
+    store.record("example.desktop", now, 2.0, &usage);
+    store.record("example.desktop", now + 2_000, 2.0, &usage);
+    let totals = store.energy_totals(now.saturating_sub(1), now + 3_000);
+    assert_eq!(totals.len(), 1);
+    assert_eq!(totals[0].energy_mwh, 2.5);
+    assert_eq!(totals[0].energy_source, "rapl");
+    store.save_final()?;
+
+    let mut loaded = HistoryStore::load(Some(path));
+    let totals = loaded.energy_totals(
+        now.saturating_sub(1),
+        now + super::ENERGY_BUCKET_MILLISECONDS,
+    );
+    assert_eq!(totals.len(), 1);
+    assert_eq!(totals[0].energy_mwh, 2.5);
+    Ok(())
+}
+
+#[test]
 fn paginates_forward_with_target_bound_cursors() -> anyhow::Result<()> {
     let mut store = HistoryStore::load(None);
     let now = super::now_milliseconds();

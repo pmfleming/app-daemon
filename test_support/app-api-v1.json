@@ -5,7 +5,12 @@
     "methods": [
       {
         "name": "applications.query",
-        "params_example": { "query": "", "category": "", "generation": 1, "limit": 500 },
+        "params_example": {
+          "query": "",
+          "category": "",
+          "generation": 1,
+          "limit": 500
+        },
         "response_key": "applications",
         "stream": "applications.changed"
       },
@@ -27,8 +32,22 @@
         }
       },
       {
+        "name": "applications.energyOverview",
+        "params_example": {
+          "since_ms": 0,
+          "limit": 20
+        },
+        "response_key": "energy_overview",
+        "stream": "applications.changed"
+      },
+      {
         "name": "applications.refresh",
-        "params_example": { "query": "", "category": "", "generation": 1, "limit": 500 },
+        "params_example": {
+          "query": "",
+          "category": "",
+          "generation": 1,
+          "limit": 500
+        },
         "response_key": "applications",
         "stream": "applications.changed"
       },
@@ -57,9 +76,15 @@
       }
     ],
     "streams": [
-      { "name": "applications.changed" },
-      { "name": "windows.changed" },
-      { "name": "applications.operation" }
+      {
+        "name": "applications.changed"
+      },
+      {
+        "name": "windows.changed"
+      },
+      {
+        "name": "applications.operation"
+      }
     ]
   }
 }

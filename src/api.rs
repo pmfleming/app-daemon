@@ -5,7 +5,10 @@ use serde_json::{Value, json};
 
 use crate::{
     protocol,
-    service::{ApplicationService, ExecuteParams, ResourceHistoryParams, UpdateSettingsParams},
+    service::{
+        ApplicationService, EnergyOverviewParams, ExecuteParams, ResourceHistoryParams,
+        UpdateSettingsParams,
+    },
 };
 
 pub const PROTOCOL: &str = protocol::NAME;
@@ -34,6 +37,7 @@ impl ApiService {
         match method {
             "applications.query" => self.query(params).await,
             "applications.history" => self.history(params).await,
+            "applications.energyOverview" => self.energy_overview(params).await,
             "applications.refresh" => self.refresh(params).await,
             "applications.execute" => self.execute(params).await,
             "applications.settings.update" => self.update_settings(params).await,
@@ -55,6 +59,15 @@ impl ApiService {
             .await
             .map(|history| json!({ "history": history }))
             .map_err(|error| ("validation-error", error.to_string()))
+    }
+
+    async fn energy_overview(&self, params: Value) -> Result<Value, ApiError> {
+        Ok(json!({
+            "energy_overview": self
+                .applications
+                .energy_overview(decode::<EnergyOverviewParams>(params)?)
+                .await
+        }))
     }
 
     async fn refresh(&self, params: Value) -> Result<Value, ApiError> {
