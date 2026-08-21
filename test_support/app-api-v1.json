@@ -5,7 +5,7 @@
     "methods": [
       {
         "name": "applications.query",
-        "params_example": { "query": "", "generation": 1, "limit": 500 },
+        "params_example": { "query": "", "category": "", "generation": 1, "limit": 500 },
         "response_key": "applications",
         "stream": "applications.changed"
       },
@@ -28,7 +28,7 @@
       },
       {
         "name": "applications.refresh",
-        "params_example": { "query": "", "generation": 1, "limit": 500 },
+        "params_example": { "query": "", "category": "", "generation": 1, "limit": 500 },
         "response_key": "applications",
         "stream": "applications.changed"
       },
@@ -44,6 +44,16 @@
         },
         "response_key": "operation",
         "stream": "applications.operation"
+      },
+      {
+        "name": "applications.settings.update",
+        "params_example": {
+          "target_id": "org.example.App.desktop",
+          "category": "code",
+          "workspace_id": "3"
+        },
+        "response_key": "settings",
+        "stream": "applications.changed"
       }
     ],
     "streams": [

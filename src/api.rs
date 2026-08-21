@@ -5,7 +5,7 @@ use serde_json::{Value, json};
 
 use crate::{
     protocol,
-    service::{ApplicationService, ExecuteParams, ResourceHistoryParams},
+    service::{ApplicationService, ExecuteParams, ResourceHistoryParams, UpdateSettingsParams},
 };
 
 pub const PROTOCOL: &str = protocol::NAME;
@@ -36,6 +36,7 @@ impl ApiService {
             "applications.history" => self.history(params).await,
             "applications.refresh" => self.refresh(params).await,
             "applications.execute" => self.execute(params).await,
+            "applications.settings.update" => self.update_settings(params).await,
             _ => Err((
                 "unsupported-method",
                 format!("Unsupported app-api method: {method}"),
@@ -60,6 +61,22 @@ impl ApiService {
         let query = decode(params)?;
         self.applications.refresh().await;
         Ok(json!({ "applications": self.applications.query(query).await }))
+    }
+
+    async fn update_settings(&self, params: Value) -> Result<Value, ApiError> {
+        let params: UpdateSettingsParams = decode(params)?;
+        let target_id = params.target_id.clone();
+        self.applications
+            .update_settings(params)
+            .await
+            .map(|settings| {
+                json!({ "settings": {
+                    "target_id": target_id,
+                    "category": settings.category,
+                    "workspace_id": settings.workspace_id
+                }})
+            })
+            .map_err(|error| ("validation-error", error.to_string()))
     }
 
     async fn execute(&self, params: Value) -> Result<Value, ApiError> {

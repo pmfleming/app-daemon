@@ -139,6 +139,10 @@ pub struct ApplicationIdentity {
     pub icon: String,
     pub keywords: Vec<String>,
     pub categories: Vec<String>,
+    /// One of Shelllist's five launcher categories.
+    pub category: String,
+    /// Preferred Hyprland workspace for newly launched windows.
+    pub default_workspace_id: Option<String>,
     pub startup_class: String,
 }
 

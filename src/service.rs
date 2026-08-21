@@ -19,6 +19,7 @@ use crate::{
     hyprland::{self, Snapshot},
     model::{ApplicationPage, ApplicationResourceHistory, OperationResult},
     resources::{ResourceSampler, ResourceSnapshot},
+    settings::{ApplicationSettings, SettingsStore},
 };
 
 mod action;
@@ -37,6 +38,7 @@ use {
 pub struct StateRevision {
     pub catalog: u64,
     pub windows: u64,
+    pub settings: u64,
 }
 
 struct ActiveOperation {
@@ -49,6 +51,7 @@ pub struct ApplicationService {
     windows: RwLock<Arc<Snapshot>>,
     resources: RwLock<ResourceSnapshot>,
     history: Mutex<HistoryStore>,
+    settings: RwLock<SettingsStore>,
     state_changes: broadcast::Sender<StateRevision>,
     operation_changes: broadcast::Sender<OperationResult>,
     operations: Mutex<HashMap<String, ActiveOperation>>,
@@ -63,6 +66,7 @@ impl ApplicationService {
             windows: RwLock::new(Arc::new(Snapshot::default())),
             resources: RwLock::new(ResourceSnapshot::default()),
             history: Mutex::new(HistoryStore::load_default()),
+            settings: RwLock::new(SettingsStore::load_default()),
             state_changes,
             operation_changes,
             operations: Mutex::new(HashMap::new()),
@@ -83,6 +87,7 @@ impl ApplicationService {
         StateRevision {
             catalog: self.catalog.read().await.revision,
             windows: self.windows.read().await.revision,
+            settings: self.settings.read().await.revision,
         }
     }
 
@@ -122,7 +127,25 @@ impl ApplicationService {
         let windows = Arc::clone(&*self.windows.read().await);
         let catalog = Arc::clone(&*self.catalog.read().await);
         let resources = self.resources.read().await;
-        page(&catalog, &windows, &resources, &params)
+        let settings = self.settings.read().await;
+        page(&catalog, &windows, &resources, &settings, &params)
+    }
+
+    pub async fn update_settings(
+        &self,
+        params: UpdateSettingsParams,
+    ) -> anyhow::Result<ApplicationSettings> {
+        anyhow::ensure!(
+            self.catalog.read().await.by_id(&params.target_id).is_some(),
+            "application is no longer available"
+        );
+        let settings = self.settings.write().await.update(
+            params.target_id,
+            params.category,
+            params.workspace_id,
+        )?;
+        self.publish_state().await;
+        Ok(settings)
     }
 
     pub async fn resource_history(
@@ -161,12 +184,25 @@ impl ApplicationService {
     ) -> anyhow::Result<OperationResult> {
         let windows = Arc::clone(&*self.windows.read().await);
         let catalog = Arc::clone(&*self.catalog.read().await);
+        let settings = self.settings.read().await;
         if let Some(expected) = params.expected_revision {
             anyhow::ensure!(
-                expected == combined_revision(&catalog, &windows),
+                expected == combined_revision(&catalog, &windows, settings.revision),
                 "application state changed; refresh and retry"
             );
         }
+
+        let mut params = params;
+        if matches!(
+            params.action,
+            ApplicationAction::Activate | ApplicationAction::Launch
+        ) && let Some(workspace) = settings
+            .for_application(&params.target_id)
+            .and_then(|value| value.workspace_id.clone())
+        {
+            params.workspace_id = Some(workspace);
+        }
+        drop(settings);
 
         let accepted = operation_result(
             format!("operation-{}", Uuid::new_v4()),
@@ -372,6 +408,8 @@ pub struct QueryParams {
     #[serde(default)]
     pub query: String,
     #[serde(default)]
+    pub category: String,
+    #[serde(default)]
     pub generation: u64,
     #[serde(default = "default_limit")]
     pub limit: usize,
@@ -379,6 +417,14 @@ pub struct QueryParams {
 
 const fn default_limit() -> usize {
     500
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UpdateSettingsParams {
+    pub target_id: String,
+    pub category: String,
+    #[serde(default)]
+    pub workspace_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

@@ -4,6 +4,7 @@ use crate::{
     catalog::Catalog,
     hyprland::{Client, Snapshot, Workspace},
     resources::ResourceSnapshot,
+    settings::SettingsStore,
 };
 
 use super::{
@@ -70,7 +71,7 @@ fn revisions_round_trip_exactly_through_javascript_numbers() {
         revision: u64::MAX,
         ..Snapshot::default()
     };
-    let revision = combined_revision(&catalog, &windows);
+    let revision = combined_revision(&catalog, &windows, 0);
     assert!(revision < (1_u64 << 53));
     assert_eq!(revision as f64 as u64, revision);
 }
@@ -87,7 +88,7 @@ fn ranks_prefix_acronym_and_metadata_matches() -> anyhow::Result<()> {
     let directory = tempfile::tempdir()?;
     fs::write(
         directory.path().join("google-contacts.desktop"),
-        "[Desktop Entry]\nType=Application\nName=Google Contacts\nGenericName=Address Book\nKeywords=people;friends;\nExec=true\n",
+        "[Desktop Entry]\nType=Application\nName=Google Contacts\nGenericName=Address Book\nKeywords=people;friends;\nCategories=Development;\nExec=true\n",
     )?;
     fs::write(
         directory.path().join("calculator.desktop"),
@@ -100,8 +101,10 @@ fn ranks_prefix_acronym_and_metadata_matches() -> anyhow::Result<()> {
             &catalog,
             &Snapshot::default(),
             &resources,
+            &SettingsStore::load(None),
             &QueryParams {
                 query: query.into(),
+                category: String::new(),
                 generation: 1,
                 limit: 100,
             },
@@ -117,6 +120,22 @@ fn ranks_prefix_acronym_and_metadata_matches() -> anyhow::Result<()> {
     let metadata = search("people");
     assert_eq!(metadata.applications[0].match_kind, "metadata");
     assert!(metadata.applications[0].match_score > 0);
+
+    let categories = SettingsStore::load(None);
+    let code = page(
+        &catalog,
+        &Snapshot::default(),
+        &resources,
+        &categories,
+        &QueryParams {
+            query: String::new(),
+            category: "code".into(),
+            generation: 2,
+            limit: 100,
+        },
+    );
+    assert_eq!(code.applications.len(), 1);
+    assert_eq!(code.applications[0].identity.name, "Google Contacts");
     Ok(())
 }
 
@@ -231,8 +250,10 @@ fn launch_only_entries_remain_shortcuts_without_claiming_windows() -> anyhow::Re
         &catalog,
         &Snapshot::default(),
         &ResourceSnapshot::default(),
+        &SettingsStore::load(None),
         &QueryParams {
             query: String::new(),
+            category: String::new(),
             generation: 1,
             limit: 10,
         },

@@ -93,8 +93,8 @@ impl ApplicationAction {
     ) -> anyhow::Result<ActionOutcome> {
         let target_id = &params.target_id;
         match self {
-            Self::Activate => activate(catalog, windows, target_id).await,
-            Self::Launch => launch(catalog, target_id)
+            Self::Activate => activate(catalog, windows, params).await,
+            Self::Launch => launch_on_workspace(catalog, windows, params)
                 .await
                 .map(|launch| ActionOutcome::new(catalog, target_id, "Launched", Some(launch))),
             Self::FocusWindow => focus_window(catalog, windows, params)
@@ -130,14 +130,16 @@ async fn desktop_action(
 async fn activate(
     catalog: &Catalog,
     windows: &Snapshot,
-    target_id: &str,
+    params: &ExecuteParams,
 ) -> anyhow::Result<ActionOutcome> {
+    let target_id = &params.target_id;
     if let Some(window) = target_window(catalog, windows, target_id) {
         hyprland::focus(&window.address).await?;
         return Ok(ActionOutcome::new(catalog, target_id, "Focused", None));
     }
     let launch = launch(catalog, target_id).await?;
-    let verb = if focus_launched_window(catalog, target_id).await? {
+    let placed = place_launched_window(catalog, windows, params, true).await?;
+    let verb = if placed {
         "Launched and focused"
     } else {
         "Launched"
@@ -145,21 +147,54 @@ async fn activate(
     Ok(ActionOutcome::new(catalog, target_id, verb, Some(launch)))
 }
 
-async fn focus_launched_window(catalog: &Catalog, target_id: &str) -> anyhow::Result<bool> {
-    const FOCUS_TIMEOUT: Duration = Duration::from_secs(8);
-    const FOCUS_RETRY_INTERVAL: Duration = Duration::from_millis(100);
+async fn launch_on_workspace(
+    catalog: &Catalog,
+    windows: &Snapshot,
+    params: &ExecuteParams,
+) -> anyhow::Result<LaunchReceipt> {
+    let launch = launch(catalog, &params.target_id).await?;
+    if params.workspace_id.is_some() {
+        place_launched_window(catalog, windows, params, false).await?;
+    }
+    Ok(launch)
+}
 
-    let deadline = Instant::now() + FOCUS_TIMEOUT;
+async fn place_launched_window(
+    catalog: &Catalog,
+    previous: &Snapshot,
+    params: &ExecuteParams,
+    focus: bool,
+) -> anyhow::Result<bool> {
+    const WINDOW_TIMEOUT: Duration = Duration::from_secs(8);
+    const WINDOW_RETRY_INTERVAL: Duration = Duration::from_millis(100);
+
+    if catalog
+        .by_id(&params.target_id)
+        .is_some_and(|entry| entry.launch_only)
+    {
+        return Ok(false);
+    }
+    let previous_addresses = application_window_addresses(catalog, previous, &params.target_id);
+    let deadline = Instant::now() + WINDOW_TIMEOUT;
     loop {
         let windows = Snapshot::load().await;
-        if let Some(window) = target_window(catalog, &windows, target_id) {
-            hyprland::focus(&window.address).await?;
+        let launched = windows.clients.iter().find(|window| {
+            resolve_target(catalog, window) == params.target_id
+                && !previous_addresses.contains(&window.address)
+        });
+        if let Some(window) = launched {
+            if let Some(workspace) = params.workspace_id.as_deref() {
+                hyprland::move_to_workspace(&window.address, workspace).await?;
+            }
+            if focus {
+                hyprland::focus(&window.address).await?;
+            }
             return Ok(true);
         }
         if Instant::now() >= deadline {
             return Ok(false);
         }
-        time::sleep(FOCUS_RETRY_INTERVAL).await;
+        time::sleep(WINDOW_RETRY_INTERVAL).await;
     }
 }
 

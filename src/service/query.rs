@@ -8,24 +8,31 @@ use crate::{
     },
     resources::{ResourceSnapshot, process_cgroup},
     service::QueryParams,
+    settings::{SettingsStore, inferred_category},
 };
 
 const JSON_SAFE_INTEGER_MASK: u64 = (1_u64 << 53) - 1;
 
-pub(super) fn combined_revision(catalog: &Catalog, windows: &Snapshot) -> u64 {
+pub(super) fn combined_revision(
+    catalog: &Catalog,
+    windows: &Snapshot,
+    settings_revision: u64,
+) -> u64 {
     // Revisions cross JSON into QML's JavaScript runtime. Keep this opaque hash
     // exactly representable as a Number so an unchanged revision can be sent
     // back in expected_revision without being rounded.
-    (catalog.revision.rotate_left(17) ^ windows.revision) & JSON_SAFE_INTEGER_MASK
+    (catalog.revision.rotate_left(17) ^ windows.revision ^ settings_revision.rotate_left(31))
+        & JSON_SAFE_INTEGER_MASK
 }
 
 pub(super) fn page(
     catalog: &Catalog,
     windows: &Snapshot,
     resources: &ResourceSnapshot,
+    settings: &SettingsStore,
     params: &QueryParams,
 ) -> ApplicationPage {
-    let revision = combined_revision(catalog, windows);
+    let revision = combined_revision(catalog, windows, settings.revision);
     let available = windows.available;
     let mut grouped: HashMap<String, Vec<&Client>> = HashMap::new();
     for window in &windows.clients {
@@ -43,6 +50,7 @@ pub(super) fn page(
                 entry,
                 grouped.remove(&entry.id).unwrap_or_default(),
                 resources,
+                settings,
                 revision,
             )
         })
@@ -54,6 +62,9 @@ pub(super) fn page(
     );
     applications = applications
         .into_iter()
+        .filter(|application| {
+            params.category.is_empty() || application.identity.category == params.category
+        })
         .filter_map(|mut application| {
             let matched = search_match(&application, &params.query)?;
             application.match_score = matched.score;
@@ -271,8 +282,10 @@ fn summary_for_entry(
     entry: &CatalogEntry,
     clients: Vec<&Client>,
     resources: &ResourceSnapshot,
+    settings: &SettingsStore,
     revision: u64,
 ) -> ApplicationSummary {
+    let preferences = settings.for_application(&entry.id);
     let identity = ApplicationIdentity {
         id: entry.id.clone(),
         kind: entry.kind().into(),
@@ -282,6 +295,11 @@ fn summary_for_entry(
         icon: entry.icon.clone(),
         keywords: entry.keywords.clone(),
         categories: entry.categories.clone(),
+        category: preferences
+            .map(|value| value.category.clone())
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| inferred_category(&entry.categories).into()),
+        default_workspace_id: preferences.and_then(|value| value.workspace_id.clone()),
         startup_class: entry.startup_class.clone(),
     };
     summary(
@@ -317,6 +335,8 @@ fn summary_for_unmatched(
         icon: String::new(),
         keywords,
         categories: Vec::new(),
+        category: "shell".into(),
+        default_workspace_id: None,
         startup_class: String::new(),
     };
     summary(identity, Vec::new(), clients, resources, revision)

@@ -14,6 +14,7 @@ pub const METHODS: &[&str] = &[
     "applications.history",
     "applications.refresh",
     "applications.execute",
+    "applications.settings.update",
 ];
 pub const STREAMS: &[&str] = &[stream::APPLICATIONS, stream::WINDOWS, stream::OPERATION];
 

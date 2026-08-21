@@ -146,7 +146,8 @@ async fn forward_events(
                 &subscription_id,
                 json!({
                     "catalog_revision": previous.catalog,
-                    "window_revision": previous.windows
+                    "window_revision": previous.windows,
+                    "settings_revision": previous.settings
                 }),
             )
             .await;
@@ -201,9 +202,10 @@ fn revision_changes(
 ) -> impl Iterator<Item = (&'static str, u64)> {
     [
         (
-            selected.0 && current.catalog != previous.catalog,
+            selected.0
+                && (current.catalog != previous.catalog || current.settings != previous.settings),
             protocol::stream::APPLICATIONS,
-            current.catalog,
+            current.catalog ^ current.settings,
         ),
         (
             selected.1 && current.windows != previous.windows,
@@ -274,10 +276,12 @@ mod tests {
         let previous = StateRevision {
             catalog: 1,
             windows: 2,
+            settings: 0,
         };
         let current = StateRevision {
             catalog: 3,
             windows: 4,
+            settings: 0,
         };
         assert_eq!(
             revision_changes((true, false, false), previous, current).collect::<Vec<_>>(),
