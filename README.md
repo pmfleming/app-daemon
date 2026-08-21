@@ -18,7 +18,7 @@ Window identity first uses a specific UWSM application cgroup when its generated
 
 Application queries rank exact names, desktop IDs, prefixes, substrings, metadata, and short acronyms in descending tiers, and can filter the five Shelllist categories: Shell, Browser, Code, Media, and Text. Results expose `match_score`, `match_kind`, `runtime_score`, and the compatible combined `score`, so launchers can explain or customize their ordering.
 
-Per-application category and default-workspace preferences are persisted in `$XDG_CONFIG_HOME/app-daemon/application-settings-v1.json` (or `~/.config/...`) through `applications.settings.update`. A configured workspace overrides launch context; the daemon identifies and silently moves only the newly created window, leaving existing instances in place.
+Per-application category preferences are persisted in `$XDG_CONFIG_HOME/app-daemon/application-settings-v1.json` (or `~/.config/...`) through `applications.settings.update`. Categories map directly to default workspaces: Shell→1, Browser→2, Code→3, Media→4, and Text→5. The selected workspace overrides launch context; the daemon identifies and silently moves only the newly created window, leaving existing instances in place.
 
 ## Resource metrics
 

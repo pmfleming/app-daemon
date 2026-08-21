@@ -8,6 +8,13 @@ use std::{
 use serde::{Deserialize, Serialize};
 
 pub const CATEGORIES: &[&str] = &["shell", "browser", "code", "media", "text"];
+const CATEGORY_WORKSPACES: &[(&str, &str)] = &[
+    ("shell", "1"),
+    ("browser", "2"),
+    ("code", "3"),
+    ("media", "4"),
+    ("text", "5"),
+];
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
@@ -36,13 +43,17 @@ impl SettingsStore {
     }
 
     pub fn load(path: Option<PathBuf>) -> Self {
-        let applications = path
+        let mut applications = path
             .as_ref()
             .and_then(|path| fs::read(path).ok())
             .and_then(|bytes| serde_json::from_slice::<SettingsFile>(&bytes).ok())
             .filter(|file| file.version == 1)
             .map(|file| file.applications)
             .unwrap_or_default();
+        applications.retain(|_, settings| CATEGORIES.contains(&settings.category.as_str()));
+        for settings in applications.values_mut() {
+            settings.workspace_id = workspace_for_category(&settings.category).map(str::to_owned);
+        }
         let revision = settings_revision(&applications);
         Self {
             path,
@@ -59,21 +70,13 @@ impl SettingsStore {
         &mut self,
         target_id: String,
         category: String,
-        workspace_id: Option<String>,
     ) -> anyhow::Result<ApplicationSettings> {
-        anyhow::ensure!(
-            CATEGORIES.contains(&category.as_str()),
-            "application category is invalid"
-        );
-        if let Some(workspace) = workspace_id.as_deref() {
-            anyhow::ensure!(
-                !workspace.is_empty() && workspace.chars().all(|value| value.is_ascii_digit()),
-                "default workspace is invalid"
-            );
-        }
+        let workspace_id = workspace_for_category(&category)
+            .map(str::to_owned)
+            .ok_or_else(|| anyhow::anyhow!("application category is invalid"))?;
         let settings = ApplicationSettings {
             category,
-            workspace_id,
+            workspace_id: Some(workspace_id),
         };
         let previous = self
             .applications
@@ -106,6 +109,12 @@ impl SettingsStore {
         fs::write(&temporary, bytes)?;
         fs::rename(temporary, path)
     }
+}
+
+pub fn workspace_for_category(category: &str) -> Option<&'static str> {
+    CATEGORY_WORKSPACES
+        .iter()
+        .find_map(|(candidate, workspace)| (*candidate == category).then_some(*workspace))
 }
 
 pub fn inferred_category(categories: &[String]) -> &'static str {
@@ -152,7 +161,7 @@ fn temporary_path(path: &Path) -> PathBuf {
 
 #[cfg(test)]
 mod tests {
-    use super::{SettingsStore, inferred_category};
+    use super::{SettingsStore, inferred_category, workspace_for_category};
 
     #[test]
     fn infers_the_five_launcher_categories() {
@@ -164,11 +173,21 @@ mod tests {
     }
 
     #[test]
-    fn persists_application_preferences() -> anyhow::Result<()> {
+    fn categories_select_their_corresponding_workspaces() {
+        assert_eq!(workspace_for_category("shell"), Some("1"));
+        assert_eq!(workspace_for_category("browser"), Some("2"));
+        assert_eq!(workspace_for_category("code"), Some("3"));
+        assert_eq!(workspace_for_category("media"), Some("4"));
+        assert_eq!(workspace_for_category("text"), Some("5"));
+        assert_eq!(workspace_for_category("unknown"), None);
+    }
+
+    #[test]
+    fn persists_category_as_a_default_workspace() -> anyhow::Result<()> {
         let directory = tempfile::tempdir()?;
         let path = directory.path().join("settings.json");
         let mut store = SettingsStore::load(Some(path.clone()));
-        store.update("example.desktop".into(), "code".into(), Some("3".into()))?;
+        store.update("example.desktop".into(), "code".into())?;
         let loaded = SettingsStore::load(Some(path));
         let settings = loaded
             .for_application("example.desktop")

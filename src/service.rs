@@ -142,11 +142,11 @@ impl ApplicationService {
             self.catalog.read().await.by_id(&params.target_id).is_some(),
             "application is no longer available"
         );
-        let settings = self.settings.write().await.update(
-            params.target_id,
-            params.category,
-            params.workspace_id,
-        )?;
+        let settings = self
+            .settings
+            .write()
+            .await
+            .update(params.target_id, params.category)?;
         self.publish_state().await;
         Ok(settings)
     }
@@ -471,8 +471,6 @@ const fn default_limit() -> usize {
 pub struct UpdateSettingsParams {
     pub target_id: String,
     pub category: String,
-    #[serde(default)]
-    pub workspace_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

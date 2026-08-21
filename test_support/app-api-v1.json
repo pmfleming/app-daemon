@@ -68,8 +68,7 @@
         "name": "applications.settings.update",
         "params_example": {
           "target_id": "org.example.App.desktop",
-          "category": "code",
-          "workspace_id": "3"
+          "category": "code"
         },
         "response_key": "settings",
         "stream": "applications.changed"
