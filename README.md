@@ -34,7 +34,7 @@ Physical storage I/O comes from `/proc/<pid>/io`; logical cached I/O, operation 
 
 Application-owned disk space is measured separately by scanning matching directories under XDG config, data, state, cache, runtime, and Flatpak application roots. `disk_space_permanent_bytes` covers config/data/state, `disk_space_temporary_bytes` covers cache/runtime data, and `disk_space_total_bytes` is their sum. This is application data footprint, not package-installed size; unidentified directories and arbitrary `/tmp` names are intentionally not guessed. Directory measurements refresh every 30 seconds.
 
-Network connection count is derived from unique sockets held by the attributed processes. Per-application network byte accounting is explicitly marked unavailable until an optional cgroup eBPF collector is present; network-namespace totals are not misreported as process traffic.
+Network connection count is derived from unique sockets held by the attributed processes. Receive and transmit rates aggregate Linux INET_DIAG lifetime counters for the application's known TCP socket inodes, then report interval deltas; UDP and Unix sockets remain connection-only because Linux does not expose equivalent per-socket lifetime byte counters. Network-namespace totals are never misreported as process traffic.
 
 Energy remains an estimate. Linux powercap/RAPL package energy is attributed by observed CPU-time share and marked low confidence. Battery discharge is exposed only as system power context because it includes the display, radios, storage, and idle losses; it is no longer assigned to individual applications. `energy_source`, `energy_confidence`, and `attributed_fraction` describe every value.
 

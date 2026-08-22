@@ -13,10 +13,12 @@ use crate::{
 
 mod energy;
 mod gpu;
+mod network;
 mod system;
 
 use energy::{BatterySample, EnergyProvider, EnergySampler};
 use gpu::{GpuProcessStat, read_gpu_processes};
+use network::{NetworkCounters, read_network_counters};
 pub(crate) use system::process_cgroup;
 use system::{
     application_disk_usage, cgroup_members_for_paths, cgroup_paths_for_roots, descendants,
@@ -124,6 +126,7 @@ trait ResourceProvider: Debug + EnergyProvider + Send + Sync {
     fn process_memory(&self, pid: u32) -> MemoryUsage;
     fn process_io(&self, pid: u32) -> Option<ProcessIo>;
     fn process_files(&self, pid: u32) -> ProcessFiles;
+    fn network_counters(&self, inodes: &HashSet<u64>) -> Option<HashMap<u64, NetworkCounters>>;
     fn gpu_processes(&self, pids: &HashSet<u32>) -> HashMap<u32, GpuProcessStat>;
     fn process_cgroup(&self, pid: u32) -> Option<String>;
     fn cgroup_counters(&self, path: &str) -> Option<CgroupCounters>;
@@ -163,6 +166,10 @@ impl ResourceProvider for LinuxResourceProvider {
 
     fn process_files(&self, pid: u32) -> ProcessFiles {
         read_process_file_sets(pid)
+    }
+
+    fn network_counters(&self, inodes: &HashSet<u64>) -> Option<HashMap<u64, NetworkCounters>> {
+        read_network_counters(inodes)
     }
 
     fn gpu_processes(&self, pids: &HashSet<u32>) -> HashMap<u32, GpuProcessStat> {
@@ -232,6 +239,8 @@ pub struct ResourceSnapshot {
     cgroup_path_by_root: HashMap<u32, String>,
     cgroup_usage: HashMap<String, CgroupUsage>,
     app_disk_by_target: HashMap<String, DiskBreakdown>,
+    network_deltas: HashMap<u64, NetworkCounters>,
+    network_counters_available: bool,
     shared_pids: HashSet<u32>,
     logical_cpus: usize,
     total_process_cpu_percent: f64,
@@ -250,6 +259,8 @@ impl Default for ResourceSnapshot {
             cgroup_path_by_root: HashMap::new(),
             cgroup_usage: HashMap::new(),
             app_disk_by_target: HashMap::new(),
+            network_deltas: HashMap::new(),
+            network_counters_available: false,
             shared_pids: HashSet::new(),
             logical_cpus: 1,
             total_process_cpu_percent: 0.0,
@@ -436,8 +447,25 @@ impl ResourceSnapshot {
         measurement.gpu_available = aggregate.gpu_processes > 0;
         measurement.storage_available = complete_cgroup || aggregate.storage_processes > 0;
         aggregate.usage.network.network_connection_count = aggregate.network_sockets.len() as u64;
+        let mut measured_connections = 0_u64;
+        for counters in aggregate
+            .network_sockets
+            .iter()
+            .filter_map(|inode| self.network_deltas.get(inode))
+        {
+            add_counter(
+                &mut aggregate.usage.network.network_receive_bytes,
+                counters.received_bytes,
+            );
+            add_counter(
+                &mut aggregate.usage.network.network_transmit_bytes,
+                counters.transmitted_bytes,
+            );
+            measured_connections += 1;
+        }
         measurement.network_available = aggregate.network_processes > 0;
-        measurement.network_bytes_available = false;
+        measurement.network_bytes_available =
+            self.network_counters_available && measured_connections > 0;
         measurement.network_connections_available = aggregate.network_processes > 0;
         measurement.resources_shared = attribution
             .pids
@@ -453,6 +481,7 @@ impl ResourceSnapshot {
         );
         usage.compute.normalize_cpu(self.logical_cpus);
         usage.storage.normalize_rates(self.interval_seconds);
+        usage.network.normalize_rates(self.interval_seconds);
         usage.energy = self.estimated_energy(energy_cpu_percent, self.total_process_cpu_percent);
         usage
     }
@@ -583,6 +612,14 @@ impl StorageUsage {
     }
 }
 
+impl crate::model::NetworkUsage {
+    fn normalize_rates(&mut self, seconds: f64) {
+        self.network_receive_bytes_per_second = rate(self.network_receive_bytes as f64, seconds, 1);
+        self.network_transmit_bytes_per_second =
+            rate(self.network_transmit_bytes as f64, seconds, 1);
+    }
+}
+
 #[derive(Debug)]
 pub struct ResourceSampler {
     provider: Arc<dyn ResourceProvider>,
@@ -590,6 +627,7 @@ pub struct ResourceSampler {
     previous_gpu_engines: HashMap<(u32, u64, String), u64>,
     previous_system_ticks: Option<u64>,
     previous_cgroups: HashMap<String, CgroupCounters>,
+    previous_network_counters: HashMap<u64, NetworkCounters>,
     previous_sample: Option<Instant>,
     open_files: OpenFileCache,
     app_disk: AppDiskCache,
@@ -604,6 +642,7 @@ impl Default for ResourceSampler {
             previous_gpu_engines: HashMap::new(),
             previous_system_ticks: None,
             previous_cgroups: HashMap::new(),
+            previous_network_counters: HashMap::new(),
             previous_sample: None,
             open_files: OpenFileCache::default(),
             app_disk: AppDiskCache::default(),
@@ -693,6 +732,34 @@ impl ResourceSampler {
         let mut current_open_files =
             self.open_files
                 .read(provider.as_ref(), &active_processes, now);
+        let known_sockets = current_open_files
+            .values()
+            .flat_map(|files| files.sockets.iter().copied())
+            .collect::<HashSet<_>>();
+        let sampled_network = provider.network_counters(&known_sockets);
+        let network_counters_available = sampled_network.is_some();
+        let current_network_counters = sampled_network.unwrap_or_default();
+        let network_deltas = current_network_counters
+            .iter()
+            .map(|(inode, current)| {
+                let previous = self
+                    .previous_network_counters
+                    .get(inode)
+                    .copied()
+                    .unwrap_or(*current);
+                (
+                    *inode,
+                    NetworkCounters {
+                        received_bytes: current
+                            .received_bytes
+                            .saturating_sub(previous.received_bytes),
+                        transmitted_bytes: current
+                            .transmitted_bytes
+                            .saturating_sub(previous.transmitted_bytes),
+                    },
+                )
+            })
+            .collect();
         let sampled_details = bounded_map(active_processes.iter().copied().collect(), |pid| {
             (pid, provider.process_memory(pid), provider.process_io(pid))
         })
@@ -710,6 +777,8 @@ impl ResourceSampler {
             cgroup_path_by_root,
             cgroup_usage,
             app_disk_by_target,
+            network_deltas,
+            network_counters_available,
             shared_pids,
             logical_cpus,
             interval_seconds,
@@ -765,6 +834,7 @@ impl ResourceSampler {
             current,
             current_io,
             current_cgroups,
+            current_network_counters,
             next_gpu_engines,
             system_ticks,
             now,
@@ -900,6 +970,7 @@ impl ResourceSampler {
         current: HashMap<u32, ProcessStat>,
         current_io: HashMap<u32, ProcessIo>,
         current_cgroups: HashMap<String, CgroupCounters>,
+        current_network_counters: HashMap<u64, NetworkCounters>,
         gpu_engines: HashMap<(u32, u64, String), u64>,
         system_ticks: u64,
         now: Instant,
@@ -921,6 +992,7 @@ impl ResourceSampler {
             .collect();
         self.previous_gpu_engines = gpu_engines;
         self.previous_cgroups = current_cgroups;
+        self.previous_network_counters = current_network_counters;
         self.previous_system_ticks = Some(system_ticks);
         self.previous_sample = Some(now);
     }
