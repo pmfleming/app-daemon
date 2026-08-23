@@ -831,8 +831,7 @@ impl ResourceSampler {
             );
         }
         self.remember(
-            current,
-            current_io,
+            (current, current_io),
             current_cgroups,
             current_network_counters,
             next_gpu_engines,
@@ -967,14 +966,14 @@ impl ResourceSampler {
 
     fn remember(
         &mut self,
-        current: HashMap<u32, ProcessStat>,
-        current_io: HashMap<u32, ProcessIo>,
+        processes: (HashMap<u32, ProcessStat>, HashMap<u32, ProcessIo>),
         current_cgroups: HashMap<String, CgroupCounters>,
         current_network_counters: HashMap<u64, NetworkCounters>,
         gpu_engines: HashMap<(u32, u64, String), u64>,
         system_ticks: u64,
         now: Instant,
     ) {
+        let (current, current_io) = processes;
         self.previous_processes = current
             .into_iter()
             .map(|(pid, process)| {

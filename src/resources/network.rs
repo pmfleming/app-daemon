@@ -76,7 +76,7 @@ fn open_diag_socket() -> Option<OwnedFd> {
             descriptor.as_raw_fd(),
             libc::SOL_SOCKET,
             libc::SO_RCVTIMEO,
-            (&raw const timeout).cast(),
+            std::ptr::from_ref(&timeout).cast(),
             size_of::<libc::timeval>() as libc::socklen_t,
         )
     };
@@ -103,31 +103,53 @@ fn dump_family(
         if received <= 0 {
             return false;
         }
-        let mut offset = 0;
-        let received = received as usize;
-        while offset + 16 <= received {
-            let length = read_u32(&response, offset) as usize;
-            if length < 16 || offset + length > received {
-                return false;
-            }
-            let message_type = read_u16(&response, offset + 4);
-            let message_sequence = read_u32(&response, offset + 8);
-            if message_sequence == sequence {
-                if message_type == NLMSG_DONE {
-                    return true;
-                }
-                if message_type == NLMSG_ERROR {
-                    return false;
-                }
-                parse_diag_message(
+        match process_dump_messages(
+            &response[..received as usize],
+            sequence,
+            requested_inodes,
+            counters,
+        ) {
+            DumpStatus::Pending => {}
+            DumpStatus::Complete => return true,
+            DumpStatus::Failed => return false,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum DumpStatus {
+    Pending,
+    Complete,
+    Failed,
+}
+
+fn process_dump_messages(
+    response: &[u8],
+    sequence: u32,
+    requested_inodes: &HashSet<u64>,
+    counters: &mut HashMap<u64, NetworkCounters>,
+) -> DumpStatus {
+    let mut offset = 0;
+    while offset + 16 <= response.len() {
+        let length = read_u32(response, offset) as usize;
+        if length < 16 || offset + length > response.len() {
+            return DumpStatus::Failed;
+        }
+        let message_type = read_u16(response, offset + 4);
+        if read_u32(response, offset + 8) == sequence {
+            match message_type {
+                NLMSG_DONE => return DumpStatus::Complete,
+                NLMSG_ERROR => return DumpStatus::Failed,
+                _ => parse_diag_message(
                     &response[offset + 16..offset + length],
                     requested_inodes,
                     counters,
-                );
+                ),
             }
-            offset += align4(length);
         }
+        offset += align4(length);
     }
+    DumpStatus::Pending
 }
 
 fn diag_request(family: u8, sequence: u32) -> [u8; 72] {
@@ -206,10 +228,15 @@ fn write_u32(bytes: &mut [u8], offset: usize, value: u32) {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{
+        HashMap, HashSet, INET_DIAG_INFO, INET_DIAG_MESSAGE_LENGTH, NetworkCounters,
+        TCP_INFO_BYTES_ACKED_OFFSET, TCP_INFO_BYTES_RECEIVED_OFFSET, TCP_INFO_COUNTERS_LENGTH,
+        parse_diag_message, read_network_counters, write_u16, write_u32,
+    };
     use std::{
         io::{Read, Write},
         net::{TcpListener, TcpStream},
+        os::fd::AsRawFd,
     };
 
     #[test]
