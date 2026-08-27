@@ -38,6 +38,16 @@ Network connection count is derived from unique sockets held by the attributed p
 
 Energy remains an estimate. Linux powercap/RAPL package energy is attributed by observed CPU-time share and marked low confidence. Battery discharge is exposed only as system power context because it includes the display, radios, storage, and idle losses; it is no longer assigned to individual applications. `energy_source`, `energy_confidence`, and `attributed_fraction` describe every value.
 
+Some kernels expose RAPL `energy_uj` counters as root-only. The unprivileged user daemon reports energy as unavailable rather than inventing a value. On NixOS, access can be explicitly granted to desktop users in the `video` group (this relaxes the kernel's energy-counter side-channel protection):
+
+```nix
+services.udev.extraRules = ''
+  ACTION=="add|change", SUBSYSTEM=="powercap", TEST=="energy_uj", ATTR{enabled}="1", RUN+="${pkgs.coreutils}/bin/chgrp video /sys%p/energy_uj", RUN+="${pkgs.coreutils}/bin/chmod 0440 /sys%p/energy_uj"
+'';
+```
+
+Apply the rule by rebooting or by retriggering the `powercap` subsystem after rebuilding. Power is otherwise available only while a battery reports an actual discharge rate; charging and AC-only measurements are not treated as system consumption.
+
 Resource history is aligned to 15-second wall-clock buckets and retained for 24 hours in `$XDG_STATE_HOME/app-daemon/resource-history-v1.json` (or `~/.local/state/...`). Points include averages, peaks, sample count, coverage, and mixed-source metadata. A compact one-minute application-energy ledger in the same file is retained for seven days and powers `applications.energyOverview` without keeping a week of full resource samples. Expired partial buckets are finalized even after an application exits.
 
 History is returned oldest-first. The response includes an opaque `next_cursor`; pass it back to retrieve the next page or poll for points recorded after the last response:
