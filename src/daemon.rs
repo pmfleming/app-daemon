@@ -1,22 +1,10 @@
-use std::{
-    collections::HashMap,
-    sync::{
-        Arc,
-        atomic::{AtomicU64, Ordering},
-    },
-};
+use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use serde_json::{Value, json};
-use tokio::{
-    signal::{
-        ctrl_c,
-        unix::{SignalKind, signal},
-    },
-    sync::{Mutex, broadcast},
-    task::JoinHandle,
-};
-use zbus::{connection, object_server::SignalEmitter};
+use shelllist_daemon_tokio::{OwnedTaskRegistry, directed_emitter, wait_for_owner_loss};
+use tokio::sync::{broadcast, oneshot};
+use zbus::{connection, message::Header, object_server::SignalEmitter};
 
 use crate::{
     api::{self, ApiService, BUS_NAME, OBJECT_PATH},
@@ -27,8 +15,7 @@ use crate::{
 pub struct AppDaemon {
     api: ApiService,
     applications: Arc<ApplicationService>,
-    sequence: AtomicU64,
-    subscriptions: Mutex<HashMap<String, JoinHandle<()>>>,
+    subscriptions: Arc<OwnedTaskRegistry>,
 }
 
 #[zbus::interface(name = "org.laufan.AppDaemon1")]
@@ -47,6 +34,7 @@ impl AppDaemon {
     async fn subscribe(
         &self,
         streams: Vec<String>,
+        #[zbus(header)] header: Header<'_>,
         #[zbus(signal_emitter)] emitter: SignalEmitter<'_>,
     ) -> String {
         let selected = match selected_streams(&streams) {
@@ -59,27 +47,52 @@ impl AppDaemon {
                 .to_string();
             }
         };
-        let id = format!(
-            "subscription-{}",
-            self.sequence.fetch_add(1, Ordering::Relaxed)
-        );
+        let id = self.subscriptions.next_id("subscription");
+        let owner = header.sender().map(|owner| owner.to_owned());
+        let destination = directed_emitter(&emitter, &header);
+        let connection = destination.connection().clone();
         let changes = self.applications.subscribe_state();
         let operations = self.applications.subscribe_operations();
-        let task = tokio::spawn(forward_events(
-            Arc::clone(&self.applications),
-            changes,
-            operations,
-            emitter.to_owned(),
-            id.clone(),
-            selected,
-        ));
-        self.subscriptions.lock().await.insert(id.clone(), task);
+        let applications = Arc::clone(&self.applications);
+        let subscriptions = Arc::clone(&self.subscriptions);
+        let task_id = id.clone();
+        let task_owner = owner.clone();
+        let (start, ready) = oneshot::channel();
+        let task = tokio::spawn(async move {
+            if ready.await.is_err() {
+                return;
+            }
+            let events = forward_events(
+                applications,
+                changes,
+                operations,
+                destination,
+                task_id.clone(),
+                selected,
+            );
+            match task_owner {
+                Some(owner) => tokio::select! {
+                    () = events => {}
+                    _ = wait_for_owner_loss(&connection, owner) => {}
+                },
+                None => events.await,
+            }
+            subscriptions.remove(&task_id).await;
+        });
+        self.subscriptions
+            .insert(id.clone(), owner.as_ref().map(ToString::to_string), task)
+            .await;
+        let _ = start.send(());
         api::success(json!({ "subscription": { "id": id } })).to_string()
     }
 
-    async fn cancel(&self, request_id: &str) -> String {
-        if let Some(task) = self.subscriptions.lock().await.remove(request_id) {
-            task.abort();
+    async fn cancel(&self, request_id: &str, #[zbus(header)] header: Header<'_>) -> String {
+        let owner = header.sender().map(ToString::to_string);
+        if self
+            .subscriptions
+            .cancel_owned(request_id, owner.as_deref())
+            .await
+        {
             return api::success(json!({ "cancelled": request_id, "kind": "subscription" }))
                 .to_string();
         }
@@ -239,8 +252,7 @@ pub async fn run() -> Result<()> {
     let daemon = AppDaemon {
         api: ApiService::new(Arc::clone(&applications)),
         applications,
-        sequence: AtomicU64::new(1),
-        subscriptions: Mutex::new(HashMap::new()),
+        subscriptions: Arc::new(OwnedTaskRegistry::default()),
     };
     let _connection = connection::Builder::session()
         .context("connect to session D-Bus")?
@@ -256,11 +268,7 @@ pub async fn run() -> Result<()> {
         object_path = OBJECT_PATH,
         "app-daemon started"
     );
-    let mut terminate = signal(SignalKind::terminate()).context("listen for SIGTERM")?;
-    let result = tokio::select! {
-        result = ctrl_c() => result.context("wait for Ctrl-C"),
-        _ = terminate.recv() => Ok(()),
-    };
+    let result = shelllist_daemon_tokio::wait_for_shutdown().await;
     shutdown_applications.save_history_final().await;
     result
 }
