@@ -237,10 +237,13 @@ async fn emit_event(
     subscription_id: &str,
     fields: Value,
 ) {
-    let mut value = json!({ "protocol": api::PROTOCOL, "version": api::VERSION, "stream": stream, "event": event, "subscription_id": subscription_id });
-    if let (Some(target), Value::Object(extra)) = (value.as_object_mut(), fields) {
-        target.extend(extra);
-    }
+    let value = shelllist_daemon_core::event_envelope(
+        shelllist_daemon_core::ApiIdentity::new(api::PROTOCOL, api::VERSION as u32),
+        stream,
+        event,
+        shelllist_daemon_core::Correlation::Subscription(subscription_id),
+        fields,
+    );
     if let Err(error) = AppDaemon::event(emitter, stream, &value.to_string()).await {
         tracing::warn!(%stream, %error, "app-api event could not be emitted");
     }
