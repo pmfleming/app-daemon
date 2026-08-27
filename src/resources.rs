@@ -277,6 +277,7 @@ struct ResourceAttribution {
     pids: HashSet<u32>,
     cgroup_paths: HashSet<String>,
     cgroup_roots: usize,
+    cgroups_cover_process_trees: bool,
 }
 
 #[derive(Default)]
@@ -334,18 +335,23 @@ impl ResourceSnapshot {
             pids: HashSet::new(),
             cgroup_paths: HashSet::new(),
             cgroup_roots: 0,
+            cgroups_cover_process_trees: true,
         };
         for root in &attribution.roots {
+            // A descendant can move into a sibling scope after it is spawned (terminal
+            // emulators commonly do this for each surface). Keep process-tree members in
+            // the attribution even when the application root has a specific cgroup.
+            let tree = descendants([*root], &self.children);
+            attribution.pids.extend(&tree);
             if let Some(members) = self.cgroup_members_by_root.get(root) {
+                attribution.cgroups_cover_process_trees &= tree.is_subset(members);
                 attribution.pids.extend(members);
                 if let Some(path) = self.cgroup_path_by_root.get(root) {
                     attribution.cgroup_paths.insert(path.clone());
                 }
                 attribution.cgroup_roots += 1;
             } else {
-                attribution
-                    .pids
-                    .extend(descendants([*root], &self.children));
+                attribution.cgroups_cover_process_trees = false;
             }
         }
         attribution
@@ -373,6 +379,7 @@ impl ResourceSnapshot {
     fn has_complete_cgroup_attribution(&self, attribution: &ResourceAttribution) -> bool {
         !attribution.roots.is_empty()
             && attribution.cgroup_roots == attribution.roots.len()
+            && attribution.cgroups_cover_process_trees
             && attribution
                 .cgroup_paths
                 .iter()

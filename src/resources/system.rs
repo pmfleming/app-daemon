@@ -124,10 +124,9 @@ pub(super) fn shared_target_pids(
     for roots in targets.values() {
         let mut target_pids = HashSet::new();
         for root in roots {
+            target_pids.extend(descendants([*root], children));
             if let Some(members) = cgroups.get(root) {
                 target_pids.extend(members);
-            } else {
-                target_pids.extend(descendants([*root], children));
             }
         }
         for pid in target_pids {
