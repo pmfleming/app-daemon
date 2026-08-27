@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
+use shelllist_daemon_core::{ApiError as EnvelopeError, ApiIdentity, error as error_envelope};
 
 use crate::{
     protocol,
@@ -16,6 +17,7 @@ pub const VERSION: u8 = protocol::VERSION;
 pub const BUS_NAME: &str = "org.laufan.AppDaemon";
 pub const OBJECT_PATH: &str = "/org/laufan/AppDaemon";
 pub const INTERFACE: &str = "org.laufan.AppDaemon1";
+const API: ApiIdentity = ApiIdentity::new(PROTOCOL, VERSION as u32);
 
 pub struct ApiService {
     applications: Arc<ApplicationService>,
@@ -108,11 +110,11 @@ fn decode<T: DeserializeOwned>(value: Value) -> Result<T, ApiError> {
 }
 
 pub fn success(data: Value) -> Value {
-    json!({ "protocol": PROTOCOL, "version": VERSION, "ok": true, "data": data })
+    shelllist_daemon_core::success(API, data)
 }
 
 fn error_response((code, message): ApiError) -> Value {
-    json!({ "protocol": PROTOCOL, "version": VERSION, "ok": false, "error": { "code": code, "message": message, "retryable": false } })
+    error_envelope(API, EnvelopeError::new(code, message).with_retryable(false))
 }
 
 pub fn error(code: &'static str, message: String) -> Value {

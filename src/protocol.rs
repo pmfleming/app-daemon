@@ -20,7 +20,7 @@ pub const METHODS: &[&str] = &[
 pub const STREAMS: &[&str] = &[stream::APPLICATIONS, stream::WINDOWS, stream::OPERATION];
 
 pub fn contract_fixture() -> serde_json::Result<Value> {
-    serde_json::from_str(include_str!("../test_support/app-api-v1.json"))
+    shelllist_daemon_core::load_fixture(include_str!("../test_support/app-api-v1.json"))
 }
 
 pub fn registry() -> serde_json::Result<Value> {
@@ -34,12 +34,7 @@ mod tests {
     use super::{METHODS, STREAMS, VERSION, contract_fixture};
 
     fn names<'a>(fixture: &'a Value, registry: &str) -> Vec<&'a str> {
-        fixture["registry"][registry]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter_map(|item| item["name"].as_str())
-            .collect()
+        shelllist_daemon_core::fixture_names(fixture, registry).expect("fixture registry")
     }
 
     #[test]
