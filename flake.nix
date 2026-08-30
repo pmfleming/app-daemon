@@ -2,9 +2,13 @@
   description = "Application catalog and activation daemon for Shelllist";
 
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-26.05";
+  inputs.daemonFramework = {
+    url = "git+file:../daemon-framework?ref=main";
+    inputs.nixpkgs.follows = "nixpkgs";
+  };
 
   outputs =
-    { self, nixpkgs }:
+    { self, nixpkgs, daemonFramework }:
     let
       systems = [ "x86_64-linux" ];
       forAllSystems = f: nixpkgs.lib.genAttrs systems (system: f system nixpkgs.legacyPackages.${system});
@@ -17,13 +21,10 @@
             pname = "app-daemon";
             version = "0.1.0";
             src = ./.;
-            cargoLock = {
-              lockFile = ./Cargo.lock;
-              outputHashes = {
-                "shelllist-daemon-core-0.1.0" = "sha256-KvdGb1Gdad8JSo8r/rVBGdZKkuLm/GlgvF/H1ft7Fkw=";
-                "shelllist-daemon-tokio-0.1.0" = "sha256-KvdGb1Gdad8JSo8r/rVBGdZKkuLm/GlgvF/H1ft7Fkw=";
-              };
-            };
+            postUnpack = ''
+              cp -R --no-preserve=mode ${daemonFramework} "$(dirname "$sourceRoot")/daemon-framework"
+            '';
+            cargoLock.lockFile = ./Cargo.lock;
             nativeBuildInputs = [ pkgs.makeWrapper ];
             strictDeps = true;
             postInstall = ''
