@@ -29,6 +29,7 @@ enum Command {
 enum DebugCommand {
     ProtocolRegistry,
     ContractFixture,
+    ResourceContractFixture,
 }
 
 #[tokio::main]
@@ -48,6 +49,7 @@ async fn main() -> Result<()> {
             let value = match command {
                 DebugCommand::ProtocolRegistry => protocol::registry()?,
                 DebugCommand::ContractFixture => protocol::contract_fixture()?,
+                DebugCommand::ResourceContractFixture => protocol::resource_contract_fixture()?,
             };
             println!("{}", serde_json::to_string_pretty(&value)?);
             Ok(())
