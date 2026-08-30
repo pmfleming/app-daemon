@@ -20,8 +20,8 @@
             cargoLock = {
               lockFile = ./Cargo.lock;
               outputHashes = {
-                "shelllist-daemon-core-0.1.0" = "sha256-3tXlcM+PtEExZ91mtTIy/3Jpcj6o9MBlypPd3Z1ioVw=";
-                "shelllist-daemon-tokio-0.1.0" = "sha256-3tXlcM+PtEExZ91mtTIy/3Jpcj6o9MBlypPd3Z1ioVw=";
+                "shelllist-daemon-core-0.1.0" = "sha256-KvdGb1Gdad8JSo8r/rVBGdZKkuLm/GlgvF/H1ft7Fkw=";
+                "shelllist-daemon-tokio-0.1.0" = "sha256-KvdGb1Gdad8JSo8r/rVBGdZKkuLm/GlgvF/H1ft7Fkw=";
               };
             };
             nativeBuildInputs = [ pkgs.makeWrapper ];
