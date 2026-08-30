@@ -47,6 +47,7 @@ pub struct StateRevision {
 struct ActiveOperation {
     abort: AbortHandle,
     accepted: OperationResult,
+    owner: Option<String>,
 }
 
 pub struct ApplicationService {
@@ -230,6 +231,14 @@ impl ApplicationService {
         self: &Arc<Self>,
         params: ExecuteParams,
     ) -> anyhow::Result<OperationResult> {
+        self.execute_owned(params, None).await
+    }
+
+    pub async fn execute_owned(
+        self: &Arc<Self>,
+        params: ExecuteParams,
+        owner: Option<String>,
+    ) -> anyhow::Result<OperationResult> {
         let windows = Arc::clone(&*self.windows.read().await);
         let catalog = Arc::clone(&*self.catalog.read().await);
         let settings = self.settings.read().await;
@@ -304,6 +313,7 @@ impl ApplicationService {
             ActiveOperation {
                 abort: task.abort_handle(),
                 accepted: accepted.clone(),
+                owner,
             },
         );
         let _ = start_sender.send(());
@@ -311,7 +321,20 @@ impl ApplicationService {
     }
 
     pub async fn cancel_operation(&self, operation_id: &str) -> Option<OperationResult> {
-        let active = self.operations.lock().await.remove(operation_id)?;
+        self.cancel_operation_owned(operation_id, None).await
+    }
+
+    pub async fn cancel_operation_owned(
+        &self,
+        operation_id: &str,
+        owner: Option<&str>,
+    ) -> Option<OperationResult> {
+        let mut operations = self.operations.lock().await;
+        if operations.get(operation_id)?.owner.as_deref() != owner {
+            return None;
+        }
+        let active = operations.remove(operation_id)?;
+        drop(operations);
         active.abort.abort();
         let mut cancelled = active.accepted;
         cancelled.status = "cancelled".into();

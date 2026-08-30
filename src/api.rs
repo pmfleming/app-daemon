@@ -29,19 +29,33 @@ impl ApiService {
     }
 
     pub async fn dispatch(&self, method: &str, params: Value) -> Value {
+        self.dispatch_owned(method, params, None).await
+    }
+
+    pub async fn dispatch_owned(
+        &self,
+        method: &str,
+        params: Value,
+        owner: Option<String>,
+    ) -> Value {
         tracing::debug!(%method, "app-api request started");
-        self.request(method, params)
+        self.request(method, params, owner)
             .await
             .map_or_else(error_response, success)
     }
 
-    async fn request(&self, method: &str, params: Value) -> Result<Value, ApiError> {
+    async fn request(
+        &self,
+        method: &str,
+        params: Value,
+        owner: Option<String>,
+    ) -> Result<Value, ApiError> {
         match method {
             "applications.query" => self.query(params).await,
             "applications.history" => self.history(params).await,
             "applications.energyOverview" => self.energy_overview(params).await,
             "applications.refresh" => self.refresh(params).await,
-            "applications.execute" => self.execute(params).await,
+            "applications.execute" => self.execute(params, owner).await,
             "applications.settings.update" => self.update_settings(params).await,
             _ => Err((
                 "unsupported-method",
@@ -94,9 +108,9 @@ impl ApiService {
             .map_err(|error| ("validation-error", error.to_string()))
     }
 
-    async fn execute(&self, params: Value) -> Result<Value, ApiError> {
+    async fn execute(&self, params: Value, owner: Option<String>) -> Result<Value, ApiError> {
         self.applications
-            .execute(decode::<ExecuteParams>(params)?)
+            .execute_owned(decode::<ExecuteParams>(params)?, owner)
             .await
             .map(|operation| json!({ "operation": operation }))
             .map_err(|error| ("operation-failed", error.to_string()))

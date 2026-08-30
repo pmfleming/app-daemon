@@ -20,7 +20,12 @@ pub struct AppDaemon {
 
 #[zbus::interface(name = "org.laufan.AppDaemon1")]
 impl AppDaemon {
-    async fn call(&self, method: &str, params_json: &str) -> String {
+    async fn call(
+        &self,
+        method: &str,
+        params_json: &str,
+        #[zbus(header)] header: Header<'_>,
+    ) -> String {
         let params: Value = match serde_json::from_str(params_json) {
             Ok(value) => value,
             Err(error) => {
@@ -28,7 +33,10 @@ impl AppDaemon {
                     .to_string();
             }
         };
-        self.api.dispatch(method, params).await.to_string()
+        self.api
+            .dispatch_owned(method, params, header.sender().map(ToString::to_string))
+            .await
+            .to_string()
     }
 
     async fn subscribe(
@@ -98,7 +106,7 @@ impl AppDaemon {
         }
         if self
             .applications
-            .cancel_operation(request_id)
+            .cancel_operation_owned(request_id, owner.as_deref())
             .await
             .is_some()
         {
