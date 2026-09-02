@@ -67,6 +67,11 @@ pub struct HistoryPage {
     pub next_cursor: Option<String>,
 }
 
+pub struct HistorySnapshot {
+    path: Option<PathBuf>,
+    file: HistoryFile,
+}
+
 #[derive(Debug)]
 pub struct HistoryStore {
     path: Option<PathBuf>,
@@ -215,40 +220,36 @@ impl HistoryStore {
     }
 
     pub fn save(&mut self) -> std::io::Result<()> {
-        self.flush_expired(now_milliseconds());
-        self.persist()
+        persist_snapshot(self.snapshot(false))
     }
 
     pub fn save_final(&mut self) -> std::io::Result<()> {
-        self.flush_pending();
-        self.persist()
+        persist_snapshot(self.snapshot(true))
     }
 
-    fn persist(&mut self) -> std::io::Result<()> {
-        self.prune(now_milliseconds());
-        let Some(path) = self.path.as_ref() else {
-            return Ok(());
-        };
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)?;
+    pub fn snapshot(&mut self, final_save: bool) -> HistorySnapshot {
+        if final_save {
+            self.flush_pending();
+        } else {
+            self.flush_expired(now_milliseconds());
         }
-        let file = HistoryFile {
-            version: FILE_VERSION,
-            applications: self
-                .points
-                .iter()
-                .map(|(id, points)| (id.clone(), points.iter().cloned().collect()))
-                .collect(),
-            energy_applications: self
-                .energy_points
-                .iter()
-                .map(|(id, points)| (id.clone(), points.iter().cloned().collect()))
-                .collect(),
-        };
-        let bytes = serde_json::to_vec(&file)?;
-        let temporary = temporary_path(path);
-        fs::write(&temporary, bytes)?;
-        fs::rename(temporary, path)
+        self.prune(now_milliseconds());
+        HistorySnapshot {
+            path: self.path.clone(),
+            file: HistoryFile {
+                version: FILE_VERSION,
+                applications: self
+                    .points
+                    .iter()
+                    .map(|(id, points)| (id.clone(), points.iter().cloned().collect()))
+                    .collect(),
+                energy_applications: self
+                    .energy_points
+                    .iter()
+                    .map(|(id, points)| (id.clone(), points.iter().cloned().collect()))
+                    .collect(),
+            },
+        }
     }
 
     fn flush_pending(&mut self) {
@@ -430,6 +431,19 @@ fn history_path() -> Option<PathBuf> {
         .map(PathBuf::from)
         .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/state")))
         .map(|root| root.join("app-daemon/resource-history-v1.json"))
+}
+
+pub fn persist_snapshot(snapshot: HistorySnapshot) -> std::io::Result<()> {
+    let Some(path) = snapshot.path else {
+        return Ok(());
+    };
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let bytes = serde_json::to_vec(&snapshot.file)?;
+    let temporary = temporary_path(&path);
+    fs::write(&temporary, bytes)?;
+    fs::rename(temporary, path)
 }
 
 fn temporary_path(path: &Path) -> PathBuf {

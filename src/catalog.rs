@@ -59,6 +59,15 @@ pub struct Catalog {
     pub entries: Vec<CatalogEntry>,
 }
 
+impl Default for Catalog {
+    fn default() -> Self {
+        Self {
+            revision: 0,
+            entries: Vec::new(),
+        }
+    }
+}
+
 impl Catalog {
     pub fn load() -> Self {
         Self::from_paths(default_catalog_paths())

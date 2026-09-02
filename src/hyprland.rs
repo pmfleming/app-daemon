@@ -44,6 +44,8 @@ pub struct Client {
     pub mapped: bool,
 }
 
+const HYPRCTL_TIMEOUT: Duration = Duration::from_secs(2);
+
 const fn unfocused() -> i64 {
     i64::MAX
 }
@@ -60,12 +62,10 @@ pub struct Snapshot {
 
 impl Snapshot {
     pub async fn load() -> Self {
-        let output = match Command::new("hyprctl")
-            .args(["clients", "-j"])
-            .output()
-            .await
-        {
-            Ok(value) if value.status.success() => value,
+        let mut command = Command::new("hyprctl");
+        command.args(["clients", "-j"]);
+        let output = match bounded_output(&mut command).await {
+            Some(value) if value.status.success() => value,
             _ => return Self::default(),
         };
         let Ok(mut clients) = serde_json::from_slice::<Vec<Client>>(&output.stdout) else {
@@ -208,16 +208,23 @@ fn workspace_selector(workspace: &str) -> anyhow::Result<&str> {
 }
 
 async fn dispatch(arguments: &[&str]) -> bool {
-    let Ok(output) = Command::new("hyprctl")
+    let mut command = Command::new("hyprctl");
+    command
         .args(arguments)
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .output()
-        .await
-    else {
+        .stderr(Stdio::null());
+    let Some(output) = bounded_output(&mut command).await else {
         return false;
     };
     output.status.success() && String::from_utf8_lossy(&output.stdout).trim() == "ok"
+}
+
+async fn bounded_output(command: &mut Command) -> Option<std::process::Output> {
+    command.kill_on_drop(true);
+    time::timeout(HYPRCTL_TIMEOUT, command.output())
+        .await
+        .ok()?
+        .ok()
 }
 
 fn valid_address(address: &str) -> bool {

@@ -30,7 +30,7 @@ struct SettingsFile {
     applications: BTreeMap<String, ApplicationSettings>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct SettingsStore {
     path: Option<PathBuf>,
     applications: BTreeMap<String, ApplicationSettings>,
@@ -71,6 +71,17 @@ impl SettingsStore {
         target_id: String,
         category: String,
     ) -> anyhow::Result<ApplicationSettings> {
+        let (next, settings) = self.prepare_update(target_id, category)?;
+        next.persist()?;
+        *self = next;
+        Ok(settings)
+    }
+
+    pub fn prepare_update(
+        &self,
+        target_id: String,
+        category: String,
+    ) -> anyhow::Result<(Self, ApplicationSettings)> {
         let workspace_id = workspace_for_category(&category)
             .map(str::to_owned)
             .ok_or_else(|| anyhow::anyhow!("application category is invalid"))?;
@@ -78,23 +89,13 @@ impl SettingsStore {
             category,
             workspace_id: Some(workspace_id),
         };
-        let previous = self
-            .applications
-            .insert(target_id.clone(), settings.clone());
-        self.revision = settings_revision(&self.applications);
-        if let Err(error) = self.persist() {
-            if let Some(previous) = previous {
-                self.applications.insert(target_id, previous);
-            } else {
-                self.applications.remove(&target_id);
-            }
-            self.revision = settings_revision(&self.applications);
-            return Err(error.into());
-        }
-        Ok(settings)
+        let mut next = self.clone();
+        next.applications.insert(target_id, settings.clone());
+        next.revision = settings_revision(&next.applications);
+        Ok((next, settings))
     }
 
-    fn persist(&self) -> std::io::Result<()> {
+    pub fn persist(&self) -> std::io::Result<()> {
         let Some(path) = self.path.as_ref() else {
             return Ok(());
         };

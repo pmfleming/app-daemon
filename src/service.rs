@@ -15,7 +15,7 @@ use uuid::Uuid;
 
 use crate::{
     catalog::{Catalog, default_catalog_paths},
-    history::{HistoryStore, now_milliseconds},
+    history::{HistoryStore, now_milliseconds, persist_snapshot},
     hyprland::{self, Snapshot},
     model::{
         ApplicationEnergyOverview, ApplicationEnergySummary, ApplicationPage,
@@ -56,6 +56,7 @@ pub struct ApplicationService {
     resources: RwLock<ResourceSnapshot>,
     history: Mutex<HistoryStore>,
     settings: RwLock<SettingsStore>,
+    settings_updates: Mutex<()>,
     state_changes: broadcast::Sender<StateRevision>,
     operation_changes: broadcast::Sender<OperationResult>,
     operations: Mutex<HashMap<String, ActiveOperation>>,
@@ -68,11 +69,12 @@ impl ApplicationService {
         let (state_changes, _) = broadcast::channel(32);
         let (operation_changes, _) = broadcast::channel(64);
         let service = Arc::new(Self {
-            catalog: RwLock::new(Arc::new(Catalog::load())),
+            catalog: RwLock::new(Arc::new(Catalog::default())),
             windows: RwLock::new(Arc::new(Snapshot::default())),
             resources: RwLock::new(ResourceSnapshot::default()),
             history: Mutex::new(HistoryStore::load_default()),
             settings: RwLock::new(SettingsStore::load_default()),
+            settings_updates: Mutex::new(()),
             state_changes,
             operation_changes,
             operations: Mutex::new(HashMap::new()),
@@ -108,7 +110,11 @@ impl ApplicationService {
     }
 
     async fn refresh_catalog(&self) {
-        let next = Arc::new(Catalog::load());
+        let next = Arc::new(
+            tokio::task::spawn_blocking(Catalog::load)
+                .await
+                .unwrap_or_default(),
+        );
         let changed = next.revision != self.catalog.read().await.revision;
         if changed {
             *self.catalog.write().await = next;
@@ -148,11 +154,18 @@ impl ApplicationService {
             self.catalog.read().await.by_id(&params.target_id).is_some(),
             "application is no longer available"
         );
-        let settings = self
+        let _update = self.settings_updates.lock().await;
+        let (next, settings) = self
             .settings
-            .write()
+            .read()
             .await
-            .update(params.target_id, params.category)?;
+            .prepare_update(params.target_id, params.category)?;
+        let next = tokio::task::spawn_blocking(move || {
+            next.persist()?;
+            Ok::<_, std::io::Error>(next)
+        })
+        .await??;
+        *self.settings.write().await = next;
         self.publish_state().await;
         Ok(settings)
     }
@@ -238,14 +251,21 @@ impl ApplicationService {
     }
 
     pub async fn save_history(&self) {
-        if let Err(error) = self.history.lock().await.save() {
-            tracing::warn!(%error, "resource history could not be saved");
-        }
+        self.persist_history(false, "resource history could not be saved")
+            .await;
     }
 
     pub async fn save_history_final(&self) {
-        if let Err(error) = self.history.lock().await.save_final() {
-            tracing::warn!(%error, "final resource history could not be saved");
+        self.persist_history(true, "final resource history could not be saved")
+            .await;
+    }
+
+    async fn persist_history(&self, final_save: bool, message: &'static str) {
+        let snapshot = self.history.lock().await.snapshot(final_save);
+        match tokio::task::spawn_blocking(move || persist_snapshot(snapshot)).await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => tracing::warn!(%error, "{message}"),
+            Err(error) => tracing::warn!(%error, "resource history persistence task failed"),
         }
     }
 
@@ -414,7 +434,7 @@ async fn track_state(service: std::sync::Weak<ApplicationService>) {
     let Some(initial) = service.upgrade() else {
         return;
     };
-    initial.refresh_windows().await;
+    tokio::join!(initial.refresh_catalog(), initial.refresh_windows());
     drop(initial);
 
     loop {
