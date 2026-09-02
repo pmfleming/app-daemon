@@ -1,11 +1,12 @@
 use std::{
     collections::{BTreeMap, hash_map::DefaultHasher},
-    env, fs,
+    fs,
     hash::{Hash, Hasher},
     path::{Path, PathBuf},
 };
 
 use serde::{Deserialize, Serialize};
+use shelllist_daemon_core::{XdgRoot, resolve_xdg_path};
 
 pub const CATEGORIES: &[&str] = &["shell", "browser", "code", "media", "text"];
 const CATEGORY_WORKSPACES: &[(&str, &str)] = &[
@@ -14,6 +15,12 @@ const CATEGORY_WORKSPACES: &[(&str, &str)] = &[
     ("code", "3"),
     ("media", "4"),
     ("text", "5"),
+];
+const CATEGORY_HINTS: &[(&str, &[&str])] = &[
+    ("browser", &["WebBrowser", "Network"]),
+    ("code", &["Development"]),
+    ("media", &["AudioVideo", "Audio", "Video", "Graphics"]),
+    ("text", &["Office", "TextEditor", "WordProcessor", "Viewer"]),
 ];
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -119,22 +126,16 @@ pub fn workspace_for_category(category: &str) -> Option<&'static str> {
 }
 
 pub fn inferred_category(categories: &[String]) -> &'static str {
-    let has = |candidate: &str| {
-        categories
-            .iter()
-            .any(|value| value.eq_ignore_ascii_case(candidate))
-    };
-    if has("WebBrowser") || has("Network") {
-        "browser"
-    } else if has("Development") {
-        "code"
-    } else if has("AudioVideo") || has("Audio") || has("Video") || has("Graphics") {
-        "media"
-    } else if has("Office") || has("TextEditor") || has("WordProcessor") || has("Viewer") {
-        "text"
-    } else {
-        "shell"
-    }
+    CATEGORY_HINTS
+        .iter()
+        .find(|(_, hints)| {
+            hints.iter().any(|hint| {
+                categories
+                    .iter()
+                    .any(|category| category.eq_ignore_ascii_case(hint))
+            })
+        })
+        .map_or("shell", |(category, _)| category)
 }
 
 fn settings_revision(applications: &BTreeMap<String, ApplicationSettings>) -> u64 {
@@ -148,10 +149,11 @@ fn settings_revision(applications: &BTreeMap<String, ApplicationSettings>) -> u6
 }
 
 fn settings_path() -> Option<PathBuf> {
-    env::var_os("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))
-        .map(|root| root.join("app-daemon/application-settings-v1.json"))
+    resolve_xdg_path(
+        XdgRoot::Config,
+        "app-daemon",
+        Path::new("application-settings-v1.json"),
+    )
 }
 
 fn temporary_path(path: &Path) -> PathBuf {

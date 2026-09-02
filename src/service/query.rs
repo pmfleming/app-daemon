@@ -379,35 +379,22 @@ fn search_match(application: &ApplicationSummary, query: &str) -> Option<SearchM
         return None;
     }
 
-    if name == query {
-        return Some(ranked_match(12_000, name.len(), "exact-name"));
+    if let Some(matched) = direct_match(&name, &id, id_stem, &query) {
+        return Some(matched);
     }
-    if id == query || id_stem == query {
-        return Some(ranked_match(11_800, id.len(), "exact-id"));
-    }
-    if name.starts_with(&query) {
-        return Some(ranked_match(11_500, name.len(), "name-prefix"));
-    }
-    if id.starts_with(&query) || id_stem.starts_with(&query) {
-        return Some(ranked_match(11_000, id.len(), "id-prefix"));
-    }
-    if let Some(index) = name.find(&query) {
-        return Some(SearchMatch {
-            score: 9_500 - index as i64 * 10 - name.len().min(500) as i64,
-            kind: "name-substring",
-        });
-    }
-    if let Some(index) = id.find(&query) {
-        return Some(SearchMatch {
-            score: 9_000 - index as i64 * 10 - id.len().min(500) as i64,
-            kind: "id-substring",
-        });
-    }
-    if let Some(index) = searchable.find(&query) {
-        return Some(SearchMatch {
-            score: 7_500 - index.min(500) as i64,
-            kind: "metadata",
-        });
+    let substring_match = |value: &str, base, weight, length_penalty, kind| {
+        value.find(&query).map(|index| SearchMatch {
+            score: base - index.min(500) as i64 * weight - length_penalty,
+            kind,
+        })
+    };
+    let name_penalty = name.len().min(500) as i64;
+    let id_penalty = id.len().min(500) as i64;
+    if let Some(matched) = substring_match(&name, 9_500, 10, name_penalty, "name-substring")
+        .or_else(|| substring_match(&id, 9_000, 10, id_penalty, "id-substring"))
+        .or_else(|| substring_match(&searchable, 7_500, 1, 0, "metadata"))
+    {
+        return Some(matched);
     }
     if query.len() <= 5
         && let Some(index) = acronym.find(&query)
@@ -421,6 +408,21 @@ fn search_match(application: &ApplicationSummary, query: &str) -> Option<SearchM
         score: 5_000 - tokens.len() as i64,
         kind: "terms",
     })
+}
+
+fn direct_match(name: &str, id: &str, id_stem: &str, query: &str) -> Option<SearchMatch> {
+    let (base, length, kind) = if name == query {
+        (12_000, name.len(), "exact-name")
+    } else if id == query || id_stem == query {
+        (11_800, id.len(), "exact-id")
+    } else if name.starts_with(query) {
+        (11_500, name.len(), "name-prefix")
+    } else if id.starts_with(query) || id_stem.starts_with(query) {
+        (11_000, id.len(), "id-prefix")
+    } else {
+        return None;
+    };
+    Some(ranked_match(base, length, kind))
 }
 
 fn ranked_match(base: i64, length: usize, kind: &'static str) -> SearchMatch {

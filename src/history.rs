@@ -1,6 +1,6 @@
 use std::{
     collections::{HashMap, VecDeque},
-    env, fs,
+    fs,
     path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -8,6 +8,7 @@ use std::{
 use anyhow::Context;
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde::{Deserialize, Serialize};
+use shelllist_daemon_core::{XdgRoot, resolve_xdg_path};
 
 use crate::model::{ResourceHistoryPoint, ResourceUsage};
 
@@ -427,10 +428,11 @@ pub fn now_milliseconds() -> u64 {
 }
 
 fn history_path() -> Option<PathBuf> {
-    env::var_os("XDG_STATE_HOME")
-        .map(PathBuf::from)
-        .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/state")))
-        .map(|root| root.join("app-daemon/resource-history-v1.json"))
+    resolve_xdg_path(
+        XdgRoot::State,
+        "app-daemon",
+        Path::new("resource-history-v1.json"),
+    )
 }
 
 pub fn persist_snapshot(snapshot: HistorySnapshot) -> std::io::Result<()> {
