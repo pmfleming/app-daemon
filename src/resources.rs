@@ -1,8 +1,8 @@
 use std::{
-    collections::{HashMap, HashSet, VecDeque},
+    collections::{HashMap, HashSet},
     fmt::Debug,
     path::PathBuf,
-    sync::{Arc, Mutex},
+    sync::Arc,
     time::Instant,
 };
 
@@ -118,7 +118,15 @@ struct DiskFile {
     temporary: bool,
 }
 
-const MAX_SAMPLING_WORKERS: usize = 6;
+const MEMORY_REFRESH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(10);
+const OPEN_FILE_REFRESH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
+const APP_DISK_REFRESH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(300);
+
+fn bounded_map<T, R>(items: Vec<T>, operation: impl Fn(T) -> R) -> Vec<R> {
+    // ResourceSampler already runs on Tokio's blocking pool. Keep work on that
+    // reusable worker instead of creating a fresh set of OS threads per metric.
+    items.into_iter().map(operation).collect()
+}
 
 trait ResourceProvider: Debug + EnergyProvider + Send + Sync {
     fn system_cpu(&self) -> (u64, usize);
@@ -191,44 +199,6 @@ impl ResourceProvider for LinuxResourceProvider {
     fn application_disk_usage(&self, target_id: &str) -> DiskBreakdown {
         application_disk_usage(target_id)
     }
-}
-
-fn bounded_map<T, R>(items: Vec<T>, operation: impl Fn(T) -> R + Sync) -> Vec<R>
-where
-    T: Send,
-    R: Send,
-{
-    let workers = items.len().min(MAX_SAMPLING_WORKERS);
-    if workers <= 1 {
-        return items.into_iter().map(operation).collect();
-    }
-    let queue = Mutex::new(VecDeque::from(items));
-    let results = Mutex::new(Vec::new());
-    std::thread::scope(|scope| {
-        for _ in 0..workers {
-            let operation = &operation;
-            let queue = &queue;
-            let results = &results;
-            scope.spawn(move || {
-                loop {
-                    let item = queue
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .pop_front();
-                    let Some(item) = item else {
-                        break;
-                    };
-                    results
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .push(operation(item));
-                }
-            });
-        }
-    });
-    results
-        .into_inner()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 #[derive(Debug, Clone)]
@@ -636,6 +606,7 @@ pub struct ResourceSampler {
     previous_cgroups: HashMap<String, CgroupCounters>,
     previous_network_counters: HashMap<u64, NetworkCounters>,
     previous_sample: Option<Instant>,
+    memory: MemoryCache,
     open_files: OpenFileCache,
     app_disk: AppDiskCache,
     energy: EnergySampler,
@@ -651,11 +622,18 @@ impl Default for ResourceSampler {
             previous_cgroups: HashMap::new(),
             previous_network_counters: HashMap::new(),
             previous_sample: None,
+            memory: MemoryCache::default(),
             open_files: OpenFileCache::default(),
             app_disk: AppDiskCache::default(),
             energy: EnergySampler::default(),
         }
     }
+}
+
+#[derive(Debug, Default)]
+struct MemoryCache {
+    samples: HashMap<u32, MemoryUsage>,
+    next_refresh: InstantSlot,
 }
 
 #[derive(Debug, Default)]
@@ -767,12 +745,12 @@ impl ResourceSampler {
                 )
             })
             .collect();
-        let sampled_details = bounded_map(active_processes.iter().copied().collect(), |pid| {
-            (pid, provider.process_memory(pid), provider.process_io(pid))
-        })
-        .into_iter()
-        .map(|(pid, memory, io)| (pid, (memory, io)))
-        .collect::<HashMap<_, _>>();
+        let sampled_memory = self.memory.read(provider.as_ref(), &active_processes, now);
+        let sampled_io = active_processes
+            .iter()
+            .copied()
+            .map(|pid| (pid, provider.process_io(pid)))
+            .collect::<HashMap<_, _>>();
         let energy = self.energy.sample(interval_seconds, provider.as_ref());
         let app_disk_by_target = self
             .app_disk
@@ -803,7 +781,8 @@ impl ResourceSampler {
         let mut current_io = HashMap::new();
         for (&pid, process) in &current {
             let cpu_percent = self.cpu_percent(pid, process, system_delta, logical_cpus);
-            let (memory, sampled_io) = sampled_details.get(&pid).copied().unwrap_or_default();
+            let memory = sampled_memory.get(&pid).copied().unwrap_or_default();
+            let sampled_io = sampled_io.get(&pid).copied().flatten();
             let io = self.io_delta(pid, process, sampled_io.unwrap_or_default());
             if let Some(value) = sampled_io {
                 current_io.insert(pid, value);
@@ -1004,6 +983,36 @@ impl ResourceSampler {
     }
 }
 
+impl MemoryCache {
+    fn read(
+        &mut self,
+        provider: &dyn ResourceProvider,
+        pids: &HashSet<u32>,
+        now: Instant,
+    ) -> HashMap<u32, MemoryUsage> {
+        let refresh = self.next_refresh.0.is_none_or(|deadline| now >= deadline);
+        self.samples.retain(|pid, _| pids.contains(pid));
+        if refresh {
+            self.samples = pids
+                .iter()
+                .copied()
+                .map(|pid| (pid, provider.process_memory(pid)))
+                .collect();
+            self.next_refresh.0 = Some(now + MEMORY_REFRESH_INTERVAL);
+        } else {
+            let missing = pids
+                .iter()
+                .filter(|pid| !self.samples.contains_key(pid))
+                .copied()
+                .collect::<Vec<_>>();
+            for pid in missing {
+                self.samples.insert(pid, provider.process_memory(pid));
+            }
+        }
+        self.samples.clone()
+    }
+}
+
 impl OpenFileCache {
     fn read(
         &mut self,
@@ -1013,7 +1022,7 @@ impl OpenFileCache {
     ) -> HashMap<u32, Arc<ProcessFiles>> {
         let refresh = self.next_refresh.0.is_none_or(|deadline| now >= deadline);
         self.samples.retain(|pid, _| pids.contains(pid));
-        let requested = if refresh {
+        let requested: Vec<u32> = if refresh {
             pids.iter().copied().collect()
         } else {
             pids.iter()
@@ -1021,12 +1030,13 @@ impl OpenFileCache {
                 .copied()
                 .collect()
         };
-        let sampled = bounded_map(requested, |pid| {
-            (pid, Arc::new(provider.process_files(pid)))
-        });
+        let sampled = requested
+            .into_iter()
+            .map(|pid| (pid, Arc::new(provider.process_files(pid))))
+            .collect::<Vec<_>>();
         if refresh {
             self.samples = sampled.into_iter().collect();
-            self.next_refresh.0 = Some(now + std::time::Duration::from_secs(10));
+            self.next_refresh.0 = Some(now + OPEN_FILE_REFRESH_INTERVAL);
         } else {
             self.samples.extend(sampled);
         }
@@ -1044,7 +1054,7 @@ impl AppDiskCache {
         let targets = targets.into_iter().cloned().collect::<HashSet<_>>();
         let refresh = self.next_refresh.0.is_none_or(|deadline| now >= deadline);
         self.samples.retain(|target, _| targets.contains(target));
-        let requested = if refresh {
+        let requested: Vec<String> = if refresh {
             targets.into_iter().collect()
         } else {
             targets
@@ -1052,13 +1062,16 @@ impl AppDiskCache {
                 .filter(|target| !self.samples.contains_key(target))
                 .collect()
         };
-        let sampled = bounded_map(requested, |target| {
-            let usage = provider.application_disk_usage(&target);
-            (target, usage)
-        });
+        let sampled = requested
+            .into_iter()
+            .map(|target| {
+                let usage = provider.application_disk_usage(&target);
+                (target, usage)
+            })
+            .collect::<Vec<_>>();
         if refresh {
             self.samples = sampled.into_iter().collect();
-            self.next_refresh.0 = Some(now + std::time::Duration::from_secs(30));
+            self.next_refresh.0 = Some(now + APP_DISK_REFRESH_INTERVAL);
         } else {
             self.samples.extend(sampled);
         }
