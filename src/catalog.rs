@@ -53,19 +53,10 @@ impl CatalogEntry {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct Catalog {
     pub revision: u64,
     pub entries: Vec<CatalogEntry>,
-}
-
-impl Default for Catalog {
-    fn default() -> Self {
-        Self {
-            revision: 0,
-            entries: Vec::new(),
-        }
-    }
 }
 
 impl Catalog {
