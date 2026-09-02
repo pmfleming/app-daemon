@@ -79,6 +79,21 @@ async fn rejects_operations_for_stale_revisions() {
     assert!(service.execute(params).await.is_err());
 }
 
+#[tokio::test]
+async fn cheap_revision_matches_query_page() {
+    let service = ApplicationService::new();
+    let revision = service.revision().await;
+    let page = service
+        .query(QueryParams {
+            query: String::new(),
+            category: String::new(),
+            generation: 1,
+            limit: 1,
+        })
+        .await;
+    assert_eq!(revision, page.revision);
+}
+
 #[test]
 fn revisions_round_trip_exactly_through_javascript_numbers() {
     let catalog = Catalog::from_paths(Vec::new());

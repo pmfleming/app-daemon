@@ -15,6 +15,12 @@
         "stream": "applications.changed"
       },
       {
+        "name": "applications.revision",
+        "params_example": {},
+        "response_key": "revision",
+        "stream": "applications.changed"
+      },
+      {
         "name": "applications.history",
         "params_example": {
           "target_id": "org.example.App.desktop",

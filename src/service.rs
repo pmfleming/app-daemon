@@ -101,6 +101,13 @@ impl ApplicationService {
         }
     }
 
+    pub async fn revision(&self) -> u64 {
+        let catalog = self.catalog.read().await;
+        let windows = self.windows.read().await;
+        let settings = self.settings.read().await;
+        combined_revision(&catalog, &windows, settings.revision)
+    }
+
     pub fn subscribe_state(&self) -> broadcast::Receiver<StateRevision> {
         self.state_changes.subscribe()
     }

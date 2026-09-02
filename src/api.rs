@@ -52,6 +52,7 @@ impl ApiService {
     ) -> Result<Value, ApiError> {
         match method {
             "applications.query" => self.query(params).await,
+            "applications.revision" => self.revision().await,
             "applications.history" => self.history(params).await,
             "applications.energyOverview" => self.energy_overview(params).await,
             "applications.refresh" => self.refresh(params).await,
@@ -66,6 +67,10 @@ impl ApiService {
 
     async fn query(&self, params: Value) -> Result<Value, ApiError> {
         Ok(json!({ "applications": self.applications.query(decode(params)?).await }))
+    }
+
+    async fn revision(&self) -> Result<Value, ApiError> {
+        Ok(json!({ "revision": self.applications.revision().await }))
     }
 
     async fn history(&self, params: Value) -> Result<Value, ApiError> {
