@@ -8,10 +8,25 @@ use crate::{
 };
 
 use super::{
-    ApplicationAction, ApplicationService, ExecuteParams, QueryParams,
-    application_window_addresses, combined_revision, page, resolve_target,
+    ACTIVE_RESOURCE_SAMPLE_INTERVAL, ApplicationAction, ApplicationService,
+    BACKGROUND_RESOURCE_SAMPLE_INTERVAL, ExecuteParams, QueryParams, RESOURCE_DEMAND_WINDOW,
+    ResourceSamplingPolicy, application_window_addresses, combined_revision, page, resolve_target,
     resolve_target_with_cgroup, running_score,
 };
+
+#[test]
+fn resource_sampling_speeds_up_for_recent_demand() {
+    let now = std::time::Instant::now();
+    let mut policy = ResourceSamplingPolicy::default();
+    assert_eq!(policy.interval(now), BACKGROUND_RESOURCE_SAMPLE_INTERVAL);
+
+    policy.mark_demand(now);
+    assert_eq!(policy.interval(now), ACTIVE_RESOURCE_SAMPLE_INTERVAL);
+    assert_eq!(
+        policy.interval(now + RESOURCE_DEMAND_WINDOW),
+        BACKGROUND_RESOURCE_SAMPLE_INTERVAL
+    );
+}
 
 #[test]
 fn parses_application_actions() -> serde_json::Result<()> {

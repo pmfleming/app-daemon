@@ -1,13 +1,13 @@
 use std::{
     collections::HashMap,
-    sync::Arc,
+    sync::{Arc, Mutex as StdMutex},
     time::{Duration, Instant},
 };
 
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use serde::Deserialize;
 use tokio::{
-    sync::{Mutex, RwLock, broadcast, mpsc, oneshot},
+    sync::{Mutex, Notify, RwLock, broadcast, mpsc, oneshot},
     task::AbortHandle,
     time::{self, MissedTickBehavior},
 };
@@ -59,6 +59,8 @@ pub struct ApplicationService {
     state_changes: broadcast::Sender<StateRevision>,
     operation_changes: broadcast::Sender<OperationResult>,
     operations: Mutex<HashMap<String, ActiveOperation>>,
+    resource_sampling: StdMutex<ResourceSamplingPolicy>,
+    resource_demand_changed: Notify,
 }
 
 impl ApplicationService {
@@ -74,6 +76,8 @@ impl ApplicationService {
             state_changes,
             operation_changes,
             operations: Mutex::new(HashMap::new()),
+            resource_sampling: StdMutex::new(ResourceSamplingPolicy::default()),
+            resource_demand_changed: Notify::new(),
         });
         if tokio::runtime::Handle::try_current().is_ok() {
             tokio::spawn(track_state(Arc::downgrade(&service)));
@@ -128,6 +132,7 @@ impl ApplicationService {
     }
 
     pub async fn query(&self, params: QueryParams) -> ApplicationPage {
+        self.mark_resource_demand();
         let windows = Arc::clone(&*self.windows.read().await);
         let catalog = Arc::clone(&*self.catalog.read().await);
         let resources = self.resources.read().await;
@@ -156,6 +161,7 @@ impl ApplicationService {
         &self,
         params: ResourceHistoryParams,
     ) -> anyhow::Result<ApplicationResourceHistory> {
+        self.mark_resource_demand();
         let page = self.history.lock().await.query(
             &params.target_id,
             params.since_ms,
@@ -171,6 +177,7 @@ impl ApplicationService {
     }
 
     pub async fn energy_overview(&self, params: EnergyOverviewParams) -> ApplicationEnergyOverview {
+        self.mark_resource_demand();
         let until_ms = now_milliseconds();
         let since_ms = params.since_ms.min(until_ms);
         let mut totals = self.history.lock().await.energy_totals(since_ms, until_ms);
@@ -213,6 +220,21 @@ impl ApplicationService {
             energy_confidence,
             applications,
         }
+    }
+
+    fn mark_resource_demand(&self) {
+        self.resource_sampling
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .mark_demand(Instant::now());
+        self.resource_demand_changed.notify_one();
+    }
+
+    fn resource_sample_interval(&self, now: Instant) -> Duration {
+        self.resource_sampling
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .interval(now)
     }
 
     pub async fn save_history(&self) {
@@ -344,11 +366,32 @@ impl ApplicationService {
     }
 }
 
-const RESOURCE_SAMPLE_INTERVAL: Duration = Duration::from_secs(2);
+const ACTIVE_RESOURCE_SAMPLE_INTERVAL: Duration = Duration::from_secs(2);
+const BACKGROUND_RESOURCE_SAMPLE_INTERVAL: Duration = Duration::from_secs(10);
+const RESOURCE_DEMAND_WINDOW: Duration = Duration::from_secs(15);
 const WINDOW_RECOVERY_INTERVAL: Duration = Duration::from_secs(5);
 const CATALOG_RECOVERY_INTERVAL: Duration = Duration::from_secs(30);
 const EVENT_DEBOUNCE: Duration = Duration::from_millis(75);
 const HISTORY_SAVE_INTERVAL: Duration = Duration::from_secs(60);
+
+#[derive(Debug, Default)]
+struct ResourceSamplingPolicy {
+    active_until: Option<Instant>,
+}
+
+impl ResourceSamplingPolicy {
+    fn mark_demand(&mut self, now: Instant) {
+        self.active_until = Some(now + RESOURCE_DEMAND_WINDOW);
+    }
+
+    fn interval(&self, now: Instant) -> Duration {
+        if self.active_until.is_some_and(|deadline| now < deadline) {
+            ACTIVE_RESOURCE_SAMPLE_INTERVAL
+        } else {
+            BACKGROUND_RESOURCE_SAMPLE_INTERVAL
+        }
+    }
+}
 
 async fn track_state(service: std::sync::Weak<ApplicationService>) {
     let (window_sender, mut window_events) = mpsc::channel(64);
@@ -416,15 +459,26 @@ fn catalog_watcher(sender: mpsc::Sender<()>) -> notify::Result<RecommendedWatche
 
 async fn track_resources(service: std::sync::Weak<ApplicationService>) {
     let mut sampler = ResourceSampler::default();
-    let mut interval = time::interval(RESOURCE_SAMPLE_INTERVAL);
-    interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
+    let mut last_sample = None;
     let mut last_save = Instant::now();
     loop {
-        interval.tick().await;
         let Some(service) = service.upgrade() else {
             return;
         };
+        let now = Instant::now();
+        let interval = service.resource_sample_interval(now);
+        if let Some(last) = last_sample {
+            let deadline = last + interval;
+            if now < deadline {
+                tokio::select! {
+                    () = time::sleep_until(time::Instant::from_std(deadline)) => {}
+                    () = service.resource_demand_changed.notified() => {}
+                }
+                continue;
+            }
+        }
         sample_resources(&service, &mut sampler).await;
+        last_sample = Some(Instant::now());
         if last_save.elapsed() >= HISTORY_SAVE_INTERVAL {
             service.save_history().await;
             last_save = Instant::now();
