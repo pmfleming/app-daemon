@@ -1,20 +1,12 @@
 use std::{
     collections::hash_map::DefaultHasher,
-    env,
     hash::{Hash, Hasher},
-    path::PathBuf,
     process::Stdio,
     time::Duration,
 };
 
 use serde::Deserialize;
-use tokio::{
-    io::{AsyncBufReadExt, BufReader},
-    net::UnixStream,
-    process::Command,
-    sync::mpsc,
-    time,
-};
+use tokio::{process::Command, sync::mpsc, time};
 
 #[derive(Debug, Clone, Default, Deserialize, Hash)]
 pub struct Workspace {
@@ -97,57 +89,7 @@ pub fn window_id(address: &str) -> String {
 }
 
 pub async fn watch_events(sender: mpsc::Sender<()>) {
-    while !sender.is_closed() {
-        let Some(stream) = connect_event_socket().await else {
-            time::sleep(Duration::from_secs(1)).await;
-            continue;
-        };
-        let mut lines = BufReader::new(stream).lines();
-        while let Ok(Some(_)) = lines.next_line().await {
-            if sender.send(()).await.is_err() {
-                return;
-            }
-        }
-    }
-}
-
-async fn connect_event_socket() -> Option<UnixStream> {
-    for path in event_socket_paths() {
-        if let Ok(stream) = UnixStream::connect(path).await {
-            return Some(stream);
-        }
-    }
-    None
-}
-
-fn event_socket_paths() -> Vec<PathBuf> {
-    let signature = env::var_os("HYPRLAND_INSTANCE_SIGNATURE");
-    let runtime = env::var_os("XDG_RUNTIME_DIR");
-    event_socket_paths_for(signature.as_deref(), runtime.as_deref())
-}
-
-fn event_socket_paths_for(
-    signature: Option<&std::ffi::OsStr>,
-    runtime: Option<&std::ffi::OsStr>,
-) -> Vec<PathBuf> {
-    let Some(signature) = signature else {
-        return Vec::new();
-    };
-    let mut paths = Vec::new();
-    if let Some(runtime) = runtime {
-        paths.push(
-            PathBuf::from(runtime)
-                .join("hypr")
-                .join(signature)
-                .join(".socket2.sock"),
-        );
-    }
-    paths.push(
-        PathBuf::from("/tmp/hypr")
-            .join(signature)
-            .join(".socket2.sock"),
-    );
-    paths
+    shelllist_hyprland::watch_events(sender).await;
 }
 
 pub async fn focus(address: &str) -> anyhow::Result<()> {
@@ -235,9 +177,7 @@ fn valid_address(address: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use std::{ffi::OsStr, path::PathBuf};
-
-    use super::{address_selector, event_socket_paths_for, window_id, workspace_selector};
+    use super::{address_selector, window_id, workspace_selector};
 
     #[test]
     fn creates_protocol_safe_window_ids() {
@@ -254,20 +194,5 @@ mod tests {
         );
         assert!(workspace_selector("2,address:0x1").is_err());
         Ok(())
-    }
-
-    #[test]
-    fn builds_runtime_and_legacy_event_socket_paths() {
-        let paths = event_socket_paths_for(
-            Some(OsStr::new("test-signature")),
-            Some(OsStr::new("/run/user/1000")),
-        );
-        assert_eq!(
-            paths,
-            [
-                PathBuf::from("/run/user/1000/hypr/test-signature/.socket2.sock"),
-                PathBuf::from("/tmp/hypr/test-signature/.socket2.sock"),
-            ]
-        );
     }
 }

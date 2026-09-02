@@ -82,6 +82,7 @@ dependencies = [
  "serde_json",
  "shelllist-daemon-core",
  "shelllist-daemon-tokio",
+ "shelllist-hyprland",
  "tempfile",
  "tokio",
  "tracing",
@@ -965,6 +966,14 @@ dependencies = [
  "tokio",
  "tracing",
  "zbus",
+]
+
+[[package]]
+name = "shelllist-hyprland"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "tokio",
 ]
 
 [[package]]
