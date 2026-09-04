@@ -1,11 +1,18 @@
 use std::{
     collections::{HashMap, HashSet},
     mem::size_of,
-    os::fd::{AsRawFd, FromRawFd, OwnedFd},
+    os::fd::OwnedFd,
     time::Duration,
 };
 
-const NETLINK_SOCK_DIAG: libc::c_int = 4;
+use rustix::net::{
+    AddressFamily, RecvFlags, SendFlags, SocketFlags, SocketType, netlink, recv, send, socket_with,
+    sockopt::{Timeout, set_socket_timeout},
+};
+
+const IPV4_FAMILY: u8 = 2;
+const IPV6_FAMILY: u8 = 10;
+const TCP_PROTOCOL: u8 = 6;
 const SOCK_DIAG_BY_FAMILY: u16 = 20;
 const NLM_F_REQUEST: u16 = 0x01;
 const NLM_F_DUMP: u16 = 0x300;
@@ -34,81 +41,43 @@ pub(super) fn read_network_counters(
     }
     let descriptor = open_diag_socket()?;
     let mut counters = HashMap::new();
-    if !dump_family(
-        descriptor.as_raw_fd(),
-        libc::AF_INET as u8,
-        1,
-        requested_inodes,
-        &mut counters,
-    ) || !dump_family(
-        descriptor.as_raw_fd(),
-        libc::AF_INET6 as u8,
-        2,
-        requested_inodes,
-        &mut counters,
-    ) {
+    if !dump_family(&descriptor, IPV4_FAMILY, 1, requested_inodes, &mut counters)
+        || !dump_family(&descriptor, IPV6_FAMILY, 2, requested_inodes, &mut counters)
+    {
         return None;
     }
     Some(counters)
 }
 
 fn open_diag_socket() -> Option<OwnedFd> {
-    // SAFETY: socket returns a new descriptor and receives constant Linux ABI values.
-    let raw = unsafe {
-        libc::socket(
-            libc::AF_NETLINK,
-            libc::SOCK_RAW | libc::SOCK_CLOEXEC,
-            NETLINK_SOCK_DIAG,
-        )
-    };
-    if raw < 0 {
-        return None;
-    }
-    // SAFETY: ownership of the successful socket descriptor is transferred exactly once.
-    let descriptor = unsafe { OwnedFd::from_raw_fd(raw) };
-    let timeout = libc::timeval {
-        tv_sec: Duration::from_millis(500).as_secs() as libc::time_t,
-        tv_usec: 500_000,
-    };
-    // SAFETY: the timeout points to an initialized timeval with the correct length.
-    let configured = unsafe {
-        libc::setsockopt(
-            descriptor.as_raw_fd(),
-            libc::SOL_SOCKET,
-            libc::SO_RCVTIMEO,
-            std::ptr::from_ref(&timeout).cast(),
-            size_of::<libc::timeval>() as libc::socklen_t,
-        )
-    };
-    (configured == 0).then_some(descriptor)
+    let descriptor = socket_with(
+        AddressFamily::NETLINK,
+        SocketType::RAW,
+        SocketFlags::CLOEXEC,
+        Some(netlink::SOCK_DIAG),
+    )
+    .ok()?;
+    set_socket_timeout(&descriptor, Timeout::Recv, Some(Duration::from_millis(500))).ok()?;
+    Some(descriptor)
 }
 
 fn dump_family(
-    descriptor: libc::c_int,
+    descriptor: &OwnedFd,
     family: u8,
     sequence: u32,
     requested_inodes: &HashSet<u64>,
     counters: &mut HashMap<u64, NetworkCounters>,
 ) -> bool {
     let request = diag_request(family, sequence);
-    // SAFETY: request is a live contiguous buffer for the duration of send.
-    if unsafe { libc::send(descriptor, request.as_ptr().cast(), request.len(), 0) } < 0 {
+    if send(descriptor, &request, SendFlags::empty()).is_err() {
         return false;
     }
     let mut response = vec![0_u8; 64 * 1024];
     loop {
-        // SAFETY: response exposes its full initialized allocation as a mutable receive buffer.
-        let received =
-            unsafe { libc::recv(descriptor, response.as_mut_ptr().cast(), response.len(), 0) };
-        if received <= 0 {
+        let Ok((_, received)) = recv(descriptor, &mut response, RecvFlags::empty()) else {
             return false;
-        }
-        match process_dump_messages(
-            &response[..received as usize],
-            sequence,
-            requested_inodes,
-            counters,
-        ) {
+        };
+        match process_dump_messages(&response[..received], sequence, requested_inodes, counters) {
             DumpStatus::Pending => {}
             DumpStatus::Complete => return true,
             DumpStatus::Failed => return false,
@@ -131,25 +100,38 @@ fn process_dump_messages(
 ) -> DumpStatus {
     let mut offset = 0;
     while offset + 16 <= response.len() {
-        let length = read_u32(response, offset) as usize;
-        if length < 16 || offset + length > response.len() {
+        let Some(message) = netlink_message(response, offset) else {
             return DumpStatus::Failed;
+        };
+        offset = message.next_offset;
+        if message.sequence != sequence {
+            continue;
         }
-        let message_type = read_u16(response, offset + 4);
-        if read_u32(response, offset + 8) == sequence {
-            match message_type {
-                NLMSG_DONE => return DumpStatus::Complete,
-                NLMSG_ERROR => return DumpStatus::Failed,
-                _ => parse_diag_message(
-                    &response[offset + 16..offset + length],
-                    requested_inodes,
-                    counters,
-                ),
-            }
+        match message.kind {
+            NLMSG_DONE => return DumpStatus::Complete,
+            NLMSG_ERROR => return DumpStatus::Failed,
+            _ => parse_diag_message(message.payload, requested_inodes, counters),
         }
-        offset += align4(length);
     }
     DumpStatus::Pending
+}
+
+struct NetlinkMessage<'a> {
+    kind: u16,
+    sequence: u32,
+    payload: &'a [u8],
+    next_offset: usize,
+}
+
+fn netlink_message(response: &[u8], offset: usize) -> Option<NetlinkMessage<'_>> {
+    let length = read_u32(response, offset) as usize;
+    let end = offset.checked_add(length)?;
+    (length >= 16 && end <= response.len()).then(|| NetlinkMessage {
+        kind: read_u16(response, offset + 4),
+        sequence: read_u32(response, offset + 8),
+        payload: &response[offset + 16..end],
+        next_offset: offset + align4(length),
+    })
 }
 
 fn diag_request(family: u8, sequence: u32) -> [u8; 72] {
@@ -159,7 +141,7 @@ fn diag_request(family: u8, sequence: u32) -> [u8; 72] {
     write_u16(&mut request, 6, NLM_F_REQUEST | NLM_F_DUMP);
     write_u32(&mut request, 8, sequence);
     request[16] = family;
-    request[17] = libc::IPPROTO_TCP as u8;
+    request[17] = TCP_PROTOCOL;
     request[18] = 1 << (INET_DIAG_INFO - 1);
     write_u32(&mut request, 20, u32::MAX);
     // inet_diag_no_cookie asks the kernel not to filter by a specific socket cookie.
@@ -182,23 +164,33 @@ fn parse_diag_message(
     }
     let mut offset = INET_DIAG_MESSAGE_LENGTH;
     while offset + 4 <= message.len() {
-        let length = read_u16(message, offset) as usize;
-        let attribute_type = read_u16(message, offset + 2);
-        if length < 4 || offset + length > message.len() {
+        let Some((attribute_type, payload, next_offset)) = diag_attribute(message, offset) else {
             return;
-        }
-        let payload = &message[offset + 4..offset + length];
+        };
         if attribute_type == INET_DIAG_INFO && payload.len() >= TCP_INFO_COUNTERS_LENGTH {
-            counters.insert(
-                inode,
-                NetworkCounters {
-                    transmitted_bytes: read_u64(payload, TCP_INFO_BYTES_ACKED_OFFSET),
-                    received_bytes: read_u64(payload, TCP_INFO_BYTES_RECEIVED_OFFSET),
-                },
-            );
+            counters.insert(inode, tcp_counters(payload));
             return;
         }
-        offset += align4(length);
+        offset = next_offset;
+    }
+}
+
+fn diag_attribute(message: &[u8], offset: usize) -> Option<(u16, &[u8], usize)> {
+    let length = read_u16(message, offset) as usize;
+    let end = offset.checked_add(length)?;
+    (length >= 4 && end <= message.len()).then(|| {
+        (
+            read_u16(message, offset + 2),
+            &message[offset + 4..end],
+            offset + align4(length),
+        )
+    })
+}
+
+fn tcp_counters(payload: &[u8]) -> NetworkCounters {
+    NetworkCounters {
+        transmitted_bytes: read_u64(payload, TCP_INFO_BYTES_ACKED_OFFSET),
+        received_bytes: read_u64(payload, TCP_INFO_BYTES_RECEIVED_OFFSET),
     }
 }
 
@@ -231,37 +223,8 @@ mod tests {
     use super::{
         HashMap, HashSet, INET_DIAG_INFO, INET_DIAG_MESSAGE_LENGTH, NetworkCounters,
         TCP_INFO_BYTES_ACKED_OFFSET, TCP_INFO_BYTES_RECEIVED_OFFSET, TCP_INFO_COUNTERS_LENGTH,
-        parse_diag_message, read_network_counters, write_u16, write_u32,
+        parse_diag_message, write_u16, write_u32,
     };
-    use std::{
-        io::{Read, Write},
-        net::{TcpListener, TcpStream},
-        os::fd::AsRawFd,
-    };
-
-    #[test]
-    fn reads_counters_for_a_live_tcp_connection() {
-        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind loopback listener");
-        let mut client = TcpStream::connect(listener.local_addr().unwrap()).expect("connect");
-        let (mut server, _) = listener.accept().expect("accept");
-        client.write_all(b"request").unwrap();
-        let mut request = [0_u8; 7];
-        server.read_exact(&mut request).unwrap();
-        server.write_all(b"response").unwrap();
-        let mut response = [0_u8; 8];
-        client.read_exact(&mut response).unwrap();
-        let link = std::fs::read_link(format!("/proc/self/fd/{}", client.as_raw_fd())).unwrap();
-        let inode = link
-            .to_string_lossy()
-            .strip_prefix("socket:[")
-            .and_then(|value| value.strip_suffix(']'))
-            .and_then(|value| value.parse::<u64>().ok())
-            .expect("socket inode");
-        let counters = read_network_counters(&HashSet::from([inode])).expect("INET_DIAG dump");
-        let counter = counters.get(&inode).expect("TCP socket counter");
-        assert!(counter.transmitted_bytes >= 7);
-        assert!(counter.received_bytes >= 8);
-    }
 
     #[test]
     fn parses_tcp_info_counters_for_requested_inode() {

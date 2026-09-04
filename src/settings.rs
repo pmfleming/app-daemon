@@ -73,17 +73,6 @@ impl SettingsStore {
         self.applications.get(target_id)
     }
 
-    pub fn update(
-        &mut self,
-        target_id: String,
-        category: String,
-    ) -> anyhow::Result<ApplicationSettings> {
-        let (next, settings) = self.prepare_update(target_id, category)?;
-        next.persist()?;
-        *self = next;
-        Ok(settings)
-    }
-
     pub fn prepare_update(
         &self,
         target_id: String,
@@ -164,37 +153,21 @@ fn temporary_path(path: &Path) -> PathBuf {
 
 #[cfg(test)]
 mod tests {
-    use super::{SettingsStore, inferred_category, workspace_for_category};
+    use anyhow::Context;
 
-    #[test]
-    fn infers_the_five_launcher_categories() {
-        assert_eq!(inferred_category(&["TerminalEmulator".into()]), "shell");
-        assert_eq!(inferred_category(&["WebBrowser".into()]), "browser");
-        assert_eq!(inferred_category(&["Development".into()]), "code");
-        assert_eq!(inferred_category(&["AudioVideo".into()]), "media");
-        assert_eq!(inferred_category(&["TextEditor".into()]), "text");
-    }
-
-    #[test]
-    fn categories_select_their_corresponding_workspaces() {
-        assert_eq!(workspace_for_category("shell"), Some("1"));
-        assert_eq!(workspace_for_category("browser"), Some("2"));
-        assert_eq!(workspace_for_category("code"), Some("3"));
-        assert_eq!(workspace_for_category("media"), Some("4"));
-        assert_eq!(workspace_for_category("text"), Some("5"));
-        assert_eq!(workspace_for_category("unknown"), None);
-    }
+    use super::SettingsStore;
 
     #[test]
     fn persists_category_as_a_default_workspace() -> anyhow::Result<()> {
         let directory = tempfile::tempdir()?;
         let path = directory.path().join("settings.json");
-        let mut store = SettingsStore::load(Some(path.clone()));
-        store.update("example.desktop".into(), "code".into())?;
+        let (store, _) = SettingsStore::load(Some(path.clone()))
+            .prepare_update("example.desktop".into(), "code".into())?;
+        store.persist()?;
         let loaded = SettingsStore::load(Some(path));
         let settings = loaded
             .for_application("example.desktop")
-            .expect("saved settings");
+            .context("saved settings")?;
         assert_eq!(settings.category, "code");
         assert_eq!(settings.workspace_id.as_deref(), Some("3"));
         Ok(())

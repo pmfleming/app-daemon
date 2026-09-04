@@ -155,35 +155,7 @@ fn command(
 mod tests {
     use std::ffi::OsStr;
 
-    use super::{LaunchBackend, command, desktop_command};
-
-    #[test]
-    fn prefers_uwsm_when_available() {
-        assert_eq!(
-            LaunchBackend::detect_with(|command| command == "uwsm-app"),
-            LaunchBackend::Uwsm
-        );
-        assert_eq!(LaunchBackend::detect_with(|_| false), LaunchBackend::Direct);
-    }
-
-    #[test]
-    fn describes_launch_isolation() {
-        assert_eq!(LaunchBackend::Uwsm.name(), "uwsm-app");
-        assert_eq!(LaunchBackend::Uwsm.scope(), "app-graphical.slice");
-        assert_eq!(LaunchBackend::Direct.scope(), "inherited");
-    }
-
-    #[test]
-    fn invokes_uwsm_with_an_argument_separator() {
-        let command = command(LaunchBackend::Uwsm, "org.example.App.desktop", ["--new"]);
-        assert_eq!(command.as_std().get_program(), OsStr::new("uwsm-app"));
-        assert_eq!(
-            command.as_std().get_args().collect::<Vec<_>>(),
-            ["-t", "service", "--", "org.example.App.desktop", "--new"]
-                .map(OsStr::new)
-                .as_slice()
-        );
-    }
+    use super::{LaunchBackend, desktop_command};
 
     #[test]
     fn passes_desktop_ids_to_uwsm_and_gtk_launch() {

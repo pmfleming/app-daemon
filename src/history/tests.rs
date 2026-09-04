@@ -1,6 +1,6 @@
 use anyhow::Context;
 
-use super::HistoryStore;
+use super::{HistoryStore, persist_snapshot};
 use crate::model::{ComputeUsage, EnergyUsage, ResourceUsage, StorageUsage};
 
 #[test]
@@ -74,7 +74,7 @@ fn aggregates_and_persists_resource_buckets() -> anyhow::Result<()> {
     assert_eq!(point.storage.disk_write_bytes_per_second, 40.0);
     assert_eq!(point.storage.open_file_disk_bytes, 4096);
     assert_eq!(point.energy_mwh, 6.0);
-    store.save()?;
+    persist_snapshot(store.snapshot(false))?;
 
     let points = page.points;
     let mut loaded = HistoryStore::load(Some(path));
@@ -107,7 +107,7 @@ fn keeps_compact_energy_totals_for_week_overviews() -> anyhow::Result<()> {
     assert_eq!(totals.len(), 1);
     assert_eq!(totals[0].energy_mwh, 2.5);
     assert_eq!(totals[0].energy_source, "rapl");
-    store.save_final()?;
+    persist_snapshot(store.snapshot(true))?;
 
     let mut loaded = HistoryStore::load(Some(path));
     let totals = loaded.energy_totals(

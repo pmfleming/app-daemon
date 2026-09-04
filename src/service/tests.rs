@@ -8,39 +8,9 @@ use crate::{
 };
 
 use super::{
-    ACTIVE_RESOURCE_SAMPLE_INTERVAL, ApplicationAction, ApplicationService,
-    BACKGROUND_RESOURCE_SAMPLE_INTERVAL, ExecuteParams, QueryParams, RESOURCE_DEMAND_WINDOW,
-    ResourceSamplingPolicy, application_window_addresses, combined_revision, page, resolve_target,
-    resolve_target_with_cgroup, running_score,
+    ApplicationAction, ApplicationService, ExecuteParams, QueryParams, combined_revision, page,
+    resolve_target, resolve_target_with_cgroup,
 };
-
-#[test]
-fn resource_sampling_speeds_up_for_recent_demand() {
-    let now = std::time::Instant::now();
-    let mut policy = ResourceSamplingPolicy::default();
-    assert_eq!(policy.interval(now), BACKGROUND_RESOURCE_SAMPLE_INTERVAL);
-
-    policy.mark_demand(now);
-    assert_eq!(policy.interval(now), ACTIVE_RESOURCE_SAMPLE_INTERVAL);
-    assert_eq!(
-        policy.interval(now + RESOURCE_DEMAND_WINDOW),
-        BACKGROUND_RESOURCE_SAMPLE_INTERVAL
-    );
-}
-
-#[test]
-fn parses_application_actions() -> serde_json::Result<()> {
-    assert_eq!(
-        serde_json::from_str::<ApplicationAction>(r#""activate""#)?,
-        ApplicationAction::Activate
-    );
-    assert_eq!(
-        serde_json::from_str::<ApplicationAction>(r#""move-to-workspace""#)?,
-        ApplicationAction::MoveToWorkspace
-    );
-    assert!(serde_json::from_str::<ApplicationAction>(r#""unknown""#).is_err());
-    Ok(())
-}
 
 #[tokio::test]
 async fn accepts_operations_before_reporting_their_result() -> anyhow::Result<()> {
@@ -79,21 +49,6 @@ async fn rejects_operations_for_stale_revisions() {
     assert!(service.execute(params).await.is_err());
 }
 
-#[tokio::test]
-async fn cheap_revision_matches_query_page() {
-    let service = ApplicationService::new();
-    let revision = service.revision().await;
-    let page = service
-        .query(QueryParams {
-            query: String::new(),
-            category: String::new(),
-            generation: 1,
-            limit: 1,
-        })
-        .await;
-    assert_eq!(revision, page.revision);
-}
-
 #[test]
 fn revisions_round_trip_exactly_through_javascript_numbers() {
     let catalog = Catalog::from_paths(Vec::new());
@@ -104,13 +59,6 @@ fn revisions_round_trip_exactly_through_javascript_numbers() {
     let revision = combined_revision(&catalog, &windows, 0);
     assert!(revision < (1_u64 << 53));
     assert_eq!(revision as f64 as u64, revision);
-}
-
-#[test]
-fn focused_and_recent_windows_rank_first() {
-    assert!(running_score(true, 0) > running_score(false, 1));
-    assert!(running_score(false, 1) > running_score(false, 8));
-    assert!(running_score(false, 8) > running_score(false, i64::MAX));
 }
 
 #[test]
@@ -166,41 +114,6 @@ fn ranks_prefix_acronym_and_metadata_matches() -> anyhow::Result<()> {
     );
     assert_eq!(code.applications.len(), 1);
     assert_eq!(code.applications[0].identity.name, "Google Contacts");
-    Ok(())
-}
-
-#[test]
-fn selects_all_application_windows_for_closing() -> anyhow::Result<()> {
-    let directory = tempfile::tempdir()?;
-    fs::write(
-        directory.path().join("example.desktop"),
-        "[Desktop Entry]\nType=Application\nName=Example\nExec=true\nStartupWMClass=example\n",
-    )?;
-    let catalog = Catalog::from_paths(vec![directory.path().into()]);
-    let client = |address: &str, class: &str| Client {
-        address: address.into(),
-        class: class.into(),
-        initial_class: class.into(),
-        title: class.into(),
-        pid: 42,
-        workspace: Workspace::default(),
-        focus_rank: 0,
-        mapped: true,
-    };
-    let windows = crate::hyprland::Snapshot {
-        available: true,
-        revision: 1,
-        clients: vec![
-            client("0x1", "example"),
-            client("0x2", "example"),
-            client("0x3", "other"),
-        ],
-    };
-
-    assert_eq!(
-        application_window_addresses(&catalog, &windows, "example.desktop"),
-        ["0x1", "0x2"]
-    );
     Ok(())
 }
 

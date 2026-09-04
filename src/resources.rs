@@ -8,7 +8,7 @@ use std::{
 
 use crate::{
     metrics::{finite_nonnegative, rate, rounded},
-    model::{ComputeUsage, EnergyUsage, ResourceUsage, StorageUsage},
+    model::{ComputeUsage, EnergyUsage, NetworkUsage, ResourceUsage, StorageUsage},
 };
 
 mod energy;
@@ -19,6 +19,8 @@ mod system;
 use energy::{BatterySample, EnergyProvider, EnergySampler};
 use gpu::{GpuProcessStat, read_gpu_processes};
 use network::{NetworkCounters, read_network_counters};
+#[cfg(test)]
+use system::parse_process_stat;
 pub(crate) use system::process_cgroup;
 use system::{
     application_disk_usage, cgroup_members_for_paths, cgroup_paths_for_roots, descendants,
@@ -26,8 +28,6 @@ use system::{
     read_process_file_sets, read_process_io, read_process_memory, read_processes, read_system_cpu,
     shared_target_pids,
 };
-#[cfg(test)]
-use system::{equals_key_values, parse_process_stat, whitespace_key_values};
 
 #[derive(Debug, Clone, Copy)]
 struct ProcessStat {
@@ -121,12 +121,6 @@ struct DiskFile {
 const MEMORY_REFRESH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(10);
 const OPEN_FILE_REFRESH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
 const APP_DISK_REFRESH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(300);
-
-fn bounded_map<T, R>(items: Vec<T>, operation: impl Fn(T) -> R) -> Vec<R> {
-    // ResourceSampler already runs on Tokio's blocking pool. Keep work on that
-    // reusable worker instead of creating a fresh set of OS threads per metric.
-    items.into_iter().map(operation).collect()
-}
 
 trait ResourceProvider: Debug + EnergyProvider + Send + Sync {
     fn system_cpu(&self) -> (u64, usize);
@@ -242,6 +236,12 @@ impl Default for ResourceSnapshot {
     }
 }
 
+struct SampledNetwork {
+    current: HashMap<u64, NetworkCounters>,
+    deltas: HashMap<u64, NetworkCounters>,
+    available: bool,
+}
+
 struct ResourceAttribution {
     roots: HashSet<u32>,
     pids: HashSet<u32>,
@@ -296,35 +296,36 @@ impl ResourceSnapshot {
     }
 
     fn resource_attribution(&self, roots: impl IntoIterator<Item = u32>) -> ResourceAttribution {
-        let roots = roots
-            .into_iter()
-            .filter(|pid| *pid > 0)
-            .collect::<HashSet<_>>();
+        let roots = roots.into_iter().filter(|pid| *pid > 0).collect::<Vec<_>>();
         let mut attribution = ResourceAttribution {
-            roots,
+            roots: roots.iter().copied().collect(),
             pids: HashSet::new(),
             cgroup_paths: HashSet::new(),
             cgroup_roots: 0,
             cgroups_cover_process_trees: true,
         };
-        for root in &attribution.roots {
-            // A descendant can move into a sibling scope after it is spawned (terminal
-            // emulators commonly do this for each surface). Keep process-tree members in
-            // the attribution even when the application root has a specific cgroup.
-            let tree = descendants([*root], &self.children);
-            attribution.pids.extend(&tree);
-            if let Some(members) = self.cgroup_members_by_root.get(root) {
-                attribution.cgroups_cover_process_trees &= tree.is_subset(members);
-                attribution.pids.extend(members);
-                if let Some(path) = self.cgroup_path_by_root.get(root) {
-                    attribution.cgroup_paths.insert(path.clone());
-                }
-                attribution.cgroup_roots += 1;
-            } else {
-                attribution.cgroups_cover_process_trees = false;
-            }
+        for root in roots {
+            self.attribute_root(&mut attribution, root);
         }
         attribution
+    }
+
+    fn attribute_root(&self, attribution: &mut ResourceAttribution, root: u32) {
+        // A descendant can move into a sibling scope after it is spawned (terminal
+        // emulators commonly do this for each surface). Keep process-tree members in
+        // the attribution even when the application root has a specific cgroup.
+        let tree = descendants([root], &self.children);
+        attribution.pids.extend(&tree);
+        let Some(members) = self.cgroup_members_by_root.get(&root) else {
+            attribution.cgroups_cover_process_trees = false;
+            return;
+        };
+        attribution.cgroups_cover_process_trees &= tree.is_subset(members);
+        attribution.pids.extend(members);
+        if let Some(path) = self.cgroup_path_by_root.get(&root) {
+            attribution.cgroup_paths.insert(path.clone());
+        }
+        attribution.cgroup_roots += 1;
     }
 
     fn aggregate_processes(&self, pids: &HashSet<u32>) -> ProcessAggregation {
@@ -396,58 +397,38 @@ impl ResourceSnapshot {
         attribution: &ResourceAttribution,
         complete_cgroup: bool,
     ) {
+        let network_bytes_available =
+            self.apply_network(&mut aggregate.usage.network, &aggregate.network_sockets);
+        let coverage = measurement_coverage(complete_cgroup, aggregate, attribution);
+        let memory_source = memory_source(aggregate);
         let measurement = &mut aggregate.usage.measurement;
         measurement.sample_interval_ms = (self.interval_seconds * 1000.0).round() as u64;
-        measurement.attribution_method = if complete_cgroup {
-            "cgroup".into()
-        } else if attribution.cgroup_roots > 0 {
-            "mixed".into()
-        } else {
-            "process-tree".into()
-        };
-        measurement.coverage = if complete_cgroup {
-            1.0
-        } else if attribution.pids.is_empty() {
-            0.0
-        } else {
-            aggregate.covered_processes as f64 / attribution.pids.len() as f64
-        };
-        measurement.memory_source = if aggregate.covered_processes > 0
-            && aggregate.pss_processes == aggregate.covered_processes
-        {
-            "pss".into()
-        } else if aggregate.memory_processes > 0 {
-            "rss-fallback".into()
-        } else {
-            "unavailable".into()
-        };
+        measurement.attribution_method = attribution_method(complete_cgroup, attribution);
+        measurement.coverage = coverage;
+        measurement.memory_source = memory_source;
         measurement.gpu_available = aggregate.gpu_processes > 0;
         measurement.storage_available = complete_cgroup || aggregate.storage_processes > 0;
-        aggregate.usage.network.network_connection_count = aggregate.network_sockets.len() as u64;
-        let mut measured_connections = 0_u64;
-        for counters in aggregate
-            .network_sockets
-            .iter()
-            .filter_map(|inode| self.network_deltas.get(inode))
-        {
-            add_counter(
-                &mut aggregate.usage.network.network_receive_bytes,
-                counters.received_bytes,
-            );
-            add_counter(
-                &mut aggregate.usage.network.network_transmit_bytes,
-                counters.transmitted_bytes,
-            );
-            measured_connections += 1;
-        }
         measurement.network_available = aggregate.network_processes > 0;
-        measurement.network_bytes_available =
-            self.network_counters_available && measured_connections > 0;
+        measurement.network_bytes_available = network_bytes_available;
         measurement.network_connections_available = aggregate.network_processes > 0;
         measurement.resources_shared = attribution
             .pids
             .iter()
             .any(|pid| self.shared_pids.contains(pid));
+    }
+
+    fn apply_network(&self, usage: &mut NetworkUsage, sockets: &HashSet<u64>) -> bool {
+        usage.network_connection_count = sockets.len() as u64;
+        let counters = sockets
+            .iter()
+            .filter_map(|inode| self.network_deltas.get(inode));
+        let mut measured_connections = 0;
+        for current in counters {
+            add_counter(&mut usage.network_receive_bytes, current.received_bytes);
+            add_counter(&mut usage.network_transmit_bytes, current.transmitted_bytes);
+            measured_connections += 1;
+        }
+        self.network_counters_available && measured_connections > 0
     }
 
     fn complete(&self, mut usage: ResourceUsage, energy_cpu_percent: f64) -> ResourceUsage {
@@ -464,42 +445,75 @@ impl ResourceSnapshot {
     }
 
     fn estimated_energy(&self, activity: f64, total: f64) -> EnergyUsage {
+        let (attributed_fraction, energy_mwh, confidence) =
+            self.energy_attribution(activity, total);
+        let power_watts = rate(energy_mwh * 3.6, self.interval_seconds, 3);
+        EnergyUsage {
+            energy_mwh,
+            battery_percent: rate(energy_mwh * 100.0, self.battery_full_mwh, 6),
+            power_watts,
+            estimated_app_power_watts: power_watts,
+            system_power_watts: rate(self.system_energy_mwh * 3.6, self.interval_seconds, 3),
+            battery_percent_per_hour: rate(power_watts * 100_000.0, self.battery_full_mwh, 4),
+            attributed_fraction,
+            energy_source: self.energy_source.clone(),
+            energy_confidence: confidence.into(),
+        }
+    }
+
+    fn energy_attribution(&self, activity: f64, total: f64) -> (f64, f64, &'static str) {
+        if self.energy_source != "rapl" {
+            return (0.0, 0.0, "system-only");
+        }
         let share = if total > 0.0 {
             (activity / total).clamp(0.0, 1.0)
         } else {
             0.0
         };
-        let attributable = self.energy_source == "rapl";
-        let attributed_fraction = if attributable { share } else { 0.0 };
-        let energy_mwh = if attributable {
-            rounded(self.system_energy_mwh * attributed_fraction, 4)
-        } else {
-            0.0
-        };
-        let power_watts = rate(energy_mwh * 3.6, self.interval_seconds, 3);
-        let system_power_watts = rate(self.system_energy_mwh * 3.6, self.interval_seconds, 3);
-        let battery_percent = rate(energy_mwh * 100.0, self.battery_full_mwh, 6);
-        let battery_percent_per_hour = rate(power_watts * 100_000.0, self.battery_full_mwh, 4);
-        EnergyUsage {
-            energy_mwh,
-            battery_percent,
-            power_watts,
-            estimated_app_power_watts: power_watts,
-            system_power_watts,
-            battery_percent_per_hour,
-            attributed_fraction: rounded(attributed_fraction, 4),
-            energy_source: self.energy_source.clone(),
-            energy_confidence: if attributable {
-                "low".into()
-            } else {
-                "system-only".into()
-            },
-        }
+        (
+            rounded(share, 4),
+            rounded(self.system_energy_mwh * share, 4),
+            "low",
+        )
     }
 
     pub fn interval_seconds(&self) -> f64 {
         self.interval_seconds
     }
+}
+
+fn attribution_method(complete_cgroup: bool, attribution: &ResourceAttribution) -> String {
+    match (complete_cgroup, attribution.cgroup_roots > 0) {
+        (true, _) => "cgroup",
+        (false, true) => "mixed",
+        (false, false) => "process-tree",
+    }
+    .into()
+}
+
+fn measurement_coverage(
+    complete_cgroup: bool,
+    aggregate: &ProcessAggregation,
+    attribution: &ResourceAttribution,
+) -> f64 {
+    match (complete_cgroup, attribution.pids.len()) {
+        (true, _) => 1.0,
+        (false, 0) => 0.0,
+        (false, process_count) => aggregate.covered_processes as f64 / process_count as f64,
+    }
+}
+
+fn memory_source(aggregate: &ProcessAggregation) -> String {
+    match (
+        aggregate.covered_processes,
+        aggregate.pss_processes,
+        aggregate.memory_processes,
+    ) {
+        (covered, pss, _) if covered > 0 && pss == covered => "pss",
+        (_, _, memory) if memory > 0 => "rss-fallback",
+        _ => "unavailable",
+    }
+    .into()
 }
 
 impl ResourceUsage {
@@ -667,14 +681,6 @@ struct AppDiskCache {
 }
 
 impl ResourceSampler {
-    #[cfg(test)]
-    fn with_provider(provider: Arc<dyn ResourceProvider>) -> Self {
-        Self {
-            provider,
-            ..Self::default()
-        }
-    }
-
     pub fn sample_for_targets(
         &mut self,
         active_targets: &HashMap<String, Vec<u32>>,
@@ -714,38 +720,9 @@ impl ResourceSampler {
             active_processes.extend(members);
         }
         let current_gpu = provider.gpu_processes(&active_processes);
-        let mut current_open_files =
-            self.open_files
-                .read(provider.as_ref(), &active_processes, now);
-        let known_sockets = current_open_files
-            .values()
-            .flat_map(|files| files.sockets.iter().copied())
-            .collect::<HashSet<_>>();
-        let sampled_network = provider.network_counters(&known_sockets);
-        let network_counters_available = sampled_network.is_some();
-        let current_network_counters = sampled_network.unwrap_or_default();
-        let network_deltas = current_network_counters
-            .iter()
-            .map(|(inode, current)| {
-                let previous = self
-                    .previous_network_counters
-                    .get(inode)
-                    .copied()
-                    .unwrap_or(*current);
-                (
-                    *inode,
-                    NetworkCounters {
-                        received_bytes: current
-                            .received_bytes
-                            .saturating_sub(previous.received_bytes),
-                        transmitted_bytes: current
-                            .transmitted_bytes
-                            .saturating_sub(previous.transmitted_bytes),
-                    },
-                )
-            })
-            .collect();
-        let sampled_memory = self.memory.read(provider.as_ref(), &active_processes, now);
+        let network = self.sample_network(provider.as_ref(), &active_processes, now);
+        self.memory
+            .refresh(provider.as_ref(), &active_processes, now);
         let sampled_io = active_processes
             .iter()
             .copied()
@@ -762,8 +739,8 @@ impl ResourceSampler {
             cgroup_path_by_root,
             cgroup_usage,
             app_disk_by_target,
-            network_deltas,
-            network_counters_available,
+            network_deltas: network.deltas,
+            network_counters_available: network.available,
             shared_pids,
             logical_cpus,
             interval_seconds,
@@ -781,7 +758,7 @@ impl ResourceSampler {
         let mut current_io = HashMap::new();
         for (&pid, process) in &current {
             let cpu_percent = self.cpu_percent(pid, process, system_delta, logical_cpus);
-            let memory = sampled_memory.get(&pid).copied().unwrap_or_default();
+            let memory = self.memory.samples.get(&pid).copied().unwrap_or_default();
             let sampled_io = sampled_io.get(&pid).copied().flatten();
             let io = self.io_delta(pid, process, sampled_io.unwrap_or_default());
             if let Some(value) = sampled_io {
@@ -796,7 +773,12 @@ impl ResourceSampler {
                 interval_seconds,
                 &mut next_gpu_engines,
             );
-            let files = current_open_files.remove(&pid).unwrap_or_default();
+            let files = self
+                .open_files
+                .samples
+                .get(&pid)
+                .cloned()
+                .unwrap_or_default();
             snapshot.insert(
                 pid,
                 ProcessUsage {
@@ -819,12 +801,56 @@ impl ResourceSampler {
         self.remember(
             (current, current_io),
             current_cgroups,
-            current_network_counters,
+            network.current,
             next_gpu_engines,
             system_ticks,
             now,
         );
         snapshot
+    }
+
+    fn sample_network(
+        &mut self,
+        provider: &dyn ResourceProvider,
+        active_processes: &HashSet<u32>,
+        now: Instant,
+    ) -> SampledNetwork {
+        self.open_files.refresh(provider, active_processes, now);
+        let sockets = self
+            .open_files
+            .samples
+            .values()
+            .flat_map(|files| files.sockets.iter().copied())
+            .collect::<HashSet<_>>();
+        let sampled = provider.network_counters(&sockets);
+        let available = sampled.is_some();
+        let current = sampled.unwrap_or_default();
+        let deltas = current
+            .iter()
+            .map(|(&inode, &counters)| {
+                let previous = self
+                    .previous_network_counters
+                    .get(&inode)
+                    .copied()
+                    .unwrap_or(counters);
+                (
+                    inode,
+                    NetworkCounters {
+                        received_bytes: counters
+                            .received_bytes
+                            .saturating_sub(previous.received_bytes),
+                        transmitted_bytes: counters
+                            .transmitted_bytes
+                            .saturating_sub(previous.transmitted_bytes),
+                    },
+                )
+            })
+            .collect();
+        SampledNetwork {
+            current,
+            deltas,
+            available,
+        }
     }
 
     fn cpu_percent(
@@ -984,12 +1010,7 @@ impl ResourceSampler {
 }
 
 impl MemoryCache {
-    fn read(
-        &mut self,
-        provider: &dyn ResourceProvider,
-        pids: &HashSet<u32>,
-        now: Instant,
-    ) -> HashMap<u32, MemoryUsage> {
+    fn refresh(&mut self, provider: &dyn ResourceProvider, pids: &HashSet<u32>, now: Instant) {
         let refresh = self.next_refresh.0.is_none_or(|deadline| now >= deadline);
         self.samples.retain(|pid, _| pids.contains(pid));
         if refresh {
@@ -1009,17 +1030,11 @@ impl MemoryCache {
                 self.samples.insert(pid, provider.process_memory(pid));
             }
         }
-        self.samples.clone()
     }
 }
 
 impl OpenFileCache {
-    fn read(
-        &mut self,
-        provider: &dyn ResourceProvider,
-        pids: &HashSet<u32>,
-        now: Instant,
-    ) -> HashMap<u32, Arc<ProcessFiles>> {
+    fn refresh(&mut self, provider: &dyn ResourceProvider, pids: &HashSet<u32>, now: Instant) {
         let refresh = self.next_refresh.0.is_none_or(|deadline| now >= deadline);
         self.samples.retain(|pid, _| pids.contains(pid));
         let requested: Vec<u32> = if refresh {
@@ -1040,7 +1055,6 @@ impl OpenFileCache {
         } else {
             self.samples.extend(sampled);
         }
-        self.samples.clone()
     }
 }
 

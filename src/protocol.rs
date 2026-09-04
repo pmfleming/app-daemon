@@ -63,16 +63,16 @@ mod tests {
         paths
     }
 
-    fn names<'a>(fixture: &'a Value, registry: &str) -> Vec<&'a str> {
-        shelllist_daemon_core::fixture_names(fixture, registry).expect("fixture registry")
+    fn names<'a>(fixture: &'a Value, registry: &str) -> anyhow::Result<Vec<&'a str>> {
+        shelllist_daemon_core::fixture_names(fixture, registry).map_err(anyhow::Error::msg)
     }
 
     #[test]
-    fn fixture_matches_registry() -> serde_json::Result<()> {
+    fn fixture_matches_registry() -> anyhow::Result<()> {
         let fixture = contract_fixture()?;
         assert_eq!(fixture["version"], VERSION);
-        assert_eq!(names(&fixture, "methods"), METHODS);
-        assert_eq!(names(&fixture, "streams"), STREAMS);
+        assert_eq!(names(&fixture, "methods")?, METHODS);
+        assert_eq!(names(&fixture, "streams")?, STREAMS);
         Ok(())
     }
 

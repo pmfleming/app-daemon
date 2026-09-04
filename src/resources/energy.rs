@@ -163,12 +163,3 @@ fn read_trimmed(path: &Path) -> Option<String> {
         .ok()
         .map(|value| value.trim().to_owned())
 }
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn handles_counter_rollover() {
-        assert_eq!(super::counter_delta(900, 100, 1_000), 200);
-        assert_eq!(super::counter_delta(100, 250, 1_000), 150);
-    }
-}

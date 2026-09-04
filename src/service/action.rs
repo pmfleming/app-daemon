@@ -13,10 +13,7 @@ use crate::{
     model::OperationResult,
 };
 
-use super::{
-    ExecuteParams,
-    query::{resolve_target, target_window},
-};
+use super::query::{resolve_target, target_window};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -28,6 +25,20 @@ pub enum ApplicationAction {
     CloseWindow,
     MoveToWorkspace,
     DesktopAction,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ExecuteParams {
+    pub target_id: String,
+    pub action: ApplicationAction,
+    #[serde(default)]
+    pub window_id: Option<String>,
+    #[serde(default)]
+    pub desktop_action_id: Option<String>,
+    #[serde(default)]
+    pub expected_revision: Option<u64>,
+    #[serde(default)]
+    pub workspace_id: Option<String>,
 }
 
 impl ApplicationAction {
@@ -165,9 +176,6 @@ async fn place_launched_window(
     params: &ExecuteParams,
     focus: bool,
 ) -> anyhow::Result<bool> {
-    const WINDOW_TIMEOUT: Duration = Duration::from_secs(8);
-    const WINDOW_RETRY_INTERVAL: Duration = Duration::from_millis(100);
-
     if catalog
         .by_id(&params.target_id)
         .is_some_and(|entry| entry.launch_only)
@@ -175,24 +183,39 @@ async fn place_launched_window(
         return Ok(false);
     }
     let previous_addresses = application_window_addresses(catalog, previous, &params.target_id);
+    let Some(address) = wait_for_new_window(catalog, &params.target_id, &previous_addresses).await
+    else {
+        return Ok(false);
+    };
+    if let Some(workspace) = params.workspace_id.as_deref() {
+        hyprland::move_to_workspace(&address, workspace).await?;
+    }
+    if focus {
+        hyprland::focus(&address).await?;
+    }
+    Ok(true)
+}
+
+async fn wait_for_new_window(
+    catalog: &Catalog,
+    target_id: &str,
+    previous_addresses: &[String],
+) -> Option<String> {
+    const WINDOW_TIMEOUT: Duration = Duration::from_secs(8);
+    const WINDOW_RETRY_INTERVAL: Duration = Duration::from_millis(100);
+
     let deadline = Instant::now() + WINDOW_TIMEOUT;
     loop {
         let windows = Snapshot::load().await;
-        let launched = windows.clients.iter().find(|window| {
-            resolve_target(catalog, window) == params.target_id
-                && !previous_addresses.contains(&window.address)
-        });
-        if let Some(window) = launched {
-            if let Some(workspace) = params.workspace_id.as_deref() {
-                hyprland::move_to_workspace(&window.address, workspace).await?;
-            }
-            if focus {
-                hyprland::focus(&window.address).await?;
-            }
-            return Ok(true);
+        if let Some(address) = windows.clients.iter().find_map(|window| {
+            (resolve_target(catalog, window) == target_id
+                && !previous_addresses.contains(&window.address))
+            .then(|| window.address.clone())
+        }) {
+            return Some(address);
         }
         if Instant::now() >= deadline {
-            return Ok(false);
+            return None;
         }
         time::sleep(WINDOW_RETRY_INTERVAL).await;
     }

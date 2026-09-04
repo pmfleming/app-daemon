@@ -79,6 +79,7 @@ pub async fn run() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use anyhow::Context;
     use serde_json::json;
     use shelllist_daemon_tokio::{CorrelationPolicy, TrackedKind};
 
@@ -86,11 +87,11 @@ mod tests {
     use crate::protocol;
 
     #[test]
-    fn correlates_application_operations_and_subscriptions() {
+    fn correlates_application_operations_and_subscriptions() -> anyhow::Result<()> {
         let policy = AppCorrelation;
         let operation = policy
             .response_id(&json!({ "data": { "operation": { "id": "operation-1" } } }))
-            .unwrap();
+            .context("operation correlation")?;
         assert_eq!(operation.id, "operation-1");
         assert_eq!(operation.kind, TrackedKind::Operation);
         assert_eq!(
@@ -107,7 +108,8 @@ mod tests {
 
         let subscription = policy
             .response_id(&json!({ "data": { "subscription": { "id": "sub-1" } } }))
-            .unwrap();
+            .context("subscription correlation")?;
         assert_eq!(subscription.kind, TrackedKind::Subscription);
+        Ok(())
     }
 }

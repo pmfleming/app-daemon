@@ -1,5 +1,7 @@
 use std::collections::HashMap;
 
+use serde::Deserialize;
+
 use crate::{
     catalog::{Catalog, CatalogEntry},
     hyprland::{self, Client, Snapshot},
@@ -7,11 +9,26 @@ use crate::{
         ApplicationIdentity, ApplicationPage, ApplicationRuntime, ApplicationSummary, WindowSummary,
     },
     resources::{ResourceSnapshot, process_cgroup},
-    service::QueryParams,
     settings::{SettingsStore, inferred_category},
 };
 
 const JSON_SAFE_INTEGER_MASK: u64 = (1_u64 << 53) - 1;
+
+#[derive(Debug, Deserialize)]
+pub struct QueryParams {
+    #[serde(default)]
+    pub query: String,
+    #[serde(default)]
+    pub category: String,
+    #[serde(default)]
+    pub generation: u64,
+    #[serde(default = "default_limit")]
+    pub limit: usize,
+}
+
+const fn default_limit() -> usize {
+    500
+}
 
 pub(super) fn combined_revision(
     catalog: &Catalog,
@@ -372,37 +389,23 @@ fn search_match(application: &ApplicationSummary, query: &str) -> Option<SearchM
     let searchable = search_values(application).join(" ").to_lowercase();
     let acronym = search_acronym(application);
     let tokens = query.split_whitespace().collect::<Vec<_>>();
-    if !tokens
-        .iter()
-        .all(|token| searchable.contains(token) || (token.len() <= 5 && acronym.contains(token)))
-    {
+    if !all_terms_match(&tokens, &searchable, &acronym) {
         return None;
     }
 
     if let Some(matched) = direct_match(&name, &id, id_stem, &query) {
         return Some(matched);
     }
-    let substring_match = |value: &str, base, weight, length_penalty, kind| {
-        value.find(&query).map(|index| SearchMatch {
-            score: base - index.min(500) as i64 * weight - length_penalty,
-            kind,
-        })
-    };
     let name_penalty = name.len().min(500) as i64;
     let id_penalty = id.len().min(500) as i64;
-    if let Some(matched) = substring_match(&name, 9_500, 10, name_penalty, "name-substring")
-        .or_else(|| substring_match(&id, 9_000, 10, id_penalty, "id-substring"))
-        .or_else(|| substring_match(&searchable, 7_500, 1, 0, "metadata"))
+    if let Some(matched) = substring_match(&name, &query, 9_500, 10, name_penalty, "name-substring")
+        .or_else(|| substring_match(&id, &query, 9_000, 10, id_penalty, "id-substring"))
+        .or_else(|| substring_match(&searchable, &query, 7_500, 1, 0, "metadata"))
     {
         return Some(matched);
     }
-    if query.len() <= 5
-        && let Some(index) = acronym.find(&query)
-    {
-        return Some(SearchMatch {
-            score: 6_500 - index as i64 * 10 - acronym.len().min(500) as i64,
-            kind: "acronym",
-        });
+    if let Some(matched) = acronym_match(&query, &acronym) {
+        return Some(matched);
     }
     Some(SearchMatch {
         score: 5_000 - tokens.len() as i64,
@@ -410,19 +413,56 @@ fn search_match(application: &ApplicationSummary, query: &str) -> Option<SearchM
     })
 }
 
+fn all_terms_match(tokens: &[&str], searchable: &str, acronym: &str) -> bool {
+    tokens
+        .iter()
+        .all(|token| searchable.contains(token) || (token.len() <= 5 && acronym.contains(token)))
+}
+
+fn acronym_match(query: &str, acronym: &str) -> Option<SearchMatch> {
+    let index = (query.len() <= 5).then(|| acronym.find(query)).flatten()?;
+    Some(SearchMatch {
+        score: 6_500 - index as i64 * 10 - acronym.len().min(500) as i64,
+        kind: "acronym",
+    })
+}
+
+fn substring_match(
+    value: &str,
+    query: &str,
+    base: i64,
+    weight: i64,
+    length_penalty: i64,
+    kind: &'static str,
+) -> Option<SearchMatch> {
+    value.find(query).map(|index| SearchMatch {
+        score: base - index.min(500) as i64 * weight - length_penalty,
+        kind,
+    })
+}
+
 fn direct_match(name: &str, id: &str, id_stem: &str, query: &str) -> Option<SearchMatch> {
-    let (base, length, kind) = if name == query {
-        (12_000, name.len(), "exact-name")
+    exact_match(name, id, id_stem, query).or_else(|| prefix_match(name, id, id_stem, query))
+}
+
+fn exact_match(name: &str, id: &str, id_stem: &str, query: &str) -> Option<SearchMatch> {
+    if name == query {
+        Some(ranked_match(12_000, name.len(), "exact-name"))
     } else if id == query || id_stem == query {
-        (11_800, id.len(), "exact-id")
-    } else if name.starts_with(query) {
-        (11_500, name.len(), "name-prefix")
-    } else if id.starts_with(query) || id_stem.starts_with(query) {
-        (11_000, id.len(), "id-prefix")
+        Some(ranked_match(11_800, id.len(), "exact-id"))
     } else {
-        return None;
-    };
-    Some(ranked_match(base, length, kind))
+        None
+    }
+}
+
+fn prefix_match(name: &str, id: &str, id_stem: &str, query: &str) -> Option<SearchMatch> {
+    if name.starts_with(query) {
+        Some(ranked_match(11_500, name.len(), "name-prefix"))
+    } else if id.starts_with(query) || id_stem.starts_with(query) {
+        Some(ranked_match(11_000, id.len(), "id-prefix"))
+    } else {
+        None
+    }
 }
 
 fn ranked_match(base: i64, length: usize, kind: &'static str) -> SearchMatch {
@@ -456,17 +496,21 @@ fn search_values(application: &ApplicationSummary) -> Vec<&str> {
 fn search_acronym(application: &ApplicationSummary) -> String {
     let mut acronym = String::new();
     for value in search_values(application) {
-        let mut previous_alphanumeric = false;
-        let mut previous_lowercase = false;
-        for character in value.chars() {
-            let boundary =
-                !previous_alphanumeric || (character.is_ascii_uppercase() && previous_lowercase);
-            if character.is_ascii_alphanumeric() && boundary {
-                acronym.push(character.to_ascii_lowercase());
-            }
-            previous_alphanumeric = character.is_ascii_alphanumeric();
-            previous_lowercase = character.is_ascii_lowercase();
-        }
+        append_initials(&mut acronym, value);
     }
     acronym
+}
+
+fn append_initials(acronym: &mut String, value: &str) {
+    let mut previous_alphanumeric = false;
+    let mut previous_lowercase = false;
+    for character in value.chars() {
+        let boundary =
+            !previous_alphanumeric || (character.is_ascii_uppercase() && previous_lowercase);
+        if character.is_ascii_alphanumeric() && boundary {
+            acronym.push(character.to_ascii_lowercase());
+        }
+        previous_alphanumeric = character.is_ascii_alphanumeric();
+        previous_lowercase = character.is_ascii_lowercase();
+    }
 }

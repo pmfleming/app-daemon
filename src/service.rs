@@ -15,7 +15,7 @@ use uuid::Uuid;
 
 use crate::{
     catalog::{Catalog, default_catalog_paths},
-    history::{HistoryStore, now_milliseconds, persist_snapshot},
+    history::{HistoryStore, merged_labels, now_milliseconds, persist_snapshot},
     hyprland::{self, Snapshot},
     model::{
         ApplicationEnergyOverview, ApplicationEnergySummary, ApplicationPage,
@@ -28,14 +28,12 @@ use crate::{
 mod action;
 mod query;
 
-pub use action::ApplicationAction;
+pub use action::{ApplicationAction, ExecuteParams};
 use action::{execute_action, operation_result};
-use query::{combined_revision, page, resolve_target};
+pub use query::QueryParams;
 #[cfg(test)]
-use {
-    action::application_window_addresses,
-    query::{resolve_target_with_cgroup, running_score},
-};
+use query::resolve_target_with_cgroup;
+use query::{combined_revision, page, resolve_target};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StateRevision {
@@ -492,17 +490,8 @@ async fn track_resources(service: std::sync::Weak<ApplicationService>) {
         let Some(service) = service.upgrade() else {
             return;
         };
-        let now = Instant::now();
-        let interval = service.resource_sample_interval(now);
-        if let Some(last) = last_sample {
-            let deadline = last + interval;
-            if now < deadline {
-                tokio::select! {
-                    () = time::sleep_until(time::Instant::from_std(deadline)) => {}
-                    () = service.resource_demand_changed.notified() => {}
-                }
-                continue;
-            }
+        if !resource_sample_due(&service, last_sample).await {
+            continue;
         }
         sample_resources(&service, &mut sampler).await;
         last_sample = Some(Instant::now());
@@ -510,6 +499,21 @@ async fn track_resources(service: std::sync::Weak<ApplicationService>) {
             service.save_history().await;
             last_save = Instant::now();
         }
+    }
+}
+
+async fn resource_sample_due(service: &ApplicationService, last_sample: Option<Instant>) -> bool {
+    let now = Instant::now();
+    let Some(last_sample) = last_sample else {
+        return true;
+    };
+    let deadline = last_sample + service.resource_sample_interval(now);
+    if now >= deadline {
+        return true;
+    }
+    tokio::select! {
+        () = time::sleep_until(time::Instant::from_std(deadline)) => true,
+        () = service.resource_demand_changed.notified() => false,
     }
 }
 
@@ -556,22 +560,6 @@ async fn sample_resources(service: &ApplicationService, sampler: &mut ResourceSa
 }
 
 #[derive(Debug, Deserialize)]
-pub struct QueryParams {
-    #[serde(default)]
-    pub query: String,
-    #[serde(default)]
-    pub category: String,
-    #[serde(default)]
-    pub generation: u64,
-    #[serde(default = "default_limit")]
-    pub limit: usize,
-}
-
-const fn default_limit() -> usize {
-    500
-}
-
-#[derive(Debug, Deserialize)]
 pub struct UpdateSettingsParams {
     pub target_id: String,
     pub category: String,
@@ -602,36 +590,6 @@ pub struct EnergyOverviewParams {
 
 const fn default_energy_limit() -> usize {
     20
-}
-
-fn merged_labels<'a>(values: impl Iterator<Item = &'a str>) -> String {
-    let mut merged = String::new();
-    for value in values.filter(|value| !value.is_empty()) {
-        if merged.is_empty() {
-            merged = value.to_owned();
-        } else if merged != value {
-            return "mixed".into();
-        }
-    }
-    if merged.is_empty() {
-        "unavailable".into()
-    } else {
-        merged
-    }
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct ExecuteParams {
-    pub target_id: String,
-    pub action: ApplicationAction,
-    #[serde(default)]
-    pub window_id: Option<String>,
-    #[serde(default)]
-    pub desktop_action_id: Option<String>,
-    #[serde(default)]
-    pub expected_revision: Option<u64>,
-    #[serde(default)]
-    pub workspace_id: Option<String>,
 }
 
 #[cfg(test)]

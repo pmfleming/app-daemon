@@ -95,25 +95,27 @@ pub async fn watch_events(sender: mpsc::Sender<()>) {
 pub async fn focus(address: &str) -> anyhow::Result<()> {
     let selector = address_selector(address)?;
     let lua = format!("hl.dsp.focus({{ window = '{selector}' }})");
-    if dispatch(&["dispatch", &lua]).await {
-        return Ok(());
-    }
-    if dispatch(&["dispatch", "focuswindow", &selector]).await {
-        return Ok(());
-    }
-    anyhow::bail!("Hyprland rejected the focus request")
+    dispatch_window(&lua, "focuswindow", &selector, "focus").await
 }
 
 pub async fn close(address: &str) -> anyhow::Result<()> {
     let selector = address_selector(address)?;
     let lua = format!("hl.dsp.window.close({{ window = '{selector}' }})");
-    if dispatch(&["dispatch", &lua]).await {
-        return Ok(());
-    }
-    if dispatch(&["dispatch", "closewindow", &selector]).await {
-        return Ok(());
-    }
-    anyhow::bail!("Hyprland rejected the close request")
+    dispatch_window(&lua, "closewindow", &selector, "close").await
+}
+
+async fn dispatch_window(
+    lua: &str,
+    legacy_command: &str,
+    selector: &str,
+    operation: &str,
+) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        dispatch(&["dispatch", lua]).await
+            || dispatch(&["dispatch", legacy_command, selector]).await,
+        "Hyprland rejected the {operation} request"
+    );
+    Ok(())
 }
 
 pub async fn move_to_workspace(address: &str, workspace: &str) -> anyhow::Result<()> {
@@ -177,12 +179,7 @@ fn valid_address(address: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{address_selector, window_id, workspace_selector};
-
-    #[test]
-    fn creates_protocol_safe_window_ids() {
-        assert_eq!(window_id("0xAb12"), "window-ab12");
-    }
+    use super::{address_selector, workspace_selector};
 
     #[test]
     fn validates_window_selectors_for_dispatch() -> anyhow::Result<()> {

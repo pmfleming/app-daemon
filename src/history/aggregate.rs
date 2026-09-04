@@ -1,5 +1,5 @@
 use crate::{
-    metrics::rounded,
+    metrics::{available_label, merge_label, rounded},
     model::{
         ComputeUsage, HistoricalResourceUsage, NetworkUsage, ResourceHistoryPoint, ResourcePeaks,
         ResourceUsage, StorageUsage,
@@ -128,8 +128,8 @@ impl PendingPoint {
                 average_power_watts: rounded(self.energy_mwh * 3_600.0 / duration, 3),
                 system_power_watts: rounded(self.system_power / duration, 3),
                 attributed_fraction: rounded(self.attributed_fraction / duration, 4),
-                energy_source: available_source(self.energy_source),
-                energy_confidence: available_source(self.energy_confidence),
+                energy_source: available_label(self.energy_source),
+                energy_confidence: available_label(self.energy_confidence),
                 sample_count: self.sample_count,
                 coverage: rounded(self.coverage / duration, 4),
                 peaks: self.peaks,
@@ -258,23 +258,4 @@ fn per_second(total: u64, duration_ms: f64) -> f64 {
 
 fn add_counter(counter: &mut u64, value: u64) {
     *counter = counter.saturating_add(value);
-}
-
-fn merge_label(current: &mut String, next: &str) {
-    if next.is_empty() || next == "unavailable" {
-        return;
-    }
-    if current.is_empty() {
-        current.push_str(next);
-    } else if current != next {
-        *current = "mixed".into();
-    }
-}
-
-fn available_source(source: String) -> String {
-    if source.is_empty() {
-        "unavailable".into()
-    } else {
-        source
-    }
 }

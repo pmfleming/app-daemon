@@ -18,11 +18,20 @@ struct GpuClientStat {
 }
 
 pub(super) fn read_gpu_processes(pids: &HashSet<u32>) -> HashMap<u32, GpuProcessStat> {
-    let clients = super::bounded_map(pids.iter().copied().collect(), |pid| {
-        (pid, read_gpu_clients(pid))
-    });
-    let mut clients = clients;
+    let mut clients = pids
+        .iter()
+        .map(|&pid| (pid, read_gpu_clients(pid)))
+        .collect::<Vec<_>>();
     clients.sort_unstable_by_key(|(pid, _)| *pid);
+    group_clients_by_process(deduplicate_clients(clients))
+        .into_iter()
+        .map(|(pid, clients)| (pid, aggregate_gpu_clients(clients)))
+        .collect()
+}
+
+fn deduplicate_clients(
+    clients: Vec<(u32, HashMap<String, GpuClientStat>)>,
+) -> HashMap<String, (u32, GpuClientStat)> {
     let mut unique = HashMap::<String, (u32, GpuClientStat)>::new();
     for (pid, clients) in clients {
         for (id, client) in clients {
@@ -34,14 +43,17 @@ pub(super) fn read_gpu_processes(pids: &HashSet<u32>) -> HashMap<u32, GpuProcess
             }
         }
     }
+    unique
+}
+
+fn group_clients_by_process(
+    unique: HashMap<String, (u32, GpuClientStat)>,
+) -> HashMap<u32, HashMap<String, GpuClientStat>> {
     let mut by_process = HashMap::<u32, HashMap<String, GpuClientStat>>::new();
     for (id, (pid, client)) in unique {
         by_process.entry(pid).or_default().insert(id, client);
     }
     by_process
-        .into_iter()
-        .map(|(pid, clients)| (pid, aggregate_gpu_clients(clients)))
-        .collect()
 }
 
 fn read_gpu_clients(pid: u32) -> HashMap<String, GpuClientStat> {
@@ -179,30 +191,32 @@ fn merge_max(target: &mut HashMap<String, u64>, source: HashMap<String, u64>) {
     }
 }
 
+const TIME_UNITS: &[(&str, u64)] = &[("ns", 1), ("us", 1_000), ("ms", 1_000_000)];
+const BYTE_UNITS: &[(&str, u64)] = &[
+    ("B", 1),
+    ("kB", 1_000),
+    ("KiB", 1_024),
+    ("MB", 1_000_000),
+    ("MiB", 1_048_576),
+    ("GB", 1_000_000_000),
+    ("GiB", 1_073_741_824),
+];
+
 fn parse_duration_nanoseconds(value: &str) -> Option<u64> {
-    let mut fields = value.split_whitespace();
-    let value = fields.next()?.parse::<u64>().ok()?;
-    match fields.next().unwrap_or("ns") {
-        "ns" => Some(value),
-        "us" => value.checked_mul(1_000),
-        "ms" => value.checked_mul(1_000_000),
-        _ => None,
-    }
+    parse_scaled(value, "ns", TIME_UNITS)
 }
 
 fn parse_bytes(value: &str) -> Option<u64> {
+    parse_scaled(value, "B", BYTE_UNITS)
+}
+
+fn parse_scaled(value: &str, default_unit: &str, units: &[(&str, u64)]) -> Option<u64> {
     let mut fields = value.split_whitespace();
     let value = fields.next()?.parse::<u64>().ok()?;
-    let multiplier = match fields.next().unwrap_or("B") {
-        "B" => 1,
-        "kB" => 1_000,
-        "KiB" => 1_024,
-        "MB" => 1_000_000,
-        "MiB" => 1_048_576,
-        "GB" => 1_000_000_000,
-        "GiB" => 1_073_741_824,
-        _ => return None,
-    };
+    let unit = fields.next().unwrap_or(default_unit);
+    let multiplier = units
+        .iter()
+        .find_map(|(candidate, multiplier)| (*candidate == unit).then_some(*multiplier))?;
     value.checked_mul(multiplier)
 }
 

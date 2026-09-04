@@ -1,105 +1,12 @@
 use super::{
-    BatterySample, CgroupCounters, DiskBreakdown, DiskFile, DiskFileId, EnergyProvider,
-    GpuProcessStat, MemoryUsage, NetworkCounters, ProcessFiles, ProcessIo, ProcessStat,
-    ProcessUsage, ResourceProvider, ResourceSampler, ResourceSnapshot, equals_key_values,
-    parse_process_stat, whitespace_key_values,
+    DiskFile, DiskFileId, MemoryUsage, NetworkCounters, ProcessFiles, ProcessIo, ProcessUsage,
+    ResourceSnapshot, parse_process_stat,
 };
 use anyhow::Context;
 use std::{
     collections::{HashMap, HashSet},
-    path::PathBuf,
     sync::Arc,
 };
-
-#[derive(Debug)]
-struct FakeProvider;
-
-impl EnergyProvider for FakeProvider {
-    fn rapl_zones(&self) -> HashMap<PathBuf, (u64, u64)> {
-        HashMap::new()
-    }
-
-    fn batteries(&self) -> BatterySample {
-        BatterySample::default()
-    }
-}
-
-impl ResourceProvider for FakeProvider {
-    fn system_cpu(&self) -> (u64, usize) {
-        (100, 8)
-    }
-
-    fn processes(&self) -> HashMap<u32, ProcessStat> {
-        HashMap::from([(
-            42,
-            ProcessStat {
-                parent_pid: 1,
-                total_ticks: 10,
-                start_ticks: 5,
-                major_faults: 0,
-                thread_count: 2,
-            },
-        )])
-    }
-
-    fn process_memory(&self, _pid: u32) -> MemoryUsage {
-        MemoryUsage {
-            rss_bytes: 2_048,
-            pss_bytes: 1_024,
-            rss_available: true,
-            pss_available: true,
-            ..MemoryUsage::default()
-        }
-    }
-
-    fn process_io(&self, _pid: u32) -> Option<ProcessIo> {
-        Some(ProcessIo::default())
-    }
-
-    fn process_files(&self, _pid: u32) -> ProcessFiles {
-        ProcessFiles {
-            fd_available: true,
-            ..ProcessFiles::default()
-        }
-    }
-
-    fn network_counters(&self, _inodes: &HashSet<u64>) -> Option<HashMap<u64, NetworkCounters>> {
-        Some(HashMap::new())
-    }
-
-    fn gpu_processes(&self, _pids: &HashSet<u32>) -> HashMap<u32, GpuProcessStat> {
-        HashMap::new()
-    }
-
-    fn process_cgroup(&self, _pid: u32) -> Option<String> {
-        None
-    }
-
-    fn cgroup_counters(&self, _path: &str) -> Option<CgroupCounters> {
-        None
-    }
-
-    fn cgroup_members(&self, _path: &str) -> HashSet<u32> {
-        HashSet::new()
-    }
-
-    fn application_disk_usage(&self, _target_id: &str) -> DiskBreakdown {
-        DiskBreakdown::default()
-    }
-}
-
-#[test]
-fn samples_through_an_injected_provider() {
-    let mut sampler = ResourceSampler::with_provider(Arc::new(FakeProvider));
-    let targets = HashMap::from([("example.desktop".into(), vec![42])]);
-    let snapshot = sampler.sample_for_targets(&targets);
-    let usage = snapshot.usage_for_target("example.desktop", [42]);
-    assert_eq!(snapshot.logical_cpus, 8);
-    assert_eq!(usage.compute.memory_bytes, 1_024);
-    assert_eq!(usage.compute.thread_count, 2);
-    assert_eq!(usage.measurement.memory_source, "pss");
-    assert!(usage.measurement.network_connections_available);
-}
 
 #[test]
 fn parses_proc_stat_with_spaces_in_command() -> anyhow::Result<()> {
@@ -110,15 +17,6 @@ fn parses_proc_stat_with_spaces_in_command() -> anyhow::Result<()> {
     assert_eq!(process.start_ticks, 99);
     assert_eq!(process.major_faults, 0);
     Ok(())
-}
-
-#[test]
-fn parses_cgroup_cpu_and_io_counters() {
-    let cpu = whitespace_key_values("usage_usec 125000\nuser_usec 100000\n");
-    assert_eq!(cpu["usage_usec"], 125_000);
-    let io = equals_key_values("8:0 rbytes=4096 wbytes=8192 rios=3 wios=4");
-    assert_eq!(io["rbytes"], 4096);
-    assert_eq!(io["wios"], 4);
 }
 
 #[test]

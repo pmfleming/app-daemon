@@ -10,7 +10,10 @@ use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde::{Deserialize, Serialize};
 use shelllist_daemon_core::{XdgRoot, resolve_xdg_path};
 
-use crate::model::{ResourceHistoryPoint, ResourceUsage};
+use crate::{
+    metrics::{available_label, merge_label, rounded},
+    model::{ResourceHistoryPoint, ResourceUsage},
+};
 
 mod aggregate;
 use aggregate::PendingPoint;
@@ -182,50 +185,18 @@ impl HistoryStore {
     pub fn energy_totals(&mut self, since_ms: u64, until_ms: u64) -> Vec<EnergyTotal> {
         self.flush_expired(until_ms);
         let mut totals = HashMap::<String, PendingEnergy>::new();
-        for (target_id, points) in &self.energy_points {
-            for point in points
-                .iter()
-                .filter(|point| point.timestamp_ms >= since_ms && point.timestamp_ms <= until_ms)
-            {
-                totals.entry(target_id.clone()).or_default().add(
-                    point.energy_mwh,
-                    &point.energy_source,
-                    &point.energy_confidence,
-                );
-            }
-        }
-        for (target_id, pending) in &self.pending_energy {
-            if pending
-                .timestamp_ms
-                .saturating_add(ENERGY_BUCKET_MILLISECONDS)
-                >= since_ms
-                && pending.timestamp_ms <= until_ms
-            {
-                totals.entry(target_id.clone()).or_default().add(
-                    pending.energy_mwh,
-                    &pending.energy_source,
-                    &pending.energy_confidence,
-                );
-            }
-        }
+        add_recorded_energy(&mut totals, &self.energy_points, since_ms, until_ms);
+        add_pending_energy(&mut totals, &self.pending_energy, since_ms, until_ms);
         totals
             .into_iter()
             .filter(|(_, total)| total.energy_mwh > 0.0)
             .map(|(target_id, total)| EnergyTotal {
                 target_id,
-                energy_mwh: rounded_energy(total.energy_mwh),
+                energy_mwh: rounded(total.energy_mwh, 4),
                 energy_source: available_label(total.energy_source),
                 energy_confidence: available_label(total.energy_confidence),
             })
             .collect()
-    }
-
-    pub fn save(&mut self) -> std::io::Result<()> {
-        persist_snapshot(self.snapshot(false))
-    }
-
-    pub fn save_final(&mut self) -> std::io::Result<()> {
-        persist_snapshot(self.snapshot(true))
     }
 
     pub fn snapshot(&mut self, final_save: bool) -> HistorySnapshot {
@@ -350,6 +321,48 @@ impl HistoryStore {
     }
 }
 
+fn add_recorded_energy(
+    totals: &mut HashMap<String, PendingEnergy>,
+    points: &HashMap<String, VecDeque<EnergyHistoryPoint>>,
+    since_ms: u64,
+    until_ms: u64,
+) {
+    for (target_id, points) in points {
+        let total = totals.entry(target_id.clone()).or_default();
+        for point in points
+            .iter()
+            .filter(|point| point.timestamp_ms >= since_ms && point.timestamp_ms <= until_ms)
+        {
+            total.add(
+                point.energy_mwh,
+                &point.energy_source,
+                &point.energy_confidence,
+            );
+        }
+    }
+}
+
+fn add_pending_energy(
+    totals: &mut HashMap<String, PendingEnergy>,
+    points: &HashMap<String, PendingEnergy>,
+    since_ms: u64,
+    until_ms: u64,
+) {
+    for (target_id, point) in points.iter().filter(|(_, point)| {
+        point
+            .timestamp_ms
+            .saturating_add(ENERGY_BUCKET_MILLISECONDS)
+            >= since_ms
+            && point.timestamp_ms <= until_ms
+    }) {
+        totals.entry(target_id.clone()).or_default().add(
+            point.energy_mwh,
+            &point.energy_source,
+            &point.energy_confidence,
+        );
+    }
+}
+
 impl PendingEnergy {
     fn add(&mut self, energy_mwh: f64, source: &str, confidence: &str) {
         if energy_mwh.is_finite() && energy_mwh > 0.0 {
@@ -362,34 +375,11 @@ impl PendingEnergy {
     fn finish(self) -> EnergyHistoryPoint {
         EnergyHistoryPoint {
             timestamp_ms: self.timestamp_ms.saturating_add(ENERGY_BUCKET_MILLISECONDS),
-            energy_mwh: rounded_energy(self.energy_mwh),
+            energy_mwh: rounded(self.energy_mwh, 4),
             energy_source: available_label(self.energy_source),
             energy_confidence: available_label(self.energy_confidence),
         }
     }
-}
-
-fn merge_label(current: &mut String, next: &str) {
-    if next.is_empty() {
-        return;
-    }
-    if current.is_empty() {
-        *current = next.to_owned();
-    } else if current != next {
-        *current = "mixed".into();
-    }
-}
-
-fn available_label(value: String) -> String {
-    if value.is_empty() {
-        "unavailable".into()
-    } else {
-        value
-    }
-}
-
-fn rounded_energy(value: f64) -> f64 {
-    (value * 10_000.0).round() / 10_000.0
 }
 
 fn encode_cursor(target_id: &str, timestamp_ms: u64) -> anyhow::Result<String> {
@@ -416,6 +406,14 @@ fn decode_cursor(value: &str, target_id: &str) -> anyhow::Result<HistoryCursor> 
         "history cursor belongs to another target"
     );
     Ok(cursor)
+}
+
+pub(crate) fn merged_labels<'a>(values: impl Iterator<Item = &'a str>) -> String {
+    let mut merged = String::new();
+    for value in values {
+        merge_label(&mut merged, value);
+    }
+    available_label(merged)
 }
 
 pub fn now_milliseconds() -> u64 {

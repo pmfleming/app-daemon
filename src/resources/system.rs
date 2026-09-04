@@ -15,6 +15,36 @@ pub(super) fn application_disk_usage(target_id: &str) -> DiskBreakdown {
     if target.is_empty() || target.starts_with("window-group:") {
         return DiskBreakdown::default();
     }
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let names = application_directory_names(target);
+    let mut permanent_roots = named_roots(
+        &names,
+        xdg_roots(
+            &home,
+            [
+                ("XDG_DATA_HOME", ".local/share"),
+                ("XDG_CONFIG_HOME", ".config"),
+                ("XDG_STATE_HOME", ".local/state"),
+            ],
+        ),
+    );
+    let mut temporary_roots = named_roots(
+        &names,
+        xdg_roots(&home, [("XDG_CACHE_HOME", ".cache")])
+            .into_iter()
+            .chain(std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from)),
+    );
+    append_flatpak_roots(&mut permanent_roots, &mut temporary_roots, home, target);
+    let permanent = allocated_directory_bytes(&permanent_roots);
+    let temporary = allocated_directory_bytes(&temporary_roots);
+    DiskBreakdown {
+        total_bytes: permanent.saturating_add(temporary),
+        temporary_bytes: temporary,
+        permanent_bytes: permanent,
+    }
+}
+
+fn application_directory_names(target: &str) -> HashSet<String> {
     let lowercase = target.to_ascii_lowercase();
     let mut names = HashSet::from([target.to_owned(), lowercase.clone()]);
     for candidate in [target, &lowercase] {
@@ -22,47 +52,37 @@ pub(super) fn application_disk_usage(target_id: &str) -> DiskBreakdown {
             names.insert(short.to_owned());
         }
     }
-    let home = std::env::var_os("HOME").map(PathBuf::from);
-    let data = xdg_directory(
-        "XDG_DATA_HOME",
-        home.as_ref().map(|path| path.join(".local/share")),
-    );
-    let config = xdg_directory(
-        "XDG_CONFIG_HOME",
-        home.as_ref().map(|path| path.join(".config")),
-    );
-    let state = xdg_directory(
-        "XDG_STATE_HOME",
-        home.as_ref().map(|path| path.join(".local/state")),
-    );
-    let cache = xdg_directory(
-        "XDG_CACHE_HOME",
-        home.as_ref().map(|path| path.join(".cache")),
-    );
-    let runtime = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from);
-    let mut permanent_roots = Vec::new();
-    let mut temporary_roots = Vec::new();
-    for name in names {
-        for root in [&data, &config, &state].into_iter().flatten() {
-            permanent_roots.push(root.join(&name));
-        }
-        for root in [&cache, &runtime].into_iter().flatten() {
-            temporary_roots.push(root.join(&name));
-        }
-    }
-    if let Some(home) = home {
-        for name in [target, &lowercase] {
-            let flatpak = home.join(".var/app").join(name);
-            permanent_roots.extend([flatpak.join("config"), flatpak.join("data")]);
-            temporary_roots.push(flatpak.join("cache"));
-        }
-    }
-    let permanent = allocated_directory_bytes(&permanent_roots);
-    let temporary = allocated_directory_bytes(&temporary_roots);
-    DiskBreakdown {
-        total_bytes: permanent.saturating_add(temporary),
-        temporary_bytes: temporary,
-        permanent_bytes: permanent,
+    names
+}
+
+fn xdg_roots<const N: usize>(home: &Option<PathBuf>, roots: [(&str, &str); N]) -> Vec<PathBuf> {
+    roots
+        .into_iter()
+        .filter_map(|(variable, fallback)| {
+            xdg_directory(variable, home.as_ref().map(|path| path.join(fallback)))
+        })
+        .collect()
+}
+
+fn named_roots(names: &HashSet<String>, roots: impl IntoIterator<Item = PathBuf>) -> Vec<PathBuf> {
+    roots
+        .into_iter()
+        .flat_map(|root| names.iter().map(move |name| root.join(name)))
+        .collect()
+}
+
+fn append_flatpak_roots(
+    permanent: &mut Vec<PathBuf>,
+    temporary: &mut Vec<PathBuf>,
+    home: Option<PathBuf>,
+    target: &str,
+) {
+    let Some(home) = home else { return };
+    let lowercase = target.to_ascii_lowercase();
+    for name in [target, &lowercase] {
+        let root = home.join(".var/app").join(name);
+        permanent.extend([root.join("config"), root.join("data")]);
+        temporary.push(root.join("cache"));
     }
 }
 
@@ -122,14 +142,7 @@ pub(super) fn shared_target_pids(
 ) -> HashSet<u32> {
     let mut owners = HashMap::<u32, u32>::new();
     for roots in targets.values() {
-        let mut target_pids = HashSet::new();
-        for root in roots {
-            target_pids.extend(descendants([*root], children));
-            if let Some(members) = cgroups.get(root) {
-                target_pids.extend(members);
-            }
-        }
-        for pid in target_pids {
+        for pid in target_processes(roots, children, cgroups) {
             *owners.entry(pid).or_default() += 1;
         }
     }
@@ -137,6 +150,19 @@ pub(super) fn shared_target_pids(
         .into_iter()
         .filter_map(|(pid, owners)| (owners > 1).then_some(pid))
         .collect()
+}
+
+fn target_processes(
+    roots: &[u32],
+    children: &HashMap<u32, Vec<u32>>,
+    cgroups: &HashMap<u32, HashSet<u32>>,
+) -> HashSet<u32> {
+    let mut pids = HashSet::new();
+    for root in roots {
+        pids.extend(descendants([*root], children));
+        pids.extend(cgroups.get(root).into_iter().flatten());
+    }
+    pids
 }
 
 pub(super) fn cgroup_paths_for_roots(
