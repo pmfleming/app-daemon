@@ -97,8 +97,7 @@ struct ProcessUsage {
     thread_count: u64,
     major_faults: u64,
     gpu_available: bool,
-    gpu_percent: f64,
-    gpu_busy_percent: f64,
+    gpu_engine_percent: HashMap<String, f64>,
     gpu_memory_resident_bytes: u64,
     gpu_memory_allocated_bytes: u64,
     io: ProcessIo,
@@ -267,6 +266,7 @@ struct ProcessAggregation {
     memory_processes: u64,
     pss_processes: u64,
     gpu_processes: u64,
+    gpu_engine_percent: HashMap<String, f64>,
     network_processes: u64,
     storage_processes: u64,
 }
@@ -346,6 +346,9 @@ impl ResourceSnapshot {
             aggregate.memory_processes += u64::from(process.memory.rss_available);
             aggregate.pss_processes += u64::from(process.memory.pss_available);
             aggregate.gpu_processes += u64::from(process.gpu_available);
+            for (engine, percent) in &process.gpu_engine_percent {
+                *aggregate.gpu_engine_percent.entry(engine.clone()).or_default() += percent;
+            }
             aggregate.network_processes += u64::from(process.sockets.is_some());
             aggregate.storage_processes += u64::from(process.storage_available);
             if process.files.fd_available {
@@ -356,6 +359,8 @@ impl ResourceSnapshot {
                 .network_sockets
                 .extend(process.sockets.iter().flatten().copied());
         }
+        aggregate.usage.compute.gpu_busy_percent = aggregate.gpu_engine_percent
+            .values().copied().fold(0.0, f64::max);
         aggregate
     }
 
@@ -548,8 +553,7 @@ impl ResourceUsage {
         add_counter(&mut compute.process_count, 1);
         add_counter(&mut compute.thread_count, process.thread_count);
         compute.major_faults_per_second += process.major_faults as f64;
-        compute.gpu_percent += process.gpu_percent;
-        compute.gpu_busy_percent = compute.gpu_busy_percent.max(process.gpu_busy_percent);
+        compute.gpu_percent += process.gpu_engine_percent.values().sum::<f64>();
         add_counter(
             &mut compute.gpu_memory_resident_bytes,
             process.gpu_memory_resident_bytes,
@@ -783,7 +787,7 @@ impl ResourceSampler {
             }
             let major_faults = self.major_fault_delta(pid, process);
             let gpu = current_gpu.get(&pid);
-            let (gpu_percent, gpu_busy_percent) = self.gpu_percent(
+            let gpu_engine_percent = self.gpu_percent(
                 pid,
                 process.start_ticks,
                 gpu,
@@ -805,8 +809,7 @@ impl ResourceSampler {
                     thread_count: process.thread_count,
                     major_faults,
                     gpu_available: gpu.is_some(),
-                    gpu_percent,
-                    gpu_busy_percent,
+                    gpu_engine_percent,
                     gpu_memory_resident_bytes: gpu.map_or(0, |gpu| gpu.resident_memory_bytes),
                     gpu_memory_allocated_bytes: gpu.map_or(0, |gpu| gpu.allocated_memory_bytes),
                     io,
@@ -997,27 +1000,25 @@ impl ResourceSampler {
         gpu: Option<&GpuProcessStat>,
         seconds: f64,
         next: &mut HashMap<(u32, u64, String), u64>,
-    ) -> (f64, f64) {
-        let Some(gpu) = gpu.filter(|_| seconds > 0.0) else {
-            return (0.0, 0.0);
+    ) -> HashMap<String, f64> {
+        let mut engines = HashMap::<String, f64>::new();
+        let Some(gpu) = gpu else {
+            return engines;
         };
-        let elapsed = gpu
-            .engine_nanoseconds
-            .iter()
-            .map(|(engine, &nanoseconds)| {
-                let key = (pid, start_ticks, engine.clone());
-                let previous = self.previous_gpu_engines.get(&key).copied();
-                next.insert(key, nanoseconds);
-                previous.map_or(0, |value| nanoseconds.saturating_sub(value))
-            })
-            .collect::<Vec<_>>();
-        let denominator = seconds * 1_000_000_000.0;
-        let aggregate = elapsed.iter().copied().sum::<u64>() as f64 / denominator * 100.0;
-        let busiest = elapsed.iter().copied().max().unwrap_or(0) as f64 / denominator * 100.0;
-        (
-            finite_nonnegative(aggregate),
-            finite_nonnegative(busiest).min(100.0),
-        )
+        for (client_engine, &nanoseconds) in &gpu.engine_nanoseconds {
+            let key = (pid, start_ticks, client_engine.clone());
+            let previous = self.previous_gpu_engines.get(&key).copied();
+            // Seed the baseline even on the first (zero-duration) sample.
+            next.insert(key, nanoseconds);
+            let elapsed = previous.map_or(0, |value| nanoseconds.saturating_sub(value));
+            let percent = if seconds > 0.0 {
+                finite_nonnegative(elapsed as f64 / (seconds * 1_000_000_000.0) * 100.0)
+            } else {
+                0.0
+            };
+            *engines.entry(gpu::engine_scope(client_engine)).or_default() += percent;
+        }
+        engines
     }
 
     fn remember(
@@ -1152,6 +1153,8 @@ impl ResourceSnapshot {
 mod regression_tests;
 #[cfg(test)]
 mod network_tests;
+#[cfg(test)]
+mod gpu_usage_tests;
 #[cfg(test)]
 mod test_provider;
 #[cfg(test)]
