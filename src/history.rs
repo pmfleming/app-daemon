@@ -454,3 +454,5 @@ fn temporary_path(path: &Path) -> PathBuf {
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod availability_tests;

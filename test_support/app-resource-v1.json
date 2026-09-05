@@ -57,6 +57,7 @@
       "memory_source": "pss",
       "gpu_available": true,
       "storage_available": true,
+      "referenced_files_available": true,
       "disk_space_scope": "identified-app-directories",
       "network_available": true,
       "network_bytes_available": false,
@@ -65,6 +66,17 @@
     }
   },
   "history_point": {
+    "availability": {
+      "cpu": true,
+      "memory": true,
+      "gpu": true,
+      "storage": true,
+      "referenced_files": true,
+      "disk_space": true,
+      "network_bytes": false,
+      "network_connections": true,
+      "energy": true
+    },
     "timestamp_ms": 1773504000000,
     "duration_ms": 15000,
     "cpu_percent": 120.5,

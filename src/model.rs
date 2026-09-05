@@ -89,6 +89,7 @@ pub struct ResourceMeasurement {
     pub memory_source: String,
     pub gpu_available: bool,
     pub storage_available: bool,
+    pub referenced_files_available: bool,
     pub disk_space_scope: String,
     pub network_available: bool,
     pub network_bytes_available: bool,
@@ -196,9 +197,25 @@ pub struct ResourcePeaks {
     pub estimated_app_power_watts: f64,
 }
 
+// A capability is true only when available throughout the observed bucket.
+// Missing metadata in older history files means unknown, not measured zero.
+usage_fields!(ResourceAvailability {
+    cpu: bool,
+    memory: bool,
+    gpu: bool,
+    storage: bool,
+    referenced_files: bool,
+    disk_space: bool,
+    network_bytes: bool,
+    network_connections: bool,
+    energy: bool,
+});
+
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct HistoricalResourceUsage {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub availability: Option<ResourceAvailability>,
     #[serde(flatten)]
     pub compute: ComputeUsage,
     #[serde(flatten)]

@@ -2,7 +2,7 @@ use crate::{
     metrics::{available_label, merge_label, rounded},
     model::{
         ComputeUsage, HistoricalResourceUsage, NetworkUsage, ResourceHistoryPoint, ResourcePeaks,
-        ResourceUsage, StorageUsage,
+        ResourceAvailability, ResourceUsage, StorageUsage,
     },
 };
 
@@ -24,6 +24,7 @@ pub(super) struct PendingPoint {
     energy_source: String,
     energy_confidence: String,
     peaks: ResourcePeaks,
+    availability: Option<ResourceAvailability>,
 }
 
 #[derive(Debug, Default)]
@@ -73,6 +74,12 @@ struct WeightedNetwork {
 
 impl PendingPoint {
     pub(super) fn add(&mut self, duration_ms: u64, usage: &ResourceUsage) {
+        let available = ResourceAvailability::for_usage(usage);
+        if let Some(previous) = &mut self.availability {
+            previous.intersect(&available);
+        } else {
+            self.availability = Some(available);
+        }
         self.duration_ms = self.duration_ms.saturating_add(duration_ms);
         self.compute.add(duration_ms, &usage.compute);
         self.storage.add(duration_ms, &usage.storage);
@@ -120,6 +127,7 @@ impl PendingPoint {
             timestamp_ms: self.timestamp_ms.saturating_add(BUCKET_MILLISECONDS),
             duration_ms: self.duration_ms,
             resources: HistoricalResourceUsage {
+                availability: self.availability,
                 compute: self.compute.finish(duration),
                 storage: self.storage.finish(duration),
                 network: self.network.finish(duration),
@@ -135,6 +143,35 @@ impl PendingPoint {
                 peaks: self.peaks,
             },
         })
+    }
+}
+
+impl ResourceAvailability {
+    fn for_usage(usage: &ResourceUsage) -> Self {
+        let measurement = &usage.measurement;
+        Self {
+            cpu: measurement.coverage > 0.0,
+            memory: matches!(measurement.memory_source.as_str(), "pss" | "rss-fallback"),
+            gpu: measurement.gpu_available,
+            storage: measurement.storage_available,
+            referenced_files: measurement.referenced_files_available,
+            disk_space: measurement.disk_space_scope == "identified-app-directories",
+            network_bytes: measurement.network_bytes_available,
+            network_connections: measurement.network_connections_available,
+            energy: usage.energy.energy_source == "rapl",
+        }
+    }
+
+    fn intersect(&mut self, other: &Self) {
+        self.cpu &= other.cpu;
+        self.memory &= other.memory;
+        self.gpu &= other.gpu;
+        self.storage &= other.storage;
+        self.referenced_files &= other.referenced_files;
+        self.disk_space &= other.disk_space;
+        self.network_bytes &= other.network_bytes;
+        self.network_connections &= other.network_connections;
+        self.energy &= other.energy;
     }
 }
 

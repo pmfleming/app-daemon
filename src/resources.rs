@@ -269,6 +269,7 @@ struct ProcessAggregation {
     gpu_engine_percent: HashMap<String, f64>,
     network_processes: u64,
     storage_processes: u64,
+    file_processes: u64,
 }
 
 impl ResourceSnapshot {
@@ -355,6 +356,7 @@ impl ResourceSnapshot {
             aggregate.network_processes += u64::from(process.sockets.is_some());
             aggregate.storage_processes += u64::from(process.storage_available);
             if process.files.fd_available {
+                aggregate.file_processes += 1;
                 merge_disk_files(&mut aggregate.open_files, &process.files.open);
                 merge_disk_files(&mut aggregate.referenced_files, &process.files.referenced);
             }
@@ -431,6 +433,7 @@ impl ResourceSnapshot {
         measurement.memory_source = memory_source;
         measurement.gpu_available = aggregate.gpu_processes > 0;
         measurement.storage_available = complete_cgroup || aggregate.storage_processes > 0;
+        measurement.referenced_files_available = aggregate.file_processes > 0;
         measurement.network_available = aggregate.network_processes > 0;
         measurement.network_bytes_available = network_bytes_available;
         measurement.network_connections_available = aggregate.network_processes > 0;

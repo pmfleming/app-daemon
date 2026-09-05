@@ -40,7 +40,7 @@ mod tests {
     use serde_json::Value;
 
     use super::{METHODS, STREAMS, VERSION, contract_fixture, resource_contract_fixture};
-    use crate::model::{HistoricalResourceUsage, ResourceHistoryPoint, ResourceUsage};
+    use crate::model::{HistoricalResourceUsage, ResourceAvailability, ResourceHistoryPoint, ResourceUsage};
 
     fn leaf_paths(value: &Value, prefix: &str, paths: &mut BTreeSet<String>) {
         let Some(object) = value.as_object() else {
@@ -83,7 +83,10 @@ mod tests {
         let history = serde_json::to_value(ResourceHistoryPoint {
             timestamp_ms: 0,
             duration_ms: 0,
-            resources: HistoricalResourceUsage::default(),
+            resources: HistoricalResourceUsage {
+                availability: Some(ResourceAvailability::default()),
+                ..Default::default()
+            },
         })?;
         assert_eq!(paths(&fixture["current"]), paths(&current));
         assert_eq!(paths(&fixture["history_point"]), paths(&history));
