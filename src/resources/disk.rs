@@ -1,0 +1,116 @@
+use std::{
+    collections::{HashMap, HashSet},
+    sync::{Arc, Mutex, mpsc::{self, Receiver, SyncSender}},
+    time::Instant,
+};
+
+use super::{APP_DISK_REFRESH_INTERVAL, DiskBreakdown, ResourceProvider};
+
+const WORKERS: usize = 2;
+
+#[derive(Debug)]
+struct DiskResult {
+    target: String,
+    usage: Option<DiskBreakdown>,
+}
+
+#[derive(Debug)]
+struct DiskWorkers {
+    requests: SyncSender<String>,
+    results: Receiver<DiskResult>,
+}
+
+impl DiskWorkers {
+    fn start(provider: &Arc<dyn ResourceProvider>) -> std::io::Result<Self> {
+        let (requests, receiver) = mpsc::sync_channel::<String>(WORKERS);
+        let receiver = Arc::new(Mutex::new(receiver));
+        let (sender, results) = mpsc::sync_channel(WORKERS);
+        for index in 0..WORKERS {
+            let receiver = Arc::clone(&receiver);
+            let sender = sender.clone();
+            let provider = Arc::clone(provider);
+            std::thread::Builder::new().name(format!("app-disk-{index}")).spawn(move || {
+                loop {
+                    let request = receiver.lock().unwrap_or_else(std::sync::PoisonError::into_inner).recv();
+                    let Ok(target) = request else { break };
+                    let usage = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        provider.application_disk_usage(&target)
+                    })).unwrap_or(None);
+                    if sender.send(DiskResult { target, usage }).is_err() {
+                        break;
+                    }
+                }
+            })?;
+        }
+        Ok(Self { requests, results })
+    }
+}
+
+#[derive(Debug)]
+struct CachedDisk {
+    usage: Option<DiskBreakdown>,
+    next_refresh: Instant,
+}
+
+/// Disk walks never run on the resource sampler. At most two requests are
+/// outstanding, including running work, and both channels have bounded capacity.
+/// Dropping the cache closes the channels; workers finish their current walk
+/// without blocking sampler/service shutdown.
+#[derive(Debug, Default)]
+pub(super) struct AppDiskCache {
+    samples: HashMap<String, CachedDisk>,
+    in_flight: HashSet<String>,
+    workers: Option<DiskWorkers>,
+}
+
+impl AppDiskCache {
+    pub(super) fn read<'a>(
+        &mut self,
+        provider: &Arc<dyn ResourceProvider>,
+        targets: impl IntoIterator<Item = &'a String>,
+        now: Instant,
+    ) -> HashMap<String, DiskBreakdown> {
+        let targets = targets.into_iter().cloned().collect::<HashSet<_>>();
+        self.samples.retain(|target, _| targets.contains(target));
+        if let Some(workers) = &self.workers {
+            for result in workers.results.try_iter() {
+                self.in_flight.remove(&result.target);
+                if !targets.contains(&result.target) {
+                    continue;
+                }
+                let cached = self.samples.entry(result.target).or_insert(CachedDisk {
+                    usage: None,
+                    next_refresh: now,
+                });
+                // An incomplete/failed refresh must not replace a completed
+                // footprint with a partial total or invented zero.
+                if result.usage.is_some() {
+                    cached.usage = result.usage;
+                }
+                cached.next_refresh = now + APP_DISK_REFRESH_INTERVAL;
+            }
+        }
+        if !targets.is_empty() && self.workers.is_none() {
+            match DiskWorkers::start(provider) {
+                Ok(workers) => self.workers = Some(workers),
+                Err(error) => tracing::warn!(%error, "application disk workers could not start"),
+            }
+        }
+        if let Some(workers) = &self.workers {
+            let mut requested = targets.iter()
+                .filter(|target| !self.in_flight.contains(*target))
+                .filter(|target| self.samples.get(*target).is_none_or(|sample| now >= sample.next_refresh))
+                .cloned().collect::<Vec<_>>();
+            requested.sort();
+            for target in requested.into_iter().take(WORKERS.saturating_sub(self.in_flight.len())) {
+                if workers.requests.try_send(target.clone()).is_ok() {
+                    self.in_flight.insert(target);
+                }
+            }
+        }
+        self.samples.iter().filter_map(|(target, sample)| Some((target.clone(), sample.usage?))).collect()
+    }
+}
+
+#[cfg(test)]
+mod tests;

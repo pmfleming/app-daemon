@@ -10,10 +10,10 @@ use super::{
     ProcessStat, ResourceProvider,
 };
 
-pub(super) fn application_disk_usage(target_id: &str) -> DiskBreakdown {
+pub(super) fn application_disk_usage(target_id: &str) -> Option<DiskBreakdown> {
     let target = target_id.trim_end_matches(".desktop");
     if target.is_empty() || target.starts_with("window-group:") {
-        return DiskBreakdown::default();
+        return None;
     }
     let home = std::env::var_os("HOME").map(PathBuf::from);
     let names = application_directory_names(target);
@@ -35,13 +35,14 @@ pub(super) fn application_disk_usage(target_id: &str) -> DiskBreakdown {
             .chain(std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from)),
     );
     append_flatpak_roots(&mut permanent_roots, &mut temporary_roots, home, target);
-    let permanent = allocated_directory_bytes(&permanent_roots);
-    let temporary = allocated_directory_bytes(&temporary_roots);
-    DiskBreakdown {
+    let mut budget = DiskScanBudget::default();
+    let permanent = allocated_directory_bytes(&permanent_roots, &mut budget)?;
+    let temporary = allocated_directory_bytes(&temporary_roots, &mut budget)?;
+    Some(DiskBreakdown {
         total_bytes: permanent.saturating_add(temporary),
         temporary_bytes: temporary,
         permanent_bytes: permanent,
-    }
+    })
 }
 
 fn application_directory_names(target: &str) -> HashSet<String> {
@@ -90,27 +91,56 @@ pub(super) fn xdg_directory(variable: &str, fallback: Option<PathBuf>) -> Option
     std::env::var_os(variable).map(PathBuf::from).or(fallback)
 }
 
-pub(super) fn allocated_directory_bytes(roots: &[PathBuf]) -> u64 {
-    let mut files = HashMap::<DiskFileId, u64>::new();
-    for root in roots.iter().filter(|path| path.is_dir()) {
-        for entry in walkdir::WalkDir::new(root)
-            .follow_links(false)
-            .into_iter()
-            .filter_map(Result::ok)
-            .filter(|entry| entry.file_type().is_file())
-        {
-            let Ok(metadata) = entry.metadata() else {
-                continue;
-            };
-            files
-                .entry(DiskFileId {
-                    device: metadata.dev(),
-                    inode: metadata.ino(),
-                })
-                .or_insert_with(|| metadata.blocks().saturating_mul(512));
+struct DiskScanBudget {
+    remaining_entries: usize,
+    deadline: std::time::Instant,
+}
+
+impl Default for DiskScanBudget {
+    fn default() -> Self {
+        Self {
+            remaining_entries: 100_000,
+            deadline: std::time::Instant::now() + std::time::Duration::from_secs(2),
         }
     }
-    files.values().copied().sum()
+}
+
+impl DiskScanBudget {
+    fn visit(&mut self) -> Option<()> {
+        self.remaining_entries = self.remaining_entries.checked_sub(1)?;
+        (std::time::Instant::now() < self.deadline).then_some(())
+    }
+}
+
+fn allocated_directory_bytes(roots: &[PathBuf], budget: &mut DiskScanBudget) -> Option<u64> {
+    let mut files = HashMap::<DiskFileId, u64>::new();
+    for root in roots {
+        budget.visit()?;
+        match fs::symlink_metadata(root) {
+            Ok(metadata) if metadata.is_dir() => {},
+            Ok(_) => continue,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(_) => return None,
+        }
+        for entry in walkdir::WalkDir::new(root)
+            .follow_links(false)
+            .follow_root_links(false)
+            .same_file_system(true)
+            .max_open(8)
+        {
+            budget.visit()?;
+            let entry = entry.ok()?;
+            if !entry.file_type().is_file() {
+                continue;
+            }
+            let metadata = entry.metadata().ok()?;
+            files.entry(DiskFileId {
+                device: metadata.dev(),
+                inode: metadata.ino(),
+            }).or_insert_with(|| metadata.blocks().saturating_mul(512));
+        }
+    }
+    (std::time::Instant::now() < budget.deadline).then(|| files.values().copied().sum())
 }
 
 pub(super) fn read_processes() -> HashMap<u32, ProcessStat> {

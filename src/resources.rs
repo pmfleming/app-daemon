@@ -11,11 +11,13 @@ use crate::{
     model::{ComputeUsage, EnergyUsage, NetworkUsage, ResourceUsage, StorageUsage},
 };
 
+mod disk;
 mod energy;
 mod gpu;
 mod network;
 mod system;
 
+use disk::AppDiskCache;
 use energy::{BatterySample, EnergyProvider, EnergySampler};
 use gpu::{GpuProcessStat, read_gpu_processes};
 use network::{NetworkCounters, read_network_counters};
@@ -134,7 +136,7 @@ trait ResourceProvider: Debug + EnergyProvider + Send + Sync {
     fn process_cgroup(&self, pid: u32) -> Option<String>;
     fn cgroup_counters(&self, path: &str) -> Option<CgroupCounters>;
     fn cgroup_members(&self, path: &str) -> HashSet<u32>;
-    fn application_disk_usage(&self, target_id: &str) -> DiskBreakdown;
+    fn application_disk_usage(&self, target_id: &str) -> Option<DiskBreakdown>;
 }
 
 #[derive(Debug, Default)]
@@ -195,7 +197,7 @@ impl ResourceProvider for LinuxResourceProvider {
         read_cgroup_members(path)
     }
 
-    fn application_disk_usage(&self, target_id: &str) -> DiskBreakdown {
+    fn application_disk_usage(&self, target_id: &str) -> Option<DiskBreakdown> {
         application_disk_usage(target_id)
     }
 }
@@ -704,12 +706,6 @@ struct DiskBreakdown {
     permanent_bytes: u64,
 }
 
-#[derive(Debug, Default)]
-struct AppDiskCache {
-    samples: HashMap<String, DiskBreakdown>,
-    next_refresh: InstantSlot,
-}
-
 impl ResourceSampler {
     pub fn sample_for_targets(
         &mut self,
@@ -772,7 +768,7 @@ impl ResourceSampler {
         let energy = self.energy.sample(interval_seconds, provider.as_ref());
         let app_disk_by_target = self
             .app_disk
-            .read(provider.as_ref(), active_targets.keys(), now);
+            .read(&provider, active_targets.keys(), now);
         let shared_pids =
             shared_target_pids(active_targets, &process_children, &cgroup_members_by_root);
         let mut snapshot = ResourceSnapshot {
@@ -1140,41 +1136,6 @@ impl OpenFileCache {
         } else {
             self.samples.extend(sampled);
         }
-    }
-}
-
-impl AppDiskCache {
-    fn read<'a>(
-        &mut self,
-        provider: &dyn ResourceProvider,
-        targets: impl IntoIterator<Item = &'a String>,
-        now: Instant,
-    ) -> HashMap<String, DiskBreakdown> {
-        let targets = targets.into_iter().cloned().collect::<HashSet<_>>();
-        let refresh = self.next_refresh.0.is_none_or(|deadline| now >= deadline);
-        self.samples.retain(|target, _| targets.contains(target));
-        let requested: Vec<String> = if refresh {
-            targets.into_iter().collect()
-        } else {
-            targets
-                .into_iter()
-                .filter(|target| !self.samples.contains_key(target))
-                .collect()
-        };
-        let sampled = requested
-            .into_iter()
-            .map(|target| {
-                let usage = provider.application_disk_usage(&target);
-                (target, usage)
-            })
-            .collect::<Vec<_>>();
-        if refresh {
-            self.samples = sampled.into_iter().collect();
-            self.next_refresh.0 = Some(now + APP_DISK_REFRESH_INTERVAL);
-        } else {
-            self.samples.extend(sampled);
-        }
-        self.samples.clone()
     }
 }
 

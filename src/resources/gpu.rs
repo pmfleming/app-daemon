@@ -95,7 +95,9 @@ fn aggregate_gpu_clients(clients: HashMap<String, GpuClientStat>) -> GpuProcessS
 /// Counters use device/client/engine keys; occupancy is summed by device/engine.
 /// Keep the device in the key so separate GPUs are not treated as one engine.
 pub(super) fn engine_scope(client_engine: &str) -> String {
-    let (client, engine) = client_engine.rsplit_once('/').unwrap_or(("unknown/unknown", client_engine));
+    let (client, engine) = client_engine
+        .rsplit_once('/')
+        .unwrap_or(("unknown/unknown", client_engine));
     let (device, _) = client.rsplit_once('/').unwrap_or((client, "unknown"));
     format!("{device}/{engine}")
 }

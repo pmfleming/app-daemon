@@ -20,11 +20,23 @@ fn sums_gpu_clients_by_engine_then_processes_by_application() {
 
     let snapshot = ResourceSnapshot {
         processes: HashMap::from([
-            (42, ProcessUsage { gpu_engine_percent: engines, ..Default::default() }),
-            (43, ProcessUsage { gpu_engine_percent: HashMap::from([
-                ("0000:03:00.0/gfx".into(), 20.0),
-                ("0000:04:00.0/gfx".into(), 60.0),
-            ]), ..Default::default() }),
+            (
+                42,
+                ProcessUsage {
+                    gpu_engine_percent: engines,
+                    ..Default::default()
+                },
+            ),
+            (
+                43,
+                ProcessUsage {
+                    gpu_engine_percent: HashMap::from([
+                        ("0000:03:00.0/gfx".into(), 20.0),
+                        ("0000:04:00.0/gfx".into(), 60.0),
+                    ]),
+                    ..Default::default()
+                },
+            ),
         ]),
         ..Default::default()
     };
@@ -36,10 +48,13 @@ fn sums_gpu_clients_by_engine_then_processes_by_application() {
 #[test]
 fn caps_gpu_busy_only_after_aggregating_and_ignores_reused_pids() {
     let snapshot = ResourceSnapshot {
-        processes: HashMap::from([(42, ProcessUsage {
-            gpu_engine_percent: HashMap::from([("gpu/gfx".into(), 120.0)]),
-            ..Default::default()
-        })]),
+        processes: HashMap::from([(
+            42,
+            ProcessUsage {
+                gpu_engine_percent: HashMap::from([("gpu/gfx".into(), 120.0)]),
+                ..Default::default()
+            },
+        )]),
         ..Default::default()
     };
     let usage = snapshot.usage_for_roots([42]);
@@ -47,10 +62,15 @@ fn caps_gpu_busy_only_after_aggregating_and_ignores_reused_pids() {
     assert_eq!(usage.compute.gpu_percent, 120.0);
 
     let mut sampler = ResourceSampler::default();
-    sampler.previous_gpu_engines.insert((42, 1, "gpu/1/gfx".into()), 10);
+    sampler
+        .previous_gpu_engines
+        .insert((42, 1, "gpu/1/gfx".into()), 10);
     let gpu = GpuProcessStat {
         engine_nanoseconds: HashMap::from([("gpu/1/gfx".into(), 1_000_000_000)]),
         ..Default::default()
     };
-    assert_eq!(sampler.gpu_percent(42, 2, Some(&gpu), 1.0, &mut HashMap::new())["gpu/gfx"], 0.0);
+    assert_eq!(
+        sampler.gpu_percent(42, 2, Some(&gpu), 1.0, &mut HashMap::new())["gpu/gfx"],
+        0.0
+    );
 }
