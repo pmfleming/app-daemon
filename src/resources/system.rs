@@ -552,6 +552,9 @@ pub(super) fn read_process_memory(pid: u32) -> MemoryUsage {
     }
 }
 
+#[cfg(test)]
+mod disk_tests;
+
 pub(super) fn memory_key_values(value: &str) -> HashMap<String, u64> {
     value
         .lines()
