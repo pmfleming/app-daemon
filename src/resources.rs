@@ -347,7 +347,10 @@ impl ResourceSnapshot {
             aggregate.pss_processes += u64::from(process.memory.pss_available);
             aggregate.gpu_processes += u64::from(process.gpu_available);
             for (engine, percent) in &process.gpu_engine_percent {
-                *aggregate.gpu_engine_percent.entry(engine.clone()).or_default() += percent;
+                *aggregate
+                    .gpu_engine_percent
+                    .entry(engine.clone())
+                    .or_default() += percent;
             }
             aggregate.network_processes += u64::from(process.sockets.is_some());
             aggregate.storage_processes += u64::from(process.storage_available);
@@ -359,8 +362,11 @@ impl ResourceSnapshot {
                 .network_sockets
                 .extend(process.sockets.iter().flatten().copied());
         }
-        aggregate.usage.compute.gpu_busy_percent = aggregate.gpu_engine_percent
-            .values().copied().fold(0.0, f64::max);
+        aggregate.usage.compute.gpu_busy_percent = aggregate
+            .gpu_engine_percent
+            .values()
+            .copied()
+            .fold(0.0, f64::max);
         aggregate
     }
 
@@ -664,15 +670,17 @@ impl Default for ResourceSampler {
     }
 }
 
+type ProcessIdentity = (u32, u64);
+
 #[derive(Debug, Default)]
 struct MemoryCache {
-    samples: HashMap<u32, MemoryUsage>,
+    samples: HashMap<ProcessIdentity, MemoryUsage>,
     next_refresh: InstantSlot,
 }
 
 #[derive(Debug, Default)]
 struct OpenFileCache {
-    samples: HashMap<u32, Arc<ProcessFiles>>,
+    samples: HashMap<ProcessIdentity, Arc<ProcessFiles>>,
     next_refresh: InstantSlot,
 }
 
@@ -738,12 +746,21 @@ impl ResourceSampler {
         for members in cgroup_members_by_root.values() {
             active_processes.extend(members);
         }
+        active_processes.retain(|pid| current.contains_key(pid));
+        let identities = active_processes
+            .iter()
+            .map(|&pid| (pid, current[&pid].start_ticks))
+            .collect::<HashSet<_>>();
+        self.previous_sockets_by_pid.retain(|pid, _| {
+            current
+                .get(pid)
+                .zip(self.previous_processes.get(pid))
+                .is_some_and(|(current, previous)| current.start_ticks == previous.start_ticks)
+        });
         let current_gpu = provider.gpu_processes(&active_processes);
-        self.open_files
-            .refresh(provider.as_ref(), &active_processes, now);
+        self.open_files.refresh(provider.as_ref(), &identities, now);
         let mut network = self.sample_network(provider.as_ref(), &active_processes);
-        self.memory
-            .refresh(provider.as_ref(), &active_processes, now);
+        self.memory.refresh(provider.as_ref(), &identities, now);
         let sampled_io = active_processes
             .iter()
             .copied()
@@ -779,7 +796,13 @@ impl ResourceSampler {
         let mut current_io = HashMap::new();
         for (&pid, process) in &current {
             let cpu_percent = self.cpu_percent(pid, process, system_delta, logical_cpus);
-            let memory = self.memory.samples.get(&pid).copied().unwrap_or_default();
+            let identity = (pid, process.start_ticks);
+            let memory = self
+                .memory
+                .samples
+                .get(&identity)
+                .copied()
+                .unwrap_or_default();
             let sampled_io = sampled_io.get(&pid).copied().flatten();
             let io = self.io_delta(pid, process, sampled_io.unwrap_or_default());
             if let Some(value) = sampled_io {
@@ -797,7 +820,7 @@ impl ResourceSampler {
             let files = self
                 .open_files
                 .samples
-                .get(&pid)
+                .get(&identity)
                 .cloned()
                 .unwrap_or_default();
             snapshot.insert(
@@ -1055,44 +1078,58 @@ impl ResourceSampler {
 }
 
 impl MemoryCache {
-    fn refresh(&mut self, provider: &dyn ResourceProvider, pids: &HashSet<u32>, now: Instant) {
+    fn refresh(
+        &mut self,
+        provider: &dyn ResourceProvider,
+        identities: &HashSet<ProcessIdentity>,
+        now: Instant,
+    ) {
         let refresh = self.next_refresh.0.is_none_or(|deadline| now >= deadline);
-        self.samples.retain(|pid, _| pids.contains(pid));
+        self.samples
+            .retain(|identity, _| identities.contains(identity));
         if refresh {
-            self.samples = pids
+            self.samples = identities
                 .iter()
                 .copied()
-                .map(|pid| (pid, provider.process_memory(pid)))
+                .map(|identity| (identity, provider.process_memory(identity.0)))
                 .collect();
             self.next_refresh.0 = Some(now + MEMORY_REFRESH_INTERVAL);
         } else {
-            let missing = pids
+            let missing = identities
                 .iter()
-                .filter(|pid| !self.samples.contains_key(pid))
+                .filter(|identity| !self.samples.contains_key(identity))
                 .copied()
                 .collect::<Vec<_>>();
-            for pid in missing {
-                self.samples.insert(pid, provider.process_memory(pid));
+            for identity in missing {
+                self.samples
+                    .insert(identity, provider.process_memory(identity.0));
             }
         }
     }
 }
 
 impl OpenFileCache {
-    fn refresh(&mut self, provider: &dyn ResourceProvider, pids: &HashSet<u32>, now: Instant) {
+    fn refresh(
+        &mut self,
+        provider: &dyn ResourceProvider,
+        identities: &HashSet<ProcessIdentity>,
+        now: Instant,
+    ) {
         let refresh = self.next_refresh.0.is_none_or(|deadline| now >= deadline);
-        self.samples.retain(|pid, _| pids.contains(pid));
-        let requested: Vec<u32> = if refresh {
-            pids.iter().copied().collect()
+        self.samples
+            .retain(|identity, _| identities.contains(identity));
+        let requested: Vec<ProcessIdentity> = if refresh {
+            identities.iter().copied().collect()
         } else {
-            pids.iter()
-                .filter(|pid| !self.samples.contains_key(pid))
+            identities
+                .iter()
+                .filter(|identity| !self.samples.contains_key(identity))
                 .copied()
                 .collect()
         };
         let sampled = requested
             .into_iter()
-            .map(|pid| (pid, Arc::new(provider.process_files(pid))))
+            .map(|identity| (identity, Arc::new(provider.process_files(identity.0))))
             .collect::<Vec<_>>();
         if refresh {
             self.samples = sampled.into_iter().collect();
@@ -1150,12 +1187,14 @@ impl ResourceSnapshot {
 }
 
 #[cfg(test)]
-mod regression_tests;
+mod gpu_usage_tests;
 #[cfg(test)]
 mod network_tests;
 #[cfg(test)]
-mod gpu_usage_tests;
+mod regression_tests;
 #[cfg(test)]
 mod test_provider;
+#[cfg(test)]
+mod cache_tests;
 #[cfg(test)]
 mod tests;
