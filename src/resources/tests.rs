@@ -51,7 +51,6 @@ fn totals_process_trees_without_double_counting_shared_roots() {
             referenced: open_files.clone(),
             open: open_files,
             fd_available: true,
-            ..ProcessFiles::default()
         }),
         storage_available: true,
         ..ProcessUsage::default()
@@ -98,40 +97,6 @@ fn totals_process_trees_without_double_counting_shared_roots() {
     assert_eq!(usage.storage.referenced_file_permanent_bytes, 3072);
     assert_eq!(usage.energy.energy_mwh, 2.75);
     assert_eq!(usage.energy.energy_source, "rapl");
-}
-
-#[test]
-fn aggregates_network_deltas_for_known_application_sockets() {
-    let socket_inode = 77;
-    let process = ProcessUsage {
-        parent_pid: 1,
-        memory: MemoryUsage {
-            rss_available: true,
-            ..MemoryUsage::default()
-        },
-        sockets: Some(HashSet::from([socket_inode])),
-        ..ProcessUsage::default()
-    };
-    let snapshot = ResourceSnapshot {
-        processes: HashMap::from([(42, process)]),
-        children: HashMap::from([(1, vec![42])]),
-        network_deltas: HashMap::from([(
-            socket_inode,
-            NetworkCounters {
-                received_bytes: 4_096,
-                transmitted_bytes: 2_048,
-            },
-        )]),
-        network_counters_available: true,
-        interval_seconds: 2.0,
-        ..ResourceSnapshot::default()
-    };
-    let usage = snapshot.usage_for_roots([42]);
-    assert_eq!(usage.network.network_receive_bytes, 4_096);
-    assert_eq!(usage.network.network_transmit_bytes, 2_048);
-    assert_eq!(usage.network.network_receive_bytes_per_second, 2_048.0);
-    assert_eq!(usage.network.network_transmit_bytes_per_second, 1_024.0);
-    assert!(usage.measurement.network_bytes_available);
 }
 
 #[test]

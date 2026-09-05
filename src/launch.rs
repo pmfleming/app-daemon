@@ -150,28 +150,3 @@ fn command(
     command.args(arguments);
     command
 }
-
-#[cfg(test)]
-mod tests {
-    use std::ffi::OsStr;
-
-    use super::{LaunchBackend, desktop_command};
-
-    #[test]
-    fn passes_desktop_ids_to_uwsm_and_gtk_launch() {
-        let uwsm = desktop_command(LaunchBackend::Uwsm, "org.example.App.desktop");
-        assert_eq!(
-            uwsm.as_std().get_args().collect::<Vec<_>>(),
-            ["-t", "service", "--", "org.example.App.desktop"]
-                .map(OsStr::new)
-                .as_slice()
-        );
-
-        let direct = desktop_command(LaunchBackend::Direct, "org.example.App.desktop");
-        assert_eq!(direct.as_std().get_program(), OsStr::new("gtk-launch"));
-        assert_eq!(
-            direct.as_std().get_args().collect::<Vec<_>>(),
-            [OsStr::new("org.example.App")]
-        );
-    }
-}

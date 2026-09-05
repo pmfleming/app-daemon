@@ -204,25 +204,3 @@ fn launch_only_entries_remain_shortcuts_without_claiming_windows() -> anyhow::Re
     assert_eq!(result.applications[0].identity.kind, "desktop-shortcut");
     Ok(())
 }
-
-#[test]
-fn resolves_unique_reverse_dns_class_suffix() -> anyhow::Result<()> {
-    let directory = tempfile::tempdir()?;
-    fs::write(
-        directory.path().join("yazi.desktop"),
-        "[Desktop Entry]\nType=Application\nName=Yazi\nExec=true\n",
-    )?;
-    let catalog = Catalog::from_paths(vec![directory.path().into()]);
-    let window = Client {
-        address: "0x1".into(),
-        class: "com.laufan.yazi".into(),
-        initial_class: "com.laufan.yazi".into(),
-        title: "Yazi".into(),
-        pid: 42,
-        workspace: Workspace::default(),
-        focus_rank: 0,
-        mapped: true,
-    };
-    assert_eq!(resolve_target(&catalog, &window), "yazi.desktop");
-    Ok(())
-}

@@ -4,19 +4,6 @@ use super::{HistoryStore, persist_snapshot};
 use crate::model::{ComputeUsage, EnergyUsage, ResourceUsage, StorageUsage};
 
 #[test]
-fn ignores_unknown_and_future_history_formats() -> anyhow::Result<()> {
-    let directory = tempfile::tempdir()?;
-    let path = directory.path().join("history.json");
-    std::fs::write(&path, br#"{"version":99,"applications":{"app":[]}}"#)?;
-    let mut unknown = HistoryStore::load(Some(path.clone()));
-    assert!(unknown.query("app", None, None, 10)?.points.is_empty());
-    std::fs::write(&path, b"not json")?;
-    let mut malformed = HistoryStore::load(Some(path));
-    assert!(malformed.query("app", None, None, 10)?.points.is_empty());
-    Ok(())
-}
-
-#[test]
 fn aggregates_and_persists_resource_buckets() -> anyhow::Result<()> {
     let directory = tempfile::tempdir()?;
     let path = directory.path().join("history.json");

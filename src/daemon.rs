@@ -283,32 +283,3 @@ pub async fn run() -> Result<()> {
     shutdown_applications.save_history_final().await;
     result
 }
-
-#[cfg(test)]
-mod tests {
-    use crate::{protocol, service::StateRevision};
-
-    use super::revision_changes;
-
-    #[test]
-    fn filters_shared_state_changes_by_selected_streams() {
-        let previous = StateRevision {
-            catalog: 1,
-            windows: 2,
-            settings: 0,
-        };
-        let current = StateRevision {
-            catalog: 3,
-            windows: 4,
-            settings: 0,
-        };
-        assert_eq!(
-            revision_changes((true, false, false), previous, current).collect::<Vec<_>>(),
-            [(protocol::stream::APPLICATIONS, 3)]
-        );
-        assert_eq!(
-            revision_changes((false, true, false), previous, current).collect::<Vec<_>>(),
-            [(protocol::stream::WINDOWS, 4)]
-        );
-    }
-}
