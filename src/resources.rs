@@ -296,9 +296,9 @@ impl ResourceSnapshot {
     }
 
     fn resource_attribution(&self, roots: impl IntoIterator<Item = u32>) -> ResourceAttribution {
-        let roots = roots.into_iter().filter(|pid| *pid > 0).collect::<Vec<_>>();
+        let roots = roots.into_iter().filter(|pid| *pid > 0).collect::<HashSet<_>>();
         let mut attribution = ResourceAttribution {
-            roots: roots.iter().copied().collect(),
+            roots: roots.clone(),
             pids: HashSet::new(),
             cgroup_paths: HashSet::new(),
             cgroup_roots: 0,
@@ -1106,3 +1106,5 @@ impl ResourceSnapshot {
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod regression_tests;
