@@ -109,11 +109,7 @@ fn aggregates_network_deltas_for_known_application_sockets() {
             rss_available: true,
             ..MemoryUsage::default()
         },
-        files: Arc::new(ProcessFiles {
-            sockets: HashSet::from([socket_inode]),
-            fd_available: true,
-            ..ProcessFiles::default()
-        }),
+        sockets: Some(HashSet::from([socket_inode])),
         ..ProcessUsage::default()
     };
     let snapshot = ResourceSnapshot {
@@ -144,11 +140,7 @@ fn includes_descendants_that_move_out_of_an_application_cgroup() {
     let process = |parent_pid, cpu_percent, sockets| ProcessUsage {
         parent_pid,
         cpu_percent,
-        files: Arc::new(ProcessFiles {
-            sockets,
-            fd_available: true,
-            ..ProcessFiles::default()
-        }),
+        sockets: Some(sockets),
         ..ProcessUsage::default()
     };
     let path = "/user.slice/app-example.scope".to_owned();

@@ -25,8 +25,8 @@ pub(crate) use system::process_cgroup;
 use system::{
     application_disk_usage, cgroup_members_for_paths, cgroup_paths_for_roots, descendants,
     merge_disk_files, process_children, read_cgroup_counters, read_cgroup_members,
-    read_process_file_sets, read_process_io, read_process_memory, read_processes, read_system_cpu,
-    shared_target_pids,
+    read_process_file_sets, read_process_io, read_process_memory, read_process_sockets,
+    read_processes, read_system_cpu, shared_target_pids,
 };
 
 #[derive(Debug, Clone, Copy)]
@@ -103,6 +103,7 @@ struct ProcessUsage {
     gpu_memory_allocated_bytes: u64,
     io: ProcessIo,
     files: Arc<ProcessFiles>,
+    sockets: Option<HashSet<u64>>,
     storage_available: bool,
 }
 
@@ -128,6 +129,7 @@ trait ResourceProvider: Debug + EnergyProvider + Send + Sync {
     fn process_memory(&self, pid: u32) -> MemoryUsage;
     fn process_io(&self, pid: u32) -> Option<ProcessIo>;
     fn process_files(&self, pid: u32) -> ProcessFiles;
+    fn process_sockets(&self, pid: u32) -> Option<HashSet<u64>>;
     fn network_counters(&self, inodes: &HashSet<u64>) -> Option<HashMap<u64, NetworkCounters>>;
     fn gpu_processes(&self, pids: &HashSet<u32>) -> HashMap<u32, GpuProcessStat>;
     fn process_cgroup(&self, pid: u32) -> Option<String>;
@@ -168,6 +170,10 @@ impl ResourceProvider for LinuxResourceProvider {
 
     fn process_files(&self, pid: u32) -> ProcessFiles {
         read_process_file_sets(pid)
+    }
+
+    fn process_sockets(&self, pid: u32) -> Option<HashSet<u64>> {
+        read_process_sockets(pid)
     }
 
     fn network_counters(&self, inodes: &HashSet<u64>) -> Option<HashMap<u64, NetworkCounters>> {
@@ -237,6 +243,7 @@ impl Default for ResourceSnapshot {
 }
 
 struct SampledNetwork {
+    sockets_by_pid: HashMap<u32, HashSet<u64>>,
     current: HashMap<u64, NetworkCounters>,
     deltas: HashMap<u64, NetworkCounters>,
     available: bool,
@@ -296,7 +303,10 @@ impl ResourceSnapshot {
     }
 
     fn resource_attribution(&self, roots: impl IntoIterator<Item = u32>) -> ResourceAttribution {
-        let roots = roots.into_iter().filter(|pid| *pid > 0).collect::<HashSet<_>>();
+        let roots = roots
+            .into_iter()
+            .filter(|pid| *pid > 0)
+            .collect::<HashSet<_>>();
         let mut attribution = ResourceAttribution {
             roots: roots.clone(),
             pids: HashSet::new(),
@@ -336,13 +346,15 @@ impl ResourceSnapshot {
             aggregate.memory_processes += u64::from(process.memory.rss_available);
             aggregate.pss_processes += u64::from(process.memory.pss_available);
             aggregate.gpu_processes += u64::from(process.gpu_available);
-            aggregate.network_processes += u64::from(process.files.fd_available);
+            aggregate.network_processes += u64::from(process.sockets.is_some());
             aggregate.storage_processes += u64::from(process.storage_available);
-            merge_disk_files(&mut aggregate.open_files, &process.files.open);
-            merge_disk_files(&mut aggregate.referenced_files, &process.files.referenced);
+            if process.files.fd_available {
+                merge_disk_files(&mut aggregate.open_files, &process.files.open);
+                merge_disk_files(&mut aggregate.referenced_files, &process.files.referenced);
+            }
             aggregate
                 .network_sockets
-                .extend(process.files.sockets.iter().copied());
+                .extend(process.sockets.iter().flatten().copied());
         }
         aggregate
     }
@@ -619,6 +631,8 @@ pub struct ResourceSampler {
     previous_system_ticks: Option<u64>,
     previous_cgroups: HashMap<String, CgroupCounters>,
     previous_network_counters: HashMap<u64, NetworkCounters>,
+    previous_sockets_by_pid: HashMap<u32, HashSet<u64>>,
+    previous_network_available: bool,
     previous_sample: Option<Instant>,
     memory: MemoryCache,
     open_files: OpenFileCache,
@@ -635,6 +649,8 @@ impl Default for ResourceSampler {
             previous_system_ticks: None,
             previous_cgroups: HashMap::new(),
             previous_network_counters: HashMap::new(),
+            previous_sockets_by_pid: HashMap::new(),
+            previous_network_available: false,
             previous_sample: None,
             memory: MemoryCache::default(),
             open_files: OpenFileCache::default(),
@@ -660,7 +676,6 @@ struct OpenFileCache {
 struct ProcessFiles {
     open: HashMap<DiskFileId, DiskFile>,
     referenced: HashMap<DiskFileId, DiskFile>,
-    sockets: HashSet<u64>,
     fd_available: bool,
 }
 
@@ -720,7 +735,9 @@ impl ResourceSampler {
             active_processes.extend(members);
         }
         let current_gpu = provider.gpu_processes(&active_processes);
-        let network = self.sample_network(provider.as_ref(), &active_processes, now);
+        self.open_files
+            .refresh(provider.as_ref(), &active_processes, now);
+        let mut network = self.sample_network(provider.as_ref(), &active_processes);
         self.memory
             .refresh(provider.as_ref(), &active_processes, now);
         let sampled_io = active_processes
@@ -794,6 +811,7 @@ impl ResourceSampler {
                     gpu_memory_allocated_bytes: gpu.map_or(0, |gpu| gpu.allocated_memory_bytes),
                     io,
                     files,
+                    sockets: network.sockets_by_pid.remove(&pid),
                     storage_available: sampled_io.is_some(),
                 },
             );
@@ -813,14 +831,28 @@ impl ResourceSampler {
         &mut self,
         provider: &dyn ResourceProvider,
         active_processes: &HashSet<u32>,
-        now: Instant,
     ) -> SampledNetwork {
-        self.open_files.refresh(provider, active_processes, now);
-        let sockets = self
-            .open_files
-            .samples
+        // Socket discovery is lightweight and must not share the file-footprint TTL.
+        let sockets_by_pid = active_processes
+            .iter()
+            .filter_map(|&pid| Some((pid, provider.process_sockets(pid)?)))
+            .collect::<HashMap<_, _>>();
+        let sockets = sockets_by_pid
             .values()
-            .flat_map(|files| files.sockets.iter().copied())
+            .flatten()
+            .copied()
+            .collect::<HashSet<_>>();
+        let previous_sockets = self
+            .previous_sockets_by_pid
+            .values()
+            .flatten()
+            .copied()
+            .collect::<HashSet<_>>();
+        let newly_opened = sockets_by_pid
+            .iter()
+            .filter(|(pid, _)| self.previous_sockets_by_pid.contains_key(pid))
+            .flat_map(|(_, sockets)| sockets.iter().copied())
+            .filter(|inode| !previous_sockets.contains(inode))
             .collect::<HashSet<_>>();
         let sampled = provider.network_counters(&sockets);
         let available = sampled.is_some();
@@ -832,7 +864,16 @@ impl ResourceSampler {
                     .previous_network_counters
                     .get(&inode)
                     .copied()
-                    .unwrap_or(counters);
+                    .unwrap_or_else(|| {
+                        // Baseline existing sockets on startup, newly attributed processes,
+                        // or recovery. Include initial bytes only for newly opened sockets
+                        // in processes whose descriptors we observed last interval.
+                        if self.previous_network_available && newly_opened.contains(&inode) {
+                            NetworkCounters::default()
+                        } else {
+                            counters
+                        }
+                    });
                 (
                     inode,
                     NetworkCounters {
@@ -846,7 +887,10 @@ impl ResourceSampler {
                 )
             })
             .collect();
+        self.previous_sockets_by_pid = sockets_by_pid.clone();
+        self.previous_network_available = available;
         SampledNetwork {
+            sockets_by_pid,
             current,
             deltas,
             available,
@@ -1105,6 +1149,10 @@ impl ResourceSnapshot {
 }
 
 #[cfg(test)]
-mod tests;
-#[cfg(test)]
 mod regression_tests;
+#[cfg(test)]
+mod network_tests;
+#[cfg(test)]
+mod test_provider;
+#[cfg(test)]
+mod tests;

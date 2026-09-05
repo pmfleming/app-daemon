@@ -301,7 +301,7 @@ pub(super) fn descendants(
 
 pub(super) fn read_process_file_sets(pid: u32) -> ProcessFiles {
     let fd_directory = format!("/proc/{pid}/fd");
-    let Some((open, sockets)) = read_open_files_and_sockets(&fd_directory) else {
+    let Some(open) = read_open_files(&fd_directory) else {
         return ProcessFiles::default();
     };
     let mut referenced = open.clone();
@@ -312,29 +312,34 @@ pub(super) fn read_process_file_sets(pid: u32) -> ProcessFiles {
     ProcessFiles {
         open,
         referenced,
-        sockets,
         fd_available: true,
     }
 }
 
-pub(super) fn read_open_files_and_sockets(
-    directory: &str,
-) -> Option<(HashMap<DiskFileId, DiskFile>, HashSet<u64>)> {
+pub(super) fn read_process_sockets(pid: u32) -> Option<HashSet<u64>> {
+    let entries = fs::read_dir(format!("/proc/{pid}/fd")).ok()?;
+    Some(
+        entries
+            .filter_map(Result::ok)
+            .filter_map(|entry| {
+                let link = fs::read_link(entry.path()).ok()?;
+                link.to_str()?
+                    .strip_prefix("socket:[")?
+                    .strip_suffix(']')?
+                    .parse()
+                    .ok()
+            })
+            .collect(),
+    )
+}
+
+fn read_open_files(directory: &str) -> Option<HashMap<DiskFileId, DiskFile>> {
     let entries = fs::read_dir(directory).ok()?;
     let mut files = HashMap::new();
-    let mut sockets = HashSet::new();
     for entry in entries.filter_map(Result::ok) {
         let Ok(link) = fs::read_link(entry.path()) else {
             continue;
         };
-        if let Some(inode) = link
-            .to_str()
-            .and_then(|value| value.strip_prefix("socket:["))
-            .and_then(|value| value.strip_suffix(']'))
-            .and_then(|value| value.parse().ok())
-        {
-            sockets.insert(inode);
-        }
         let Ok(metadata) = fs::metadata(entry.path()) else {
             continue;
         };
@@ -351,7 +356,7 @@ pub(super) fn read_open_files_and_sockets(
             );
         }
     }
-    Some((files, sockets))
+    Some(files)
 }
 
 pub(super) fn read_regular_files(directory: &str) -> HashMap<DiskFileId, DiskFile> {
