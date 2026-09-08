@@ -9,7 +9,7 @@ use std::{
 
 use super::{APP_DISK_REFRESH_INTERVAL, DiskBreakdown, ResourceProvider};
 
-const WORKERS: usize = 2;
+pub(super) const WORKERS: usize = 2;
 
 #[derive(Debug)]
 struct DiskResult {

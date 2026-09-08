@@ -1,4 +1,6 @@
 pub mod api;
+#[cfg(feature = "benchmarks")]
+pub mod benchmarks;
 pub mod catalog;
 pub mod client;
 pub mod daemon;

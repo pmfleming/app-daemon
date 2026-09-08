@@ -26,6 +26,8 @@ use crate::{
 };
 
 mod action;
+#[cfg(feature = "benchmarks")]
+pub(crate) mod benchmarks;
 mod identity;
 mod query;
 

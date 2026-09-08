@@ -1,0 +1,58 @@
+{
+  "schema_version": 1,
+  "application_base_commit": "1a980c2",
+  "description": "Application code at step 3 plus the benchmark harness in the commit containing this file",
+  "rustc": "1.95.0 (59807616e 2026-04-14)",
+  "llvm": "21.1.8",
+  "cpu": "AMD Ryzen 7 PRO 8840HS w/ Radeon 780M Graphics",
+  "logical_cpus": 16,
+  "profile": "release",
+  "iterations_per_phase": 500,
+  "warmup_iterations": 20,
+  "repetitions": 3,
+  "allocation_scope": "calling thread, including synthetic provider and counter updates; not worker threads",
+  "fixture": {
+    "catalog_entries": 1000,
+    "windows": 200,
+    "processes": 1000,
+    "active_processes": 256,
+    "targets": 64
+  },
+  "measurements": [
+    {
+      "name": "query/empty",
+      "median_us_by_run": [773.511, 767.319, 766.929],
+      "p95_us_by_run": [1092.098, 1009.984, 1016.065],
+      "allocations_per_iteration": 22801,
+      "allocated_bytes_per_iteration": 2312402
+    },
+    {
+      "name": "query/search",
+      "median_us_by_run": [1097.939, 1113.488, 1097.829],
+      "p95_us_by_run": [1437.836, 1386.67, 1369.639],
+      "allocations_per_iteration": 28214,
+      "allocated_bytes_per_iteration": 1811876
+    },
+    {
+      "name": "identity/no-cgroup",
+      "median_us_by_run": [503.945, 504.105, 502.943],
+      "p95_us_by_run": [521.057, 515.216, 513.883],
+      "allocations_per_iteration": 200,
+      "allocated_bytes_per_iteration": 3200
+    },
+    {
+      "name": "sampling/warm",
+      "median_us_by_run": [373.791, 369.362, 365.325],
+      "p95_us_by_run": [562.575, 456.195, 443.482],
+      "allocations_per_iteration": 2613,
+      "allocated_bytes_per_iteration": 1453865
+    },
+    {
+      "name": "sampling/blocked-disk-workers",
+      "median_us_by_run": [361.017, 356.008, 363.111],
+      "p95_us_by_run": [458.57, 414.988, 478.106],
+      "allocations_per_iteration": 2548,
+      "allocated_bytes_per_iteration": 1440567
+    }
+  ]
+}

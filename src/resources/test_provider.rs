@@ -20,7 +20,7 @@ pub(super) struct TestProvider {
     pub disk_started: Mutex<Option<std::sync::mpsc::Sender<String>>>,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 pub(super) struct TestState {
     pub system_ticks: u64,
     pub processes: HashMap<u32, ProcessStat>,

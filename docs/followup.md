@@ -40,3 +40,18 @@ to exercise the production timeout. Real UWSM/systemd and compositor behavior
 remain outside this simulated-command integration boundary.
 
 Validation: all 29 tests, strict all-target Clippy, formatting, and diff checks.
+
+## 4. Performance evidence before further optimization
+
+Added an opt-in `cargo bench --features benchmarks --bench workloads --locked`
+harness. Normal daemon builds retain their allocator and dependencies unchanged
+except for optional manifest entries. It measures query presentation, pure
+identity resolution, warm sampling/allocation, and publication with blocked disk
+workers. The test provider is reused only in benchmark-feature builds.
+
+Three release runs of 500 iterations per timing/allocation phase are recorded in
+`benchmarks/baseline.json`; scope and limitations are in `benchmarks/README.md`.
+Median-of-medians: empty query 767 µs, search 1,098 µs, pure identity 504 µs,
+sampling 369 µs, sampling with blocked disk workers 361 µs. Allocations were
+stable across the three runs. These are synthetic, instrumented measurements,
+not a pre/post optimization comparison or a desktop latency SLA.

@@ -1082,13 +1082,15 @@ impl<T> ProcessCache<T> {
     }
 }
 
+#[cfg(feature = "benchmarks")]
+pub(crate) mod benchmarks;
 #[cfg(test)]
 mod cache_tests;
 #[cfg(test)]
 mod gpu_usage_tests;
 #[cfg(test)]
 mod network_tests;
-#[cfg(test)]
+#[cfg(any(test, feature = "benchmarks"))]
 mod test_provider;
 #[cfg(test)]
 mod tests;
