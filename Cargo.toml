@@ -27,4 +27,5 @@ walkdir = "2"
 zbus = { version = "5", features = ["tokio"] }
 
 [dev-dependencies]
+rustix = { version = "1", features = ["process"] }
 tempfile = "3"

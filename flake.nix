@@ -31,6 +31,7 @@
             '';
             cargoLock.lockFile = ./Cargo.lock;
             nativeBuildInputs = [ pkgs.makeWrapper ];
+            nativeCheckInputs = [ pkgs.bash pkgs.coreutils pkgs.dbus ];
             strictDeps = true;
             postInstall = ''
               install -Dm644 ${./packaging/systemd/app-daemon.service} $out/share/systemd/user/app-daemon.service
@@ -85,6 +86,9 @@
         system: pkgs: {
           default = pkgs.mkShell {
             packages = with pkgs; [
+              bash
+              coreutils
+              dbus
               cargo
               cargo-llvm-cov
               clippy

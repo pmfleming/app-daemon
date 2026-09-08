@@ -20,3 +20,23 @@ locally; no remote push is part of this work.
 Validation: 25 tests, strict all-target Clippy, formatting, and diff checks.
 Performance changes are not assumed from this structural refactor; measurement
 is a separate step below.
+
+## 3. Integration failure modes
+
+Added four private-session integration scenarios (25 unit + 4 integration tests):
+D-Bus validation/subscription ownership; UWSM launch and desktop-action handoff,
+reported failures, the real ten-second timeout and owner-only cancellation;
+direct-launch detachment across daemon shutdown; and pending-handoff termination
+with a final history save. These exercise the built daemon executable and real
+D-Bus transport, not mock calls to private service methods.
+
+Each daemon gets a private `dbus-daemon`, isolated HOME/XDG roots, and a PATH
+containing only fixture launchers and a fixture `hyprctl`. No real desktop is
+required or modified. Process cleanup is bounded, including detached fixture
+applications. Nix check/dev dependencies now include D-Bus, bash, and coreutils.
+Run `cargo test --test session --locked`; missing tools fail explicitly rather
+than silently skipping these tests. One scenario intentionally takes ten seconds
+to exercise the production timeout. Real UWSM/systemd and compositor behavior
+remain outside this simulated-command integration boundary.
+
+Validation: all 29 tests, strict all-target Clippy, formatting, and diff checks.
