@@ -1,4 +1,5 @@
-use super::*;
+use super::{GpuProcessStat, ProcessUsage, ResourceSampler, ResourceSnapshot};
+use std::collections::HashMap;
 
 #[test]
 fn sums_gpu_clients_by_engine_then_processes_by_application() {

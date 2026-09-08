@@ -1,4 +1,5 @@
-use super::*;
+use super::{CgroupUsage, ProcessUsage, ResourceSnapshot};
+use std::collections::{HashMap, HashSet};
 
 #[test]
 fn duplicate_window_pids_preserve_cgroup_totals() {

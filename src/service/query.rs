@@ -77,26 +77,11 @@ pub(super) fn page(
             .into_iter()
             .map(|(id, clients)| summary_for_unmatched(id, clients, resources, revision)),
     );
-    applications = applications
-        .into_iter()
-        .filter(|application| {
-            params.category.is_empty() || application.identity.category == params.category
-        })
-        .filter_map(|mut application| {
-            let matched = search_match(&application, &params.query)?;
-            application.match_score = matched.score;
-            application.match_kind = matched.kind.into();
-            application.score = if params.query.trim().is_empty() {
-                application.runtime_score
-            } else {
-                matched
-                    .score
-                    .saturating_mul(100_000)
-                    .saturating_add(application.runtime_score)
-            };
-            Some(application)
-        })
-        .collect();
+    let query = params.query.trim().to_lowercase();
+    applications.retain_mut(|application| {
+        (params.category.is_empty() || application.identity.category == params.category)
+            && rank(application, &query)
+    });
     applications.sort_by(|left, right| {
         right
             .score
@@ -374,8 +359,25 @@ struct SearchMatch {
     kind: &'static str,
 }
 
+fn rank(application: &mut ApplicationSummary, query: &str) -> bool {
+    let Some(matched) = search_match(application, query) else {
+        return false;
+    };
+    application.match_score = matched.score;
+    application.match_kind = matched.kind.into();
+    application.score = if query.is_empty() {
+        application.runtime_score
+    } else {
+        matched
+            .score
+            .saturating_mul(100_000)
+            .saturating_add(application.runtime_score)
+    };
+    true
+}
+
+// The caller normalizes the query once for the entire page.
 fn search_match(application: &ApplicationSummary, query: &str) -> Option<SearchMatch> {
-    let query = query.trim().to_lowercase();
     if query.is_empty() {
         return Some(SearchMatch {
             score: 0,
@@ -386,31 +388,25 @@ fn search_match(application: &ApplicationSummary, query: &str) -> Option<SearchM
     let name = application.identity.name.to_lowercase();
     let id = application.identity.id.to_lowercase();
     let id_stem = id.trim_end_matches(".desktop");
-    let searchable = search_values(application).join(" ").to_lowercase();
-    let acronym = search_acronym(application);
+    let values = search_values(application);
+    let searchable = values.join(" ").to_lowercase();
+    let acronym = search_acronym(&values);
     let tokens = query.split_whitespace().collect::<Vec<_>>();
     if !all_terms_match(&tokens, &searchable, &acronym) {
         return None;
     }
 
-    if let Some(matched) = direct_match(&name, &id, id_stem, &query) {
-        return Some(matched);
-    }
     let name_penalty = name.len().min(500) as i64;
     let id_penalty = id.len().min(500) as i64;
-    if let Some(matched) = substring_match(&name, &query, 9_500, 10, name_penalty, "name-substring")
-        .or_else(|| substring_match(&id, &query, 9_000, 10, id_penalty, "id-substring"))
-        .or_else(|| substring_match(&searchable, &query, 7_500, 1, 0, "metadata"))
-    {
-        return Some(matched);
-    }
-    if let Some(matched) = acronym_match(&query, &acronym) {
-        return Some(matched);
-    }
-    Some(SearchMatch {
-        score: 5_000 - tokens.len() as i64,
-        kind: "terms",
-    })
+    direct_match(&name, &id, id_stem, query)
+        .or_else(|| substring_match(&name, query, 9_500, 10, name_penalty, "name-substring"))
+        .or_else(|| substring_match(&id, query, 9_000, 10, id_penalty, "id-substring"))
+        .or_else(|| substring_match(&searchable, query, 7_500, 1, 0, "metadata"))
+        .or_else(|| acronym_match(query, &acronym))
+        .or(Some(SearchMatch {
+            score: 5_000 - tokens.len() as i64,
+            kind: "terms",
+        }))
 }
 
 fn all_terms_match(tokens: &[&str], searchable: &str, acronym: &str) -> bool {
@@ -442,34 +438,20 @@ fn substring_match(
 }
 
 fn direct_match(name: &str, id: &str, id_stem: &str, query: &str) -> Option<SearchMatch> {
-    exact_match(name, id, id_stem, query).or_else(|| prefix_match(name, id, id_stem, query))
-}
-
-fn exact_match(name: &str, id: &str, id_stem: &str, query: &str) -> Option<SearchMatch> {
-    if name == query {
-        Some(ranked_match(12_000, name.len(), "exact-name"))
-    } else if id == query || id_stem == query {
-        Some(ranked_match(11_800, id.len(), "exact-id"))
-    } else {
-        None
-    }
-}
-
-fn prefix_match(name: &str, id: &str, id_stem: &str, query: &str) -> Option<SearchMatch> {
-    if name.starts_with(query) {
-        Some(ranked_match(11_500, name.len(), "name-prefix"))
-    } else if id.starts_with(query) || id_stem.starts_with(query) {
-        Some(ranked_match(11_000, id.len(), "id-prefix"))
-    } else {
-        None
-    }
-}
-
-fn ranked_match(base: i64, length: usize, kind: &'static str) -> SearchMatch {
-    SearchMatch {
-        score: base - length.min(500) as i64,
-        kind,
-    }
+    // Ordered tiers: an exact ID beats a name prefix, even for long names.
+    [
+        (name == query, 12_000, name, "exact-name"),
+        (id == query || id_stem == query, 11_800, id, "exact-id"),
+        (name.starts_with(query), 11_500, name, "name-prefix"),
+        (id.starts_with(query), 11_000, id, "id-prefix"),
+    ]
+    .into_iter()
+    .find_map(|(matches, base, value, kind)| {
+        matches.then(|| SearchMatch {
+            score: base - value.len().min(500) as i64,
+            kind,
+        })
+    })
 }
 
 fn search_values(application: &ApplicationSummary) -> Vec<&str> {
@@ -493,13 +475,16 @@ fn search_values(application: &ApplicationSummary) -> Vec<&str> {
     .collect()
 }
 
-fn search_acronym(application: &ApplicationSummary) -> String {
+fn search_acronym(values: &[&str]) -> String {
     let mut acronym = String::new();
-    for value in search_values(application) {
+    for value in values {
         append_initials(&mut acronym, value);
     }
     acronym
 }
+
+#[cfg(test)]
+mod tests;
 
 fn append_initials(acronym: &mut String, value: &str) {
     let mut previous_alphanumeric = false;

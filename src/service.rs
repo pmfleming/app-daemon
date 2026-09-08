@@ -31,8 +31,6 @@ mod query;
 pub use action::{ApplicationAction, ExecuteParams};
 use action::{execute_action, operation_result};
 pub use query::QueryParams;
-#[cfg(test)]
-use query::resolve_target_with_cgroup;
 use query::{combined_revision, page, resolve_target};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

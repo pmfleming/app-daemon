@@ -1,8 +1,8 @@
 use crate::{
     metrics::{available_label, merge_label, rounded},
     model::{
-        ComputeUsage, HistoricalResourceUsage, NetworkUsage, ResourceHistoryPoint, ResourcePeaks,
-        ResourceAvailability, ResourceUsage, StorageUsage,
+        ComputeUsage, HistoricalResourceUsage, NetworkUsage, ResourceAvailability,
+        ResourceHistoryPoint, ResourcePeaks, ResourceUsage, StorageUsage,
     },
 };
 

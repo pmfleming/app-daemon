@@ -40,7 +40,9 @@ mod tests {
     use serde_json::Value;
 
     use super::{METHODS, STREAMS, VERSION, contract_fixture, resource_contract_fixture};
-    use crate::model::{HistoricalResourceUsage, ResourceAvailability, ResourceHistoryPoint, ResourceUsage};
+    use crate::model::{
+        HistoricalResourceUsage, ResourceAvailability, ResourceHistoryPoint, ResourceUsage,
+    };
 
     fn leaf_paths(value: &Value, prefix: &str, paths: &mut BTreeSet<String>) {
         let Some(object) = value.as_object() else {

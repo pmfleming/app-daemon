@@ -30,13 +30,11 @@ fn totals_process_trees_without_double_counting_shared_roots() {
             },
         )
     };
-    let process = |parent_pid,
-                   cpu_percent,
+    let process = |cpu_percent,
                    memory_bytes,
                    disk_read_bytes,
                    disk_write_bytes,
                    open_files: HashMap<_, _>| ProcessUsage {
-        parent_pid,
         cpu_percent,
         memory: MemoryUsage {
             rss_bytes: memory_bytes,
@@ -59,7 +57,6 @@ fn totals_process_trees_without_double_counting_shared_roots() {
         (
             10,
             process(
-                1,
                 2.0,
                 100,
                 10,
@@ -69,9 +66,9 @@ fn totals_process_trees_without_double_counting_shared_roots() {
         ),
         (
             11,
-            process(10, 3.5, 200, 30, 40, HashMap::from([file(1, 1024)])),
+            process(3.5, 200, 30, 40, HashMap::from([file(1, 1024)])),
         ),
-        (20, process(1, 1.0, 50, 50, 60, HashMap::new())),
+        (20, process(1.0, 50, 50, 60, HashMap::new())),
     ]);
     let children = HashMap::from([(1, vec![10, 20]), (10, vec![11])]);
     let snapshot = ResourceSnapshot {
@@ -102,17 +99,16 @@ fn totals_process_trees_without_double_counting_shared_roots() {
 #[test]
 fn includes_descendants_that_move_out_of_an_application_cgroup() {
     let socket_inode = 88;
-    let process = |parent_pid, cpu_percent, sockets| ProcessUsage {
-        parent_pid,
+    let process = |cpu_percent, sockets| ProcessUsage {
         cpu_percent,
-        sockets: Some(sockets),
+        sockets: Some(Arc::new(sockets)),
         ..ProcessUsage::default()
     };
     let path = "/user.slice/app-example.scope".to_owned();
     let snapshot = ResourceSnapshot {
         processes: HashMap::from([
-            (10, process(1, 2.0, HashSet::new())),
-            (11, process(10, 5.0, HashSet::from([socket_inode]))),
+            (10, process(2.0, HashSet::new())),
+            (11, process(5.0, HashSet::from([socket_inode]))),
         ]),
         children: HashMap::from([(1, vec![10]), (10, vec![11])]),
         cgroup_members_by_root: HashMap::from([(10, HashSet::from([10]))]),

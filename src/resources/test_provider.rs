@@ -1,7 +1,15 @@
-use super::*;
+use super::{
+    BatterySample, CgroupCounters, DiskBreakdown, EnergyProvider, GpuProcessStat, MemoryUsage,
+    NetworkCounters, ProcessFiles, ProcessIo, ProcessStat, ResourceProvider,
+};
 use std::sync::{
     Mutex,
     atomic::{AtomicU64, Ordering},
+};
+use std::{
+    collections::{HashMap, HashSet},
+    path::PathBuf,
+    sync::Arc,
 };
 
 #[derive(Debug, Default)]

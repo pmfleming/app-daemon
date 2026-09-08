@@ -112,15 +112,20 @@ impl DiskScanBudget {
     }
 }
 
+fn is_directory(root: &Path) -> Option<bool> {
+    match fs::symlink_metadata(root) {
+        Ok(metadata) => Some(metadata.is_dir()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Some(false),
+        Err(_) => None,
+    }
+}
+
 fn allocated_directory_bytes(roots: &[PathBuf], budget: &mut DiskScanBudget) -> Option<u64> {
     let mut files = HashMap::<DiskFileId, u64>::new();
     for root in roots {
         budget.visit()?;
-        match fs::symlink_metadata(root) {
-            Ok(metadata) if metadata.is_dir() => {},
-            Ok(_) => continue,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(_) => return None,
+        if !is_directory(root)? {
+            continue;
         }
         for entry in walkdir::WalkDir::new(root)
             .follow_links(false)
@@ -134,10 +139,12 @@ fn allocated_directory_bytes(roots: &[PathBuf], budget: &mut DiskScanBudget) -> 
                 continue;
             }
             let metadata = entry.metadata().ok()?;
-            files.entry(DiskFileId {
-                device: metadata.dev(),
-                inode: metadata.ino(),
-            }).or_insert_with(|| metadata.blocks().saturating_mul(512));
+            files
+                .entry(DiskFileId {
+                    device: metadata.dev(),
+                    inode: metadata.ino(),
+                })
+                .or_insert_with(|| metadata.blocks().saturating_mul(512));
         }
     }
     (std::time::Instant::now() < budget.deadline).then(|| files.values().copied().sum())
@@ -245,13 +252,11 @@ pub(super) fn specific_application_cgroup(path: &str) -> bool {
 
 pub(super) fn read_cgroup_counters(path: &str) -> Option<CgroupCounters> {
     let root = Path::new("/sys/fs/cgroup").join(path.trim_start_matches('/'));
-    let cpu = fs::read_to_string(root.join("cpu.stat"))
-        .ok()
-        .map(|value| whitespace_key_values(&value))?;
+    let cpu = fs::read_to_string(root.join("cpu.stat")).ok()?;
+    let cpu = whitespace_key_values(&cpu);
     let mut counters = CgroupCounters {
         cpu_usage_usec: cpu.get("usage_usec").copied().unwrap_or(0),
         memory_bytes: read_number(&root.join("memory.current")),
-        swap_bytes: read_number(&root.join("memory.swap.current")),
         ..CgroupCounters::default()
     };
     if let Ok(io) = fs::read_to_string(root.join("io.stat")) {
@@ -273,11 +278,11 @@ pub(super) fn read_cgroup_counters(path: &str) -> Option<CgroupCounters> {
     Some(counters)
 }
 
-pub(super) fn whitespace_key_values(value: &str) -> HashMap<String, u64> {
+pub(super) fn whitespace_key_values(value: &str) -> HashMap<&str, u64> {
     value
         .lines()
         .filter_map(|line| line.split_once(char::is_whitespace))
-        .filter_map(|(key, value)| Some((key.to_owned(), value.trim().parse().ok()?)))
+        .filter_map(|(key, value)| Some((key, value.trim().parse().ok()?)))
         .collect()
 }
 
@@ -337,7 +342,7 @@ pub(super) fn read_process_file_sets(pid: u32) -> ProcessFiles {
     let mut referenced = open.clone();
     merge_disk_files(
         &mut referenced,
-        &read_regular_files(&format!("/proc/{pid}/map_files")),
+        &read_open_files(&format!("/proc/{pid}/map_files")).unwrap_or_default(),
     );
     ProcessFiles {
         open,
@@ -365,53 +370,27 @@ pub(super) fn read_process_sockets(pid: u32) -> Option<HashSet<u64>> {
 
 fn read_open_files(directory: &str) -> Option<HashMap<DiskFileId, DiskFile>> {
     let entries = fs::read_dir(directory).ok()?;
-    let mut files = HashMap::new();
-    for entry in entries.filter_map(Result::ok) {
-        let Ok(link) = fs::read_link(entry.path()) else {
-            continue;
-        };
-        let Ok(metadata) = fs::metadata(entry.path()) else {
-            continue;
-        };
-        if metadata.file_type().is_file() {
-            files.insert(
-                DiskFileId {
-                    device: metadata.dev(),
-                    inode: metadata.ino(),
-                },
-                DiskFile {
-                    bytes: metadata.blocks().saturating_mul(512),
-                    temporary: temporary_path(&link),
-                },
-            );
-        }
-    }
-    Some(files)
-}
-
-pub(super) fn read_regular_files(directory: &str) -> HashMap<DiskFileId, DiskFile> {
-    let Ok(entries) = fs::read_dir(directory) else {
-        return HashMap::new();
-    };
-    entries
-        .filter_map(Result::ok)
-        .filter_map(|entry| {
-            let link = fs::read_link(entry.path()).ok()?;
-            let metadata = fs::metadata(entry.path()).ok()?;
-            metadata.file_type().is_file().then(|| {
-                (
-                    DiskFileId {
-                        device: metadata.dev(),
-                        inode: metadata.ino(),
-                    },
-                    DiskFile {
-                        bytes: metadata.blocks().saturating_mul(512),
-                        temporary: temporary_path(&link),
-                    },
-                )
+    Some(
+        entries
+            .filter_map(Result::ok)
+            .filter_map(|entry| {
+                let link = fs::read_link(entry.path()).ok()?;
+                let metadata = fs::metadata(entry.path()).ok()?;
+                metadata.file_type().is_file().then(|| {
+                    (
+                        DiskFileId {
+                            device: metadata.dev(),
+                            inode: metadata.ino(),
+                        },
+                        DiskFile {
+                            bytes: metadata.blocks().saturating_mul(512),
+                            temporary: temporary_path(&link),
+                        },
+                    )
+                })
             })
-        })
-        .collect()
+            .collect(),
+    )
 }
 
 pub(super) fn merge_disk_files(
@@ -489,13 +468,12 @@ pub(super) fn read_system_cpu() -> (u64, usize) {
     let mut logical_cpus = 0_usize;
     for line in stat.lines() {
         if let Some(values) = line.strip_prefix("cpu ") {
-            let fields = values
+            // Exclude guest and guest_nice, already represented in user and nice.
+            total = values
                 .split_whitespace()
                 .filter_map(|value| value.parse::<u64>().ok())
-                .collect::<Vec<_>>();
-            // The first eight counters include steal but exclude guest and guest_nice,
-            // which are already represented in user and nice.
-            total = fields.iter().take(8).copied().sum::<u64>();
+                .take(8)
+                .sum();
         } else if line
             .strip_prefix("cpu")
             .and_then(|value| value.split_whitespace().next())
@@ -508,10 +486,8 @@ pub(super) fn read_system_cpu() -> (u64, usize) {
 }
 
 pub(super) fn read_process_memory(pid: u32) -> MemoryUsage {
-    let rollup = fs::read_to_string(format!("/proc/{pid}/smaps_rollup"))
-        .ok()
-        .map(|value| memory_key_values(&value));
-    if let Some(values) = rollup {
+    if let Ok(rollup) = fs::read_to_string(format!("/proc/{pid}/smaps_rollup")) {
+        let values = memory_key_values(&rollup);
         let private_kib = values
             .get("Private_Clean")
             .copied()
@@ -532,10 +508,8 @@ pub(super) fn read_process_memory(pid: u32) -> MemoryUsage {
             pss_available: values.contains_key("Pss"),
         };
     }
-    let values = fs::read_to_string(format!("/proc/{pid}/status"))
-        .ok()
-        .map(|value| memory_key_values(&value))
-        .unwrap_or_default();
+    let status = fs::read_to_string(format!("/proc/{pid}/status")).unwrap_or_default();
+    let values = memory_key_values(&status);
     MemoryUsage {
         rss_bytes: values
             .get("VmRSS")
@@ -555,15 +529,10 @@ pub(super) fn read_process_memory(pid: u32) -> MemoryUsage {
 #[cfg(test)]
 mod disk_tests;
 
-pub(super) fn memory_key_values(value: &str) -> HashMap<String, u64> {
+pub(super) fn memory_key_values(value: &str) -> HashMap<&str, u64> {
     value
         .lines()
         .filter_map(|line| line.split_once(':'))
-        .filter_map(|(key, value)| {
-            Some((
-                key.to_owned(),
-                value.split_whitespace().next()?.parse().ok()?,
-            ))
-        })
+        .filter_map(|(key, value)| Some((key, value.split_whitespace().next()?.parse().ok()?)))
         .collect()
 }

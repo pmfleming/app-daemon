@@ -6,7 +6,7 @@ use std::{
 };
 
 use serde::{Deserialize, Serialize};
-use shelllist_daemon_core::{XdgRoot, resolve_xdg_path};
+use shelllist_daemon_core::{AtomicWritePolicy, XdgRoot, resolve_xdg_path, write_json_atomic};
 
 pub const CATEGORIES: &[&str] = &["shell", "browser", "code", "media", "text"];
 const CATEGORY_WORKSPACES: &[(&str, &str)] = &[
@@ -32,9 +32,9 @@ pub struct ApplicationSettings {
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
-struct SettingsFile {
+struct SettingsFile<T = BTreeMap<String, ApplicationSettings>> {
     version: u8,
-    applications: BTreeMap<String, ApplicationSettings>,
+    applications: T,
 }
 
 #[derive(Debug, Clone)]
@@ -95,16 +95,18 @@ impl SettingsStore {
         let Some(path) = self.path.as_ref() else {
             return Ok(());
         };
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        let bytes = serde_json::to_vec(&SettingsFile {
-            version: 1,
-            applications: self.applications.clone(),
-        })?;
-        let temporary = temporary_path(path);
-        fs::write(&temporary, bytes)?;
-        fs::rename(temporary, path)
+        write_json_atomic(
+            path,
+            &SettingsFile {
+                version: 1,
+                applications: &self.applications,
+            },
+            AtomicWritePolicy {
+                pretty: false,
+                ..AtomicWritePolicy::PRIVATE
+            },
+        )
+        .map_err(std::io::Error::other)
     }
 }
 
@@ -143,12 +145,6 @@ fn settings_path() -> Option<PathBuf> {
         "app-daemon",
         Path::new("application-settings-v1.json"),
     )
-}
-
-fn temporary_path(path: &Path) -> PathBuf {
-    let mut value = path.as_os_str().to_owned();
-    value.push(".tmp");
-    PathBuf::from(value)
 }
 
 #[cfg(test)]

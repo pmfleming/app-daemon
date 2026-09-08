@@ -7,7 +7,7 @@ use std::{
 };
 
 use crate::{
-    metrics::{finite_nonnegative, rate, rounded},
+    metrics::{available_label, finite_nonnegative, rate, rounded},
     model::{ComputeUsage, EnergyUsage, NetworkUsage, ResourceUsage, StorageUsage},
 };
 
@@ -67,7 +67,6 @@ struct CgroupCounters {
     read_operations: u64,
     write_operations: u64,
     memory_bytes: u64,
-    swap_bytes: u64,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -78,7 +77,6 @@ struct CgroupUsage {
     read_operations: u64,
     write_operations: u64,
     memory_bytes: u64,
-    swap_bytes: u64,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -93,7 +91,6 @@ struct MemoryUsage {
 
 #[derive(Debug, Clone, Default)]
 struct ProcessUsage {
-    parent_pid: u32,
     cpu_percent: f64,
     memory: MemoryUsage,
     thread_count: u64,
@@ -104,7 +101,7 @@ struct ProcessUsage {
     gpu_memory_allocated_bytes: u64,
     io: ProcessIo,
     files: Arc<ProcessFiles>,
-    sockets: Option<HashSet<u64>>,
+    sockets: Option<Arc<HashSet<u64>>>,
     storage_available: bool,
 }
 
@@ -202,7 +199,7 @@ impl ResourceProvider for LinuxResourceProvider {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct ResourceSnapshot {
     processes: HashMap<u32, ProcessUsage>,
     children: HashMap<u32, Vec<u32>>,
@@ -221,37 +218,14 @@ pub struct ResourceSnapshot {
     energy_source: String,
 }
 
-impl Default for ResourceSnapshot {
-    fn default() -> Self {
-        Self {
-            processes: HashMap::new(),
-            children: HashMap::new(),
-            cgroup_members_by_root: HashMap::new(),
-            cgroup_path_by_root: HashMap::new(),
-            cgroup_usage: HashMap::new(),
-            app_disk_by_target: HashMap::new(),
-            network_deltas: HashMap::new(),
-            network_counters_available: false,
-            shared_pids: HashSet::new(),
-            logical_cpus: 1,
-            total_process_cpu_percent: 0.0,
-            interval_seconds: 0.0,
-            system_energy_mwh: 0.0,
-            battery_full_mwh: 0.0,
-            energy_source: "unavailable".into(),
-        }
-    }
-}
-
 struct SampledNetwork {
-    sockets_by_pid: HashMap<u32, HashSet<u64>>,
     current: HashMap<u64, NetworkCounters>,
     deltas: HashMap<u64, NetworkCounters>,
     available: bool,
 }
 
 struct ResourceAttribution {
-    roots: HashSet<u32>,
+    root_count: usize,
     pids: HashSet<u32>,
     cgroup_paths: HashSet<String>,
     cgroup_roots: usize,
@@ -311,7 +285,7 @@ impl ResourceSnapshot {
             .filter(|pid| *pid > 0)
             .collect::<HashSet<_>>();
         let mut attribution = ResourceAttribution {
-            roots: roots.clone(),
+            root_count: roots.len(),
             pids: HashSet::new(),
             cgroup_paths: HashSet::new(),
             cgroup_roots: 0,
@@ -364,7 +338,7 @@ impl ResourceSnapshot {
             }
             aggregate
                 .network_sockets
-                .extend(process.sockets.iter().flatten().copied());
+                .extend(process.sockets.as_deref().into_iter().flatten().copied());
         }
         aggregate.usage.compute.gpu_busy_percent = aggregate
             .gpu_engine_percent
@@ -375,8 +349,8 @@ impl ResourceSnapshot {
     }
 
     fn has_complete_cgroup_attribution(&self, attribution: &ResourceAttribution) -> bool {
-        !attribution.roots.is_empty()
-            && attribution.cgroup_roots == attribution.roots.len()
+        attribution.root_count > 0
+            && attribution.cgroup_roots == attribution.root_count
             && attribution.cgroups_cover_process_trees
             && attribution
                 .cgroup_paths
@@ -393,7 +367,6 @@ impl ResourceSnapshot {
             add_counter(&mut cgroup.read_operations, current.read_operations);
             add_counter(&mut cgroup.write_operations, current.write_operations);
             add_counter(&mut cgroup.memory_bytes, current.memory_bytes);
-            add_counter(&mut cgroup.swap_bytes, current.swap_bytes);
         }
         usage.compute.cpu_percent = cgroup.cpu_percent;
         usage.compute.memory_cgroup_bytes = cgroup.memory_bytes;
@@ -484,7 +457,7 @@ impl ResourceSnapshot {
             system_power_watts: rate(self.system_energy_mwh * 3.6, self.interval_seconds, 3),
             battery_percent_per_hour: rate(power_watts * 100_000.0, self.battery_full_mwh, 4),
             attributed_fraction,
-            energy_source: self.energy_source.clone(),
+            energy_source: available_label(self.energy_source.clone()),
             energy_confidence: confidence.into(),
         }
     }
@@ -646,11 +619,11 @@ pub struct ResourceSampler {
     previous_system_ticks: Option<u64>,
     previous_cgroups: HashMap<String, CgroupCounters>,
     previous_network_counters: HashMap<u64, NetworkCounters>,
-    previous_sockets_by_pid: HashMap<u32, HashSet<u64>>,
+    previous_sockets_by_pid: HashMap<u32, Arc<HashSet<u64>>>,
     previous_network_available: bool,
     previous_sample: Option<Instant>,
-    memory: MemoryCache,
-    open_files: OpenFileCache,
+    memory: ProcessCache<MemoryUsage>,
+    open_files: ProcessCache<Arc<ProcessFiles>>,
     app_disk: AppDiskCache,
     energy: EnergySampler,
 }
@@ -667,8 +640,8 @@ impl Default for ResourceSampler {
             previous_sockets_by_pid: HashMap::new(),
             previous_network_available: false,
             previous_sample: None,
-            memory: MemoryCache::default(),
-            open_files: OpenFileCache::default(),
+            memory: ProcessCache::default(),
+            open_files: ProcessCache::default(),
             app_disk: AppDiskCache::default(),
             energy: EnergySampler::default(),
         }
@@ -678,15 +651,9 @@ impl Default for ResourceSampler {
 type ProcessIdentity = (u32, u64);
 
 #[derive(Debug, Default)]
-struct MemoryCache {
-    samples: HashMap<ProcessIdentity, MemoryUsage>,
-    next_refresh: InstantSlot,
-}
-
-#[derive(Debug, Default)]
-struct OpenFileCache {
-    samples: HashMap<ProcessIdentity, Arc<ProcessFiles>>,
-    next_refresh: InstantSlot,
+struct ProcessCache<T> {
+    samples: HashMap<ProcessIdentity, T>,
+    next_refresh: Option<Instant>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -695,9 +662,6 @@ struct ProcessFiles {
     referenced: HashMap<DiskFileId, DiskFile>,
     fd_available: bool,
 }
-
-#[derive(Debug, Default)]
-struct InstantSlot(Option<Instant>);
 
 #[derive(Debug, Clone, Copy, Default)]
 struct DiskBreakdown {
@@ -748,7 +712,7 @@ impl ResourceSampler {
         active_processes.retain(|pid| current.contains_key(pid));
         let identities = active_processes
             .iter()
-            .map(|&pid| (pid, current[&pid].start_ticks))
+            .filter_map(|&pid| Some((pid, current.get(&pid)?.start_ticks)))
             .collect::<HashSet<_>>();
         self.previous_sockets_by_pid.retain(|pid, _| {
             current
@@ -757,21 +721,26 @@ impl ResourceSampler {
                 .is_some_and(|(current, previous)| current.start_ticks == previous.start_ticks)
         });
         let current_gpu = provider.gpu_processes(&active_processes);
-        self.open_files.refresh(provider.as_ref(), &identities, now);
-        let mut network = self.sample_network(provider.as_ref(), &active_processes);
-        self.memory.refresh(provider.as_ref(), &identities, now);
+        self.open_files
+            .refresh(&identities, now, OPEN_FILE_REFRESH_INTERVAL, |pid| {
+                Arc::new(provider.process_files(pid))
+            });
+        let network = self.sample_network(provider.as_ref(), &active_processes);
+        self.memory
+            .refresh(&identities, now, MEMORY_REFRESH_INTERVAL, |pid| {
+                provider.process_memory(pid)
+            });
         let sampled_io = active_processes
             .iter()
             .copied()
-            .map(|pid| (pid, provider.process_io(pid)))
+            .filter_map(|pid| Some((pid, provider.process_io(pid)?)))
             .collect::<HashMap<_, _>>();
         let energy = self.energy.sample(interval_seconds, provider.as_ref());
-        let app_disk_by_target = self
-            .app_disk
-            .read(&provider, active_targets.keys(), now);
+        let app_disk_by_target = self.app_disk.read(&provider, active_targets.keys(), now);
         let shared_pids =
             shared_target_pids(active_targets, &process_children, &cgroup_members_by_root);
         let mut snapshot = ResourceSnapshot {
+            children: process_children,
             cgroup_members_by_root,
             cgroup_path_by_root,
             cgroup_usage,
@@ -783,16 +752,11 @@ impl ResourceSampler {
             interval_seconds,
             system_energy_mwh: finite_nonnegative(energy.energy_mwh),
             battery_full_mwh: finite_nonnegative(energy.battery_full_mwh),
-            energy_source: if energy.source.is_empty() {
-                "unavailable".into()
-            } else {
-                energy.source
-            },
+            energy_source: energy.source,
             ..ResourceSnapshot::default()
         };
 
         let mut next_gpu_engines = HashMap::new();
-        let mut current_io = HashMap::new();
         for (&pid, process) in &current {
             let cpu_percent = self.cpu_percent(pid, process, system_delta, logical_cpus);
             let identity = (pid, process.start_ticks);
@@ -802,11 +766,8 @@ impl ResourceSampler {
                 .get(&identity)
                 .copied()
                 .unwrap_or_default();
-            let sampled_io = sampled_io.get(&pid).copied().flatten();
+            let sampled_io = sampled_io.get(&pid).copied();
             let io = self.io_delta(pid, process, sampled_io.unwrap_or_default());
-            if let Some(value) = sampled_io {
-                current_io.insert(pid, value);
-            }
             let major_faults = self.major_fault_delta(pid, process);
             let gpu = current_gpu.get(&pid);
             let gpu_engine_percent = self.gpu_percent(
@@ -822,10 +783,10 @@ impl ResourceSampler {
                 .get(&identity)
                 .cloned()
                 .unwrap_or_default();
-            snapshot.insert(
+            snapshot.total_process_cpu_percent += cpu_percent;
+            snapshot.processes.insert(
                 pid,
                 ProcessUsage {
-                    parent_pid: process.parent_pid,
                     cpu_percent,
                     memory,
                     thread_count: process.thread_count,
@@ -836,13 +797,13 @@ impl ResourceSampler {
                     gpu_memory_allocated_bytes: gpu.map_or(0, |gpu| gpu.allocated_memory_bytes),
                     io,
                     files,
-                    sockets: network.sockets_by_pid.remove(&pid),
+                    sockets: self.previous_sockets_by_pid.get(&pid).cloned(),
                     storage_available: sampled_io.is_some(),
                 },
             );
         }
         self.remember(
-            (current, current_io),
+            (current, sampled_io),
             current_cgroups,
             network.current,
             next_gpu_engines,
@@ -860,17 +821,17 @@ impl ResourceSampler {
         // Socket discovery is lightweight and must not share the file-footprint TTL.
         let sockets_by_pid = active_processes
             .iter()
-            .filter_map(|&pid| Some((pid, provider.process_sockets(pid)?)))
+            .filter_map(|&pid| Some((pid, Arc::new(provider.process_sockets(pid)?))))
             .collect::<HashMap<_, _>>();
         let sockets = sockets_by_pid
             .values()
-            .flatten()
+            .flat_map(|sockets| sockets.iter())
             .copied()
             .collect::<HashSet<_>>();
         let previous_sockets = self
             .previous_sockets_by_pid
             .values()
-            .flatten()
+            .flat_map(|sockets| sockets.iter())
             .copied()
             .collect::<HashSet<_>>();
         let newly_opened = sockets_by_pid
@@ -912,10 +873,9 @@ impl ResourceSampler {
                 )
             })
             .collect();
-        self.previous_sockets_by_pid = sockets_by_pid.clone();
+        self.previous_sockets_by_pid = sockets_by_pid;
         self.previous_network_available = available;
         SampledNetwork {
-            sockets_by_pid,
             current,
             deltas,
             available,
@@ -1002,7 +962,6 @@ impl ResourceSampler {
                                 .write_operations
                                 .saturating_sub(previous.write_operations),
                             memory_bytes: counters.memory_bytes,
-                            swap_bytes: counters.swap_bytes,
                         });
                 (path.clone(), usage)
             })
@@ -1076,80 +1035,30 @@ impl ResourceSampler {
     }
 }
 
-impl MemoryCache {
+impl<T> ProcessCache<T> {
     fn refresh(
         &mut self,
-        provider: &dyn ResourceProvider,
         identities: &HashSet<ProcessIdentity>,
         now: Instant,
+        interval: std::time::Duration,
+        mut sample: impl FnMut(u32) -> T,
     ) {
-        let refresh = self.next_refresh.0.is_none_or(|deadline| now >= deadline);
+        let expired = self.next_refresh.is_none_or(|deadline| now >= deadline);
         self.samples
-            .retain(|identity, _| identities.contains(identity));
-        if refresh {
-            self.samples = identities
-                .iter()
-                .copied()
-                .map(|identity| (identity, provider.process_memory(identity.0)))
-                .collect();
-            self.next_refresh.0 = Some(now + MEMORY_REFRESH_INTERVAL);
-        } else {
-            let missing = identities
-                .iter()
-                .filter(|identity| !self.samples.contains_key(identity))
-                .copied()
-                .collect::<Vec<_>>();
-            for identity in missing {
-                self.samples
-                    .insert(identity, provider.process_memory(identity.0));
-            }
+            .retain(|identity, _| !expired && identities.contains(identity));
+        for &identity in identities {
+            self.samples
+                .entry(identity)
+                .or_insert_with(|| sample(identity.0));
+        }
+        if expired {
+            self.next_refresh = Some(now + interval);
         }
     }
 }
 
-impl OpenFileCache {
-    fn refresh(
-        &mut self,
-        provider: &dyn ResourceProvider,
-        identities: &HashSet<ProcessIdentity>,
-        now: Instant,
-    ) {
-        let refresh = self.next_refresh.0.is_none_or(|deadline| now >= deadline);
-        self.samples
-            .retain(|identity, _| identities.contains(identity));
-        let requested: Vec<ProcessIdentity> = if refresh {
-            identities.iter().copied().collect()
-        } else {
-            identities
-                .iter()
-                .filter(|identity| !self.samples.contains_key(identity))
-                .copied()
-                .collect()
-        };
-        let sampled = requested
-            .into_iter()
-            .map(|identity| (identity, Arc::new(provider.process_files(identity.0))))
-            .collect::<Vec<_>>();
-        if refresh {
-            self.samples = sampled.into_iter().collect();
-            self.next_refresh.0 = Some(now + OPEN_FILE_REFRESH_INTERVAL);
-        } else {
-            self.samples.extend(sampled);
-        }
-    }
-}
-
-impl ResourceSnapshot {
-    fn insert(&mut self, pid: u32, process: ProcessUsage) {
-        self.total_process_cpu_percent += process.cpu_percent;
-        self.children
-            .entry(process.parent_pid)
-            .or_default()
-            .push(pid);
-        self.processes.insert(pid, process);
-    }
-}
-
+#[cfg(test)]
+mod cache_tests;
 #[cfg(test)]
 mod gpu_usage_tests;
 #[cfg(test)]
@@ -1158,7 +1067,5 @@ mod network_tests;
 mod regression_tests;
 #[cfg(test)]
 mod test_provider;
-#[cfg(test)]
-mod cache_tests;
 #[cfg(test)]
 mod tests;

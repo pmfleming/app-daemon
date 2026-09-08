@@ -8,7 +8,7 @@ use std::{
 use anyhow::Context;
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde::{Deserialize, Serialize};
-use shelllist_daemon_core::{XdgRoot, resolve_xdg_path};
+use shelllist_daemon_core::{AtomicWritePolicy, XdgRoot, resolve_xdg_path, write_json_atomic};
 
 use crate::{
     metrics::{available_label, merge_label, rounded},
@@ -28,8 +28,8 @@ const ENERGY_RETENTION_MILLISECONDS: u64 = 7 * 24 * 60 * 60 * 1000;
 #[serde(default)]
 struct HistoryFile {
     version: u8,
-    applications: HashMap<String, Vec<ResourceHistoryPoint>>,
-    energy_applications: HashMap<String, Vec<EnergyHistoryPoint>>,
+    applications: HashMap<String, VecDeque<ResourceHistoryPoint>>,
+    energy_applications: HashMap<String, VecDeque<EnergyHistoryPoint>>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -96,19 +96,7 @@ impl HistoryStore {
             .and_then(|path| fs::read(path).ok())
             .and_then(|bytes| serde_json::from_slice::<HistoryFile>(&bytes).ok())
             .filter(|file| file.version == FILE_VERSION)
-            .map(|file| {
-                let points = file
-                    .applications
-                    .into_iter()
-                    .map(|(id, points)| (id, points.into()))
-                    .collect();
-                let energy_points = file
-                    .energy_applications
-                    .into_iter()
-                    .map(|(id, points)| (id, points.into()))
-                    .collect();
-                (points, energy_points)
-            })
+            .map(|file| (file.applications, file.energy_applications))
             .unwrap_or_default();
         let mut store = Self {
             path,
@@ -210,16 +198,8 @@ impl HistoryStore {
             path: self.path.clone(),
             file: HistoryFile {
                 version: FILE_VERSION,
-                applications: self
-                    .points
-                    .iter()
-                    .map(|(id, points)| (id.clone(), points.iter().cloned().collect()))
-                    .collect(),
-                energy_applications: self
-                    .energy_points
-                    .iter()
-                    .map(|(id, points)| (id.clone(), points.iter().cloned().collect()))
-                    .collect(),
+                applications: self.points.clone(),
+                energy_applications: self.energy_points.clone(),
             },
         }
     }
@@ -236,32 +216,24 @@ impl HistoryStore {
     fn flush_expired(&mut self, timestamp_ms: u64) {
         let expired = self
             .pending
-            .iter()
-            .filter_map(|(id, pending)| {
-                (pending.timestamp_ms.saturating_add(BUCKET_MILLISECONDS) <= timestamp_ms)
-                    .then_some(id.clone())
+            .extract_if(|_, pending| {
+                pending.timestamp_ms.saturating_add(BUCKET_MILLISECONDS) <= timestamp_ms
             })
             .collect::<Vec<_>>();
-        for id in expired {
-            if let Some(pending) = self.pending.remove(&id) {
-                self.finish_pending(id, pending);
-            }
+        for (id, pending) in expired {
+            self.finish_pending(id, pending);
         }
         let expired_energy = self
             .pending_energy
-            .iter()
-            .filter_map(|(id, pending)| {
-                (pending
+            .extract_if(|_, pending| {
+                pending
                     .timestamp_ms
                     .saturating_add(ENERGY_BUCKET_MILLISECONDS)
-                    <= timestamp_ms)
-                    .then_some(id.clone())
+                    <= timestamp_ms
             })
             .collect::<Vec<_>>();
-        for id in expired_energy {
-            if let Some(pending) = self.pending_energy.remove(&id) {
-                self.finish_pending_energy(id, pending);
-            }
+        for (id, pending) in expired_energy {
+            self.finish_pending_energy(id, pending);
         }
     }
 
@@ -437,22 +409,18 @@ pub fn persist_snapshot(snapshot: HistorySnapshot) -> std::io::Result<()> {
     let Some(path) = snapshot.path else {
         return Ok(());
     };
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    let bytes = serde_json::to_vec(&snapshot.file)?;
-    let temporary = temporary_path(&path);
-    fs::write(&temporary, bytes)?;
-    fs::rename(temporary, path)
+    write_json_atomic(
+        &path,
+        &snapshot.file,
+        AtomicWritePolicy {
+            pretty: false,
+            ..AtomicWritePolicy::PRIVATE
+        },
+    )
+    .map_err(std::io::Error::other)
 }
 
-fn temporary_path(path: &Path) -> PathBuf {
-    let mut value = path.as_os_str().to_owned();
-    value.push(".tmp");
-    PathBuf::from(value)
-}
-
-#[cfg(test)]
-mod tests;
 #[cfg(test)]
 mod availability_tests;
+#[cfg(test)]
+mod tests;

@@ -1,5 +1,6 @@
 use super::test_provider::TestProvider;
-use super::*;
+use super::{NetworkCounters, ResourceSampler, SampledNetwork};
+use std::collections::HashSet;
 
 fn sample(sampler: &mut ResourceSampler, provider: &TestProvider, pids: &[u32]) -> SampledNetwork {
     let result = sampler.sample_network(provider, &pids.iter().copied().collect());
@@ -33,7 +34,7 @@ fn discovers_new_sockets_and_initial_bytes_each_sample() {
     assert_eq!(next.deltas[&100].received_bytes, 100);
     assert_eq!(next.deltas[&101].received_bytes, 2000);
     assert_eq!(next.deltas[&101].transmitted_bytes, 1000);
-    assert_eq!(next.sockets_by_pid[&42].len(), 2);
+    assert_eq!(sampler.previous_sockets_by_pid[&42].len(), 2);
 
     provider
         .state
@@ -44,7 +45,7 @@ fn discovers_new_sockets_and_initial_bytes_each_sample() {
         .unwrap()
         .remove(&100);
     let closed = sample(&mut sampler, &provider, &[42]);
-    assert_eq!(closed.sockets_by_pid[&42], HashSet::from([101]));
+    assert_eq!(*sampler.previous_sockets_by_pid[&42], HashSet::from([101]));
     assert!(!closed.deltas.contains_key(&100));
     assert_eq!(
         provider
@@ -82,11 +83,8 @@ fn unreadable_descriptors_do_not_reuse_stale_socket_ownership() {
     socket(&provider, 42, 100, 5000);
     sample(&mut sampler, &provider, &[42]);
     provider.state.lock().unwrap().sockets.remove(&42);
-    assert!(
-        !sample(&mut sampler, &provider, &[42])
-            .sockets_by_pid
-            .contains_key(&42)
-    );
+    sample(&mut sampler, &provider, &[42]);
+    assert!(!sampler.previous_sockets_by_pid.contains_key(&42));
     socket(&provider, 42, 101, 9000);
     assert_eq!(
         sample(&mut sampler, &provider, &[42]).deltas[&101].received_bytes,

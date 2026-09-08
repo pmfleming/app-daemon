@@ -1,4 +1,5 @@
-use super::*;
+use super::{DiskScanBudget, allocated_directory_bytes};
+use std::{fs, os::unix::fs::MetadataExt};
 
 #[test]
 fn incomplete_directory_walks_never_publish_partial_sizes() -> anyhow::Result<()> {
@@ -6,9 +7,15 @@ fn incomplete_directory_walks_never_publish_partial_sizes() -> anyhow::Result<()
     fs::write(directory.path().join("one"), vec![1; 4096])?;
     fs::write(directory.path().join("two"), vec![1; 4096])?;
     let roots = [directory.path().to_owned()];
-    let mut budget = DiskScanBudget { remaining_entries: 2, ..Default::default() };
+    let mut budget = DiskScanBudget {
+        remaining_entries: 2,
+        ..Default::default()
+    };
     assert!(allocated_directory_bytes(&roots, &mut budget).is_none());
-    let mut budget = DiskScanBudget { deadline: std::time::Instant::now(), ..Default::default() };
+    let mut budget = DiskScanBudget {
+        deadline: std::time::Instant::now(),
+        ..Default::default()
+    };
     assert!(allocated_directory_bytes(&roots, &mut budget).is_none());
     Ok(())
 }
