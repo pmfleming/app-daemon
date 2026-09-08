@@ -93,6 +93,7 @@
               cargo-llvm-cov
               clippy
               jq
+              python3
               rust-analyzer
               rustc
               rustfmt

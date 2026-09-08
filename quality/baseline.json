@@ -1,0 +1,617 @@
+{
+  "schema_version": 1,
+  "generator_version": "0.1.0",
+  "generated_at": "2026-09-08T20:19:17.430904589+00:00",
+  "risk_model": {
+    "id": "rqlens.architecture_risk",
+    "version": 4
+  },
+  "measured_input": {
+    "algorithm": "fnv1a64-quality-inputs-v2",
+    "complete": true,
+    "config_digest": "8cd7baacf7f8d703",
+    "digest": "a9d31129382a55db",
+    "file_count": 47,
+    "git": {
+      "head": "3b99cfdaa82042c2e8d2c0c3f8097b3bae884a5c",
+      "replacements": "",
+      "shallow": "false"
+    },
+    "read_errors": [],
+    "source_digest": "51d3bb6f7dec6453",
+    "toolchain": {
+      "cargo_version": "cargo 1.95.0 (f2d3ce0bd 2026-03-21)",
+      "declared_rust_version": null,
+      "host": "x86_64-unknown-linux-gnu",
+      "llvm_version": "21.1.8",
+      "pinned_channel": "stable",
+      "rustc_release": "1.95.0",
+      "rustc_version": "rustc 1.95.0 (59807616e 2026-04-14) (built from a source tarball)"
+    }
+  },
+  "all_code": {
+    "function_count": 412,
+    "cognitive_sum": 377,
+    "cognitive_max": 11,
+    "cyclomatic_sum": 1041,
+    "cyclomatic_max": 30,
+    "hotspot_max": 153.78,
+    "top_hotspots": [
+      {
+        "name": "support::Session::start",
+        "score": 153.78,
+        "sloc": 100,
+        "cognitive_complexity": 5,
+        "cyclomatic_complexity": 30
+      },
+      {
+        "name": "session::uwsm_handoffs_report_receipts_failures_timeouts_and_owned_cancellation",
+        "score": 108.02,
+        "sloc": 79,
+        "cognitive_complexity": 2,
+        "cyclomatic_complexity": 22
+      },
+      {
+        "name": "resources::disk::AppDiskCache::read",
+        "score": 73.81,
+        "sloc": 38,
+        "cognitive_complexity": 11,
+        "cyclomatic_complexity": 10
+      },
+      {
+        "name": "resources::system::allocated_directory_bytes",
+        "score": 68.71,
+        "sloc": 29,
+        "cognitive_complexity": 8,
+        "cyclomatic_complexity": 10
+      },
+      {
+        "name": "resources::benchmarks::run",
+        "score": 53.7,
+        "sloc": 91,
+        "cognitive_complexity": 5,
+        "cyclomatic_complexity": 6
+      }
+    ]
+  },
+  "production_functions": {
+    "function_count": 339,
+    "cognitive_sum": 323,
+    "cognitive_max": 11,
+    "cyclomatic_sum": 785,
+    "cyclomatic_max": 10,
+    "hotspot_max": 73.81,
+    "top_hotspots": [
+      {
+        "name": "resources::disk::AppDiskCache::read",
+        "score": 73.81,
+        "sloc": 38,
+        "cognitive_complexity": 11,
+        "cyclomatic_complexity": 10
+      },
+      {
+        "name": "resources::system::allocated_directory_bytes",
+        "score": 68.71,
+        "sloc": 29,
+        "cognitive_complexity": 8,
+        "cyclomatic_complexity": 10
+      },
+      {
+        "name": "service::ApplicationService::execute_owned",
+        "score": 50.12,
+        "sloc": 85,
+        "cognitive_complexity": 5,
+        "cyclomatic_complexity": 7
+      },
+      {
+        "name": "service::identity::cgroup_target",
+        "score": 44.58,
+        "sloc": 22,
+        "cognitive_complexity": 4,
+        "cyclomatic_complexity": 9
+      },
+      {
+        "name": "resources::disk::DiskWorkers::start",
+        "score": 41.61,
+        "sloc": 29,
+        "cognitive_complexity": 8,
+        "cyclomatic_complexity": 5
+      }
+    ]
+  },
+  "architecture": {
+    "mean_locality": 99.70348837209302,
+    "mean_leverage": 67.0813953488372,
+    "modules": {
+      "api": {
+        "locality": 100.0,
+        "leverage": 64.0,
+        "inbound": 2,
+        "outbound": 3
+      },
+      "benchmarks": {
+        "locality": 100.0,
+        "leverage": 67.0,
+        "inbound": 2,
+        "outbound": 2
+      },
+      "catalog": {
+        "locality": 100.0,
+        "leverage": 79.5,
+        "inbound": 7,
+        "outbound": 2
+      },
+      "catalog::tests": {
+        "locality": 100.0,
+        "leverage": 65.0,
+        "inbound": 0,
+        "outbound": 1
+      },
+      "client": {
+        "locality": 100.0,
+        "leverage": 64.5,
+        "inbound": 1,
+        "outbound": 2
+      },
+      "daemon": {
+        "locality": 100.0,
+        "leverage": 58.5,
+        "inbound": 1,
+        "outbound": 4
+      },
+      "history": {
+        "locality": 100.0,
+        "leverage": 69.5,
+        "inbound": 3,
+        "outbound": 2
+      },
+      "history::aggregate": {
+        "locality": 100.0,
+        "leverage": 61.5,
+        "inbound": 1,
+        "outbound": 3
+      },
+      "history::availability_tests": {
+        "locality": 100.0,
+        "leverage": 62.0,
+        "inbound": 0,
+        "outbound": 2
+      },
+      "history::tests": {
+        "locality": 100.0,
+        "leverage": 62.0,
+        "inbound": 0,
+        "outbound": 2
+      },
+      "hyprland": {
+        "locality": 100.0,
+        "leverage": 83.0,
+        "inbound": 6,
+        "outbound": 0
+      },
+      "launch": {
+        "locality": 100.0,
+        "leverage": 67.5,
+        "inbound": 1,
+        "outbound": 1
+      },
+      "lib": {
+        "locality": 100.0,
+        "leverage": 68.0,
+        "inbound": 0,
+        "outbound": 0
+      },
+      "main": {
+        "locality": 100.0,
+        "leverage": 63.5,
+        "inbound": 0,
+        "outbound": 3
+      },
+      "metrics": {
+        "locality": 100.0,
+        "leverage": 75.5,
+        "inbound": 3,
+        "outbound": 0
+      },
+      "model": {
+        "locality": 100.0,
+        "leverage": 98.0,
+        "inbound": 12,
+        "outbound": 0
+      },
+      "platform": {
+        "locality": 100.0,
+        "leverage": 73.0,
+        "inbound": 2,
+        "outbound": 0
+      },
+      "protocol": {
+        "locality": 100.0,
+        "leverage": 75.0,
+        "inbound": 4,
+        "outbound": 1
+      },
+      "resources": {
+        "locality": 99.25,
+        "leverage": 94.5,
+        "inbound": 13,
+        "outbound": 2
+      },
+      "resources::benchmarks": {
+        "locality": 100.0,
+        "leverage": 58.5,
+        "inbound": 1,
+        "outbound": 4
+      },
+      "resources::cache_tests": {
+        "locality": 100.0,
+        "leverage": 59.0,
+        "inbound": 0,
+        "outbound": 3
+      },
+      "resources::disk": {
+        "locality": 100.0,
+        "leverage": 70.0,
+        "inbound": 2,
+        "outbound": 1
+      },
+      "resources::disk::tests": {
+        "locality": 100.0,
+        "leverage": 59.0,
+        "inbound": 0,
+        "outbound": 3
+      },
+      "resources::energy": {
+        "locality": 100.0,
+        "leverage": 70.5,
+        "inbound": 1,
+        "outbound": 0
+      },
+      "resources::gpu": {
+        "locality": 100.0,
+        "leverage": 73.0,
+        "inbound": 2,
+        "outbound": 0
+      },
+      "resources::gpu_usage_tests": {
+        "locality": 100.0,
+        "leverage": 62.0,
+        "inbound": 0,
+        "outbound": 2
+      },
+      "resources::network": {
+        "locality": 100.0,
+        "leverage": 78.0,
+        "inbound": 4,
+        "outbound": 0
+      },
+      "resources::network_tests": {
+        "locality": 100.0,
+        "leverage": 56.0,
+        "inbound": 0,
+        "outbound": 4
+      },
+      "resources::system": {
+        "locality": 100.0,
+        "leverage": 72.5,
+        "inbound": 3,
+        "outbound": 1
+      },
+      "resources::system::disk_tests": {
+        "locality": 100.0,
+        "leverage": 65.0,
+        "inbound": 0,
+        "outbound": 1
+      },
+      "resources::test_provider": {
+        "locality": 100.0,
+        "leverage": 66.0,
+        "inbound": 4,
+        "outbound": 4
+      },
+      "resources::tests": {
+        "locality": 100.0,
+        "leverage": 59.0,
+        "inbound": 0,
+        "outbound": 3
+      },
+      "service": {
+        "locality": 97.0,
+        "leverage": 57.5,
+        "inbound": 3,
+        "outbound": 6
+      },
+      "service::action": {
+        "locality": 100.0,
+        "leverage": 58.0,
+        "inbound": 2,
+        "outbound": 5
+      },
+      "service::benchmarks": {
+        "locality": 94.0,
+        "leverage": 49.5,
+        "inbound": 1,
+        "outbound": 7
+      },
+      "service::identity": {
+        "locality": 100.0,
+        "leverage": 66.5,
+        "inbound": 3,
+        "outbound": 3
+      },
+      "service::query": {
+        "locality": 100.0,
+        "leverage": 58.0,
+        "inbound": 2,
+        "outbound": 5
+      },
+      "service::query::tests": {
+        "locality": 97.0,
+        "leverage": 50.0,
+        "inbound": 0,
+        "outbound": 6
+      },
+      "service::tests": {
+        "locality": 100.0,
+        "leverage": 62.0,
+        "inbound": 0,
+        "outbound": 2
+      },
+      "session": {
+        "locality": 100.0,
+        "leverage": 66.5,
+        "inbound": 0,
+        "outbound": 1
+      },
+      "settings": {
+        "locality": 100.0,
+        "leverage": 78.0,
+        "inbound": 4,
+        "outbound": 0
+      },
+      "support": {
+        "locality": 100.0,
+        "leverage": 70.5,
+        "inbound": 1,
+        "outbound": 0
+      },
+      "workloads": {
+        "locality": 100.0,
+        "leverage": 68.0,
+        "inbound": 0,
+        "outbound": 0
+      }
+    }
+  },
+  "clones": {
+    "ast_record_count": 1,
+    "duplicated_line_count": 395,
+    "duplication_percent": 5.19,
+    "record_count": 32,
+    "source_nonblank_line_count": 7615,
+    "token_record_count": 31
+  },
+  "escape_hatches": {
+    "record_count": 0
+  },
+  "reliability_scopes": {
+    "test": 33,
+    "production": 6
+  },
+  "coverage": {
+    "branches": {
+      "available": false,
+      "count": 0,
+      "covered": 0,
+      "percent": null
+    },
+    "file_count": 24,
+    "functions": {
+      "available": true,
+      "count": 692,
+      "covered": 507,
+      "percent": 73.27
+    },
+    "lines": {
+      "available": true,
+      "count": 4703,
+      "covered": 3602,
+      "percent": 76.59
+    },
+    "regions": {
+      "available": true,
+      "count": 6942,
+      "covered": 5088,
+      "percent": 73.29
+    }
+  },
+  "coverage_files": {
+    "src/api.rs": {
+      "available": true,
+      "count": 112,
+      "covered": 77,
+      "percent": 68.75
+    },
+    "src/catalog.rs": {
+      "available": true,
+      "count": 200,
+      "covered": 185,
+      "percent": 92.5
+    },
+    "src/client.rs": {
+      "available": true,
+      "count": 70,
+      "covered": 50,
+      "percent": 71.43
+    },
+    "src/daemon.rs": {
+      "available": true,
+      "count": 229,
+      "covered": 190,
+      "percent": 82.97
+    },
+    "src/history.rs": {
+      "available": true,
+      "count": 322,
+      "covered": 304,
+      "percent": 94.41
+    },
+    "src/history/aggregate.rs": {
+      "available": true,
+      "count": 200,
+      "covered": 199,
+      "percent": 99.5
+    },
+    "src/hyprland.rs": {
+      "available": true,
+      "count": 125,
+      "covered": 61,
+      "percent": 48.8
+    },
+    "src/launch.rs": {
+      "available": true,
+      "count": 109,
+      "covered": 87,
+      "percent": 79.82
+    },
+    "src/main.rs": {
+      "available": true,
+      "count": 34,
+      "covered": 25,
+      "percent": 73.53
+    },
+    "src/metrics.rs": {
+      "available": true,
+      "count": 29,
+      "covered": 28,
+      "percent": 96.55
+    },
+    "src/platform.rs": {
+      "available": true,
+      "count": 15,
+      "covered": 14,
+      "percent": 93.33
+    },
+    "src/protocol.rs": {
+      "available": true,
+      "count": 50,
+      "covered": 47,
+      "percent": 94.0
+    },
+    "src/resources.rs": {
+      "available": true,
+      "count": 762,
+      "covered": 703,
+      "percent": 92.26
+    },
+    "src/resources/disk.rs": {
+      "available": true,
+      "count": 93,
+      "covered": 90,
+      "percent": 96.77
+    },
+    "src/resources/energy.rs": {
+      "available": true,
+      "count": 128,
+      "covered": 112,
+      "percent": 87.5
+    },
+    "src/resources/gpu.rs": {
+      "available": true,
+      "count": 187,
+      "covered": 125,
+      "percent": 66.84
+    },
+    "src/resources/network.rs": {
+      "available": true,
+      "count": 161,
+      "covered": 78,
+      "percent": 48.45
+    },
+    "src/resources/system.rs": {
+      "available": true,
+      "count": 496,
+      "covered": 189,
+      "percent": 38.1
+    },
+    "src/resources/test_provider.rs": {
+      "available": true,
+      "count": 72,
+      "covered": 66,
+      "percent": 91.67
+    },
+    "src/service.rs": {
+      "available": true,
+      "count": 450,
+      "covered": 313,
+      "percent": 69.56
+    },
+    "src/service/action.rs": {
+      "available": true,
+      "count": 289,
+      "covered": 122,
+      "percent": 42.21
+    },
+    "src/service/identity.rs": {
+      "available": true,
+      "count": 132,
+      "covered": 107,
+      "percent": 81.06
+    },
+    "src/service/query.rs": {
+      "available": true,
+      "count": 326,
+      "covered": 320,
+      "percent": 98.16
+    },
+    "src/settings.rs": {
+      "available": true,
+      "count": 112,
+      "covered": 110,
+      "percent": 98.21
+    }
+  },
+  "verification": {
+    "check_count": 28,
+    "conformant": true,
+    "diagnostic_count": 0,
+    "failed_errors": 0,
+    "failed_warnings": 5,
+    "passed": 9,
+    "skipped": 14,
+    "unavailable": 0
+  },
+  "verification_warnings": [
+    "rust.project.msrv-declared",
+    "rust.project.contributing",
+    "rust.project.code-of-conduct",
+    "rust.project.security-policy",
+    "rust.project.changelog"
+  ],
+  "test_counts": {
+    "inline_count": 25,
+    "integration_count": 4,
+    "failed": 0
+  },
+  "policy": {
+    "passed": true,
+    "enabled_policies": [
+      "partial",
+      "test-failure",
+      "practice-failure"
+    ],
+    "failed_policies": [],
+    "threshold_violations": [
+      {
+        "maximum": 600.0,
+        "module": "app-daemon::shared::resources",
+        "score": 601.21
+      },
+      {
+        "maximum": 600.0,
+        "module": "app-daemon::shared::service",
+        "score": 622.86
+      }
+    ]
+  }
+}

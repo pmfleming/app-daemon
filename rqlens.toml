@@ -1,7 +1,7 @@
 project_name = "app-daemon"
 project_root = "."
 # source_roots is optional; Cargo workspace and local path packages are discovered automatically.
-output_dir = "target/analysis"
+output_dir = "target/quality-current"
 
 [rust]
 identity_resolution = "auto"
@@ -10,6 +10,7 @@ identity_timeout_seconds = 60
 identity_offline = true
 
 [verification]
+locked = true
 timeout_seconds = 600
 workspace = true
 all_targets = true
