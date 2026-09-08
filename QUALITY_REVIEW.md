@@ -4,7 +4,10 @@ Measured with the local `../rust-quality-lens` checkout, using `rqlens.toml`.
 Baseline artifacts are in `target/analysis-before/`; current artifacts are in
 `target/analysis/` (both ignored build outputs).
 
-## Results
+## Initial refactor results (`e93acd4`)
+
+The following measurements describe the initial refactor, before the subsequent
+test-pruning pass documented below.
 
 These are app-daemon measurements, not measurements of its dependency projects.
 Complexity totals include test functions. Architecture averages are unweighted
@@ -69,7 +72,7 @@ are maintenance-pressure proxies, not measured engineering hours or runtime.
 - Replace all seven test wildcard imports with explicit dependencies; no lint
   suppressions or unsafe code were introduced.
 
-## Verification and remaining work
+## Initial refactor verification and remaining work
 
 Passed `cargo fmt --all -- --check`, strict Clippy (`--all-targets --locked --
 -D warnings`), all 37 unit tests, doctests (none defined), and `git diff --check`.
@@ -84,6 +87,50 @@ construction still couples catalog, settings, procfs identity, and presentation.
 Those are follow-up design work, not solved by moving functions solely to change
 scores. Remaining reliability findings are test panic-path advisories. No live
 Hyprland/D-Bus or host resource-accounting integration run was performed.
+
+## Subsequent test pruning
+
+Reduced the suite from **37 to 25 tests (32.4%)**, removing **135 Rust lines**.
+Application logic and current wire formats are unchanged; edits are confined to
+tests, their provider fixture, and removal of an unused test-module declaration.
+
+Selection was based on behavioral overlap, not simply combining unrelated tests:
+
+| Overlapping group | Before → after | Retained behavior |
+| --- | --- | --- |
+| Cache internals and PID-reuse helpers | 3 → 1 | Sampler outputs for CPU, faults, I/O, memory, files, and sockets after PID reuse |
+| GPU parsing | 2 → 1 | Standard counters and malformed input in one parser contract |
+| GPU usage | 2 → 1 | Shared-engine aggregation, busy cap, and PID-reuse baseline with one fixture |
+| Network accounting | 3 → 2 | Socket lifecycle plus recovery from missing counters/descriptors, through the sampler rather than private state |
+| Blocked disk workers | 2 → 1 | Bounded outstanding scans and nonblocking sample publication in the same scenario |
+| Directory walks | 2 → 1 | Hardlink/symlink rules and incomplete-walk rejection on one filesystem fixture |
+| Resource/energy persistence | 2 → 1 | One round trip, final partial buckets, and actual two-day/eight-day retention checks |
+| Legacy history deserialization | 1 → 0 | Removed the legacy-only compatibility constraint; current schema fixtures remain |
+| Duplicate-root accounting | 2 → 1 | Process-tree and cgroup modes share one resource fixture |
+| Revision precision and query results | 2 → 1 | JavaScript-safe revisions checked on the returned page instead of the hashing helper |
+| Stale actions and operation lifecycle | 2 → 1 | Rejection emits no operation, followed by accepted/running/failed outcomes |
+
+Removed cache-map/deadline assertions and memory/file read-count instrumentation
+that unnecessarily pinned implementation choices. Kept the standalone current
+API/resource fixtures, selector validation, correlation, cursor isolation,
+catalog precedence, launch-only/UWSM identity, settings persistence, mixed
+availability, scope-escape regression, and failed-disk-refresh checks.
+
+Validation: all 25 tests pass, including **20 repeated library-suite runs**;
+strict Clippy, formatting, doctests (none defined), and diff checks pass.
+
+A `cargo llvm-cov --all-targets --locked --json` comparison against a separate
+checkout of `e93acd4` also passed both suites. Coverage over the 22 non-test source
+files rose from **2,737/4,613 lines (59.33%)** to **2,765/4,611 (59.97%)**.
+`src/resources.rs` rose from **88.38% to 91.86%**, and `src/history.rs` from
+**93.17% to 94.41%**. The file filter excludes dedicated test/provider files but
+includes inline test code; the two-line denominator decrease is in GPU parser
+test code. Line coverage is not branch/mutation coverage, and live daemon/launch
+integration paths remain a separate coverage gap.
+
+Coverage artifacts: `target/test-pruning-coverage-before.json` and
+`target/test-pruning-coverage-after.json`. On this Nix toolchain, set `LLVM_COV`
+and `LLVM_PROFDATA` to the installed LLVM 21 binaries when running cargo-llvm-cov.
 
 Reproduce static evidence with:
 

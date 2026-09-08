@@ -12,9 +12,19 @@ fn close_missing(expected_revision: Option<u64>) -> ExecuteParams {
 }
 
 #[tokio::test]
-async fn accepts_operations_before_reporting_their_result() -> anyhow::Result<()> {
+async fn rejects_stale_actions_and_reports_accepted_operation_outcomes() -> anyhow::Result<()> {
     let service = ApplicationService::new();
     let mut events = service.subscribe_operations();
+    assert!(
+        service
+            .execute(close_missing(Some(u64::MAX)))
+            .await
+            .is_err()
+    );
+    assert!(matches!(
+        events.try_recv(),
+        Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+    ));
     let accepted = service.execute(close_missing(None)).await?;
     assert_eq!(accepted.status, "accepted");
     let running = events.recv().await?;
@@ -24,15 +34,4 @@ async fn accepts_operations_before_reporting_their_result() -> anyhow::Result<()
     assert_eq!(failed.id, accepted.id);
     assert_eq!(failed.status, "failed");
     Ok(())
-}
-
-#[tokio::test]
-async fn rejects_operations_for_stale_revisions() {
-    let service = ApplicationService::new();
-    assert!(
-        service
-            .execute(close_missing(Some(u64::MAX)))
-            .await
-            .is_err()
-    );
 }

@@ -1064,8 +1064,6 @@ mod gpu_usage_tests;
 #[cfg(test)]
 mod network_tests;
 #[cfg(test)]
-mod regression_tests;
-#[cfg(test)]
 mod test_provider;
 #[cfg(test)]
 mod tests;

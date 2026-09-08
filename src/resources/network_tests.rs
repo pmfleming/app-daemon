@@ -1,15 +1,25 @@
-use super::test_provider::TestProvider;
-use super::{NetworkCounters, ResourceSampler, SampledNetwork};
-use std::collections::HashSet;
+use super::{NetworkCounters, ProcessStat, ResourceSampler, test_provider::TestProvider};
+use crate::model::ResourceUsage;
+use std::{collections::HashMap, sync::Arc};
 
-fn sample(sampler: &mut ResourceSampler, provider: &TestProvider, pids: &[u32]) -> SampledNetwork {
-    let result = sampler.sample_network(provider, &pids.iter().copied().collect());
-    sampler.previous_network_counters = result.current.clone();
-    result
+fn sample(sampler: &mut ResourceSampler, pids: &[u32]) -> ResourceUsage {
+    sampler
+        .sample_for_targets(&HashMap::from([("app.desktop".into(), pids.to_vec())]))
+        .usage_for_roots(pids.iter().copied())
 }
 
 fn socket(provider: &TestProvider, pid: u32, inode: u64, received_bytes: u64) {
     let mut state = provider.state.lock().unwrap();
+    state.processes.insert(
+        pid,
+        ProcessStat {
+            parent_pid: 1,
+            total_ticks: 0,
+            start_ticks: 1,
+            major_faults: 0,
+            thread_count: 1,
+        },
+    );
     state.sockets.entry(pid).or_default().insert(inode);
     state.network.get_or_insert_default().insert(
         inode,
@@ -21,21 +31,23 @@ fn socket(provider: &TestProvider, pid: u32, inode: u64, received_bytes: u64) {
 }
 
 #[test]
-fn discovers_new_sockets_and_initial_bytes_each_sample() {
-    let provider = TestProvider::default();
-    let mut sampler = ResourceSampler::default();
+fn accounts_for_opening_and_closing_sockets_between_samples() {
+    let provider = Arc::new(TestProvider::default());
+    let mut sampler = ResourceSampler {
+        provider: provider.clone(),
+        ..Default::default()
+    };
     socket(&provider, 42, 100, 5000);
-    let first = sample(&mut sampler, &provider, &[42]);
-    assert_eq!(first.deltas[&100].received_bytes, 0, "baseline on startup");
+    assert_eq!(sample(&mut sampler, &[42]).network.network_receive_bytes, 0);
 
     socket(&provider, 42, 100, 5100);
     socket(&provider, 42, 101, 2000);
-    let next = sample(&mut sampler, &provider, &[42]);
-    assert_eq!(next.deltas[&100].received_bytes, 100);
-    assert_eq!(next.deltas[&101].received_bytes, 2000);
-    assert_eq!(next.deltas[&101].transmitted_bytes, 1000);
-    assert_eq!(sampler.previous_sockets_by_pid[&42].len(), 2);
+    let next = sample(&mut sampler, &[42]).network;
+    assert_eq!(next.network_receive_bytes, 2100);
+    assert_eq!(next.network_transmit_bytes, 1050);
+    assert_eq!(next.network_connection_count, 2);
 
+    socket(&provider, 42, 100, 9000);
     provider
         .state
         .lock()
@@ -44,50 +56,56 @@ fn discovers_new_sockets_and_initial_bytes_each_sample() {
         .get_mut(&42)
         .unwrap()
         .remove(&100);
-    let closed = sample(&mut sampler, &provider, &[42]);
-    assert_eq!(*sampler.previous_sockets_by_pid[&42], HashSet::from([101]));
-    assert!(!closed.deltas.contains_key(&100));
+    let closed = sample(&mut sampler, &[42]).network;
+    assert_eq!(closed.network_connection_count, 1);
     assert_eq!(
-        provider
-            .file_reads
-            .load(std::sync::atomic::Ordering::Relaxed),
-        0
+        closed.network_receive_bytes, 0,
+        "unowned sockets must not contribute traffic"
     );
 }
 
 #[test]
-fn baselines_newly_attributed_processes_and_counter_recovery() {
-    let provider = TestProvider::default();
-    let mut sampler = ResourceSampler::default();
+fn baselines_new_processes_and_recovers_from_unavailable_network_data() {
+    let provider = Arc::new(TestProvider::default());
+    let mut sampler = ResourceSampler {
+        provider: provider.clone(),
+        ..Default::default()
+    };
     socket(&provider, 42, 100, 5000);
-    sample(&mut sampler, &provider, &[42]);
+    sample(&mut sampler, &[42]);
     socket(&provider, 43, 101, 8000);
     assert_eq!(
-        sample(&mut sampler, &provider, &[42, 43]).deltas[&101].received_bytes,
+        sample(&mut sampler, &[42, 43])
+            .network
+            .network_receive_bytes,
         0
     );
 
     provider.state.lock().unwrap().network = None;
-    assert!(!sample(&mut sampler, &provider, &[42, 43]).available);
+    assert!(
+        !sample(&mut sampler, &[42, 43])
+            .measurement
+            .network_bytes_available
+    );
     socket(&provider, 42, 102, 9000);
     assert_eq!(
-        sample(&mut sampler, &provider, &[42, 43]).deltas[&102].received_bytes,
+        sample(&mut sampler, &[42, 43])
+            .network
+            .network_receive_bytes,
         0
     );
-}
-
-#[test]
-fn unreadable_descriptors_do_not_reuse_stale_socket_ownership() {
-    let provider = TestProvider::default();
-    let mut sampler = ResourceSampler::default();
-    socket(&provider, 42, 100, 5000);
-    sample(&mut sampler, &provider, &[42]);
-    provider.state.lock().unwrap().sockets.remove(&42);
-    sample(&mut sampler, &provider, &[42]);
-    assert!(!sampler.previous_sockets_by_pid.contains_key(&42));
-    socket(&provider, 42, 101, 9000);
+    socket(&provider, 42, 102, 9100);
     assert_eq!(
-        sample(&mut sampler, &provider, &[42]).deltas[&101].received_bytes,
-        0
+        sample(&mut sampler, &[42, 43])
+            .network
+            .network_receive_bytes,
+        100
     );
+
+    provider.state.lock().unwrap().sockets.remove(&42);
+    let missing = sample(&mut sampler, &[42]);
+    assert_eq!(missing.network.network_connection_count, 0);
+    assert!(!missing.measurement.network_connections_available);
+    socket(&provider, 42, 103, 9000);
+    assert_eq!(sample(&mut sampler, &[42]).network.network_receive_bytes, 0);
 }

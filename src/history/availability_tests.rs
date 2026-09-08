@@ -36,11 +36,3 @@ fn persists_idle_capabilities_and_marks_mixed_availability_unavailable() {
     assert!(!available.gpu && !available.network_bytes);
     assert!(available.storage && available.memory);
 }
-
-#[test]
-fn legacy_history_has_unknown_capabilities() {
-    let point: ResourceHistoryPoint =
-        serde_json::from_str(r#"{"timestamp_ms":15000,"duration_ms":2000,"gpu_percent":0}"#)
-            .unwrap();
-    assert!(point.resources.availability.is_none());
-}

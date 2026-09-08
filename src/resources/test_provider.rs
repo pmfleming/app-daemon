@@ -15,8 +15,6 @@ use std::{
 #[derive(Debug, Default)]
 pub(super) struct TestProvider {
     pub state: Mutex<TestState>,
-    pub memory_reads: AtomicU64,
-    pub file_reads: AtomicU64,
     pub disk_reads: AtomicU64,
     pub disk_gate: Mutex<Option<Arc<std::sync::Barrier>>>,
     pub disk_started: Mutex<Option<std::sync::mpsc::Sender<String>>>,
@@ -24,7 +22,9 @@ pub(super) struct TestProvider {
 
 #[derive(Debug, Default)]
 pub(super) struct TestState {
+    pub system_ticks: u64,
     pub processes: HashMap<u32, ProcessStat>,
+    pub io: HashMap<u32, ProcessIo>,
     pub memory: HashMap<u32, MemoryUsage>,
     pub files: HashMap<u32, ProcessFiles>,
     pub sockets: HashMap<u32, HashSet<u64>>,
@@ -43,13 +43,12 @@ impl EnergyProvider for TestProvider {
 
 impl ResourceProvider for TestProvider {
     fn system_cpu(&self) -> (u64, usize) {
-        (0, 1)
+        (self.state.lock().unwrap().system_ticks, 1)
     }
     fn processes(&self) -> HashMap<u32, ProcessStat> {
         self.state.lock().unwrap().processes.clone()
     }
     fn process_memory(&self, pid: u32) -> MemoryUsage {
-        self.memory_reads.fetch_add(1, Ordering::Relaxed);
         self.state
             .lock()
             .unwrap()
@@ -58,11 +57,10 @@ impl ResourceProvider for TestProvider {
             .copied()
             .unwrap_or_default()
     }
-    fn process_io(&self, _: u32) -> Option<ProcessIo> {
-        None
+    fn process_io(&self, pid: u32) -> Option<ProcessIo> {
+        self.state.lock().unwrap().io.get(&pid).copied()
     }
     fn process_files(&self, pid: u32) -> ProcessFiles {
-        self.file_reads.fetch_add(1, Ordering::Relaxed);
         self.state
             .lock()
             .unwrap()

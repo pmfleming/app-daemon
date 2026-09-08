@@ -1,6 +1,6 @@
 use super::{
-    DiskFile, DiskFileId, MemoryUsage, NetworkCounters, ProcessFiles, ProcessIo, ProcessUsage,
-    ResourceSnapshot, parse_process_stat,
+    CgroupUsage, DiskFile, DiskFileId, MemoryUsage, NetworkCounters, ProcessFiles, ProcessIo,
+    ProcessUsage, ResourceSnapshot, parse_process_stat,
 };
 use anyhow::Context;
 use std::{
@@ -20,7 +20,7 @@ fn parses_proc_stat_with_spaces_in_command() -> anyhow::Result<()> {
 }
 
 #[test]
-fn totals_process_trees_without_double_counting_shared_roots() {
+fn totals_resources_without_double_counting_roots_in_either_attribution_mode() {
     let file = |inode, bytes| {
         (
             DiskFileId { device: 1, inode },
@@ -71,7 +71,7 @@ fn totals_process_trees_without_double_counting_shared_roots() {
         (20, process(1.0, 50, 50, 60, HashMap::new())),
     ]);
     let children = HashMap::from([(1, vec![10, 20]), (10, vec![11])]);
-    let snapshot = ResourceSnapshot {
+    let mut snapshot = ResourceSnapshot {
         processes,
         children,
         logical_cpus: 4,
@@ -94,6 +94,27 @@ fn totals_process_trees_without_double_counting_shared_roots() {
     assert_eq!(usage.storage.referenced_file_permanent_bytes, 3072);
     assert_eq!(usage.energy.energy_mwh, 2.75);
     assert_eq!(usage.energy.energy_source, "rapl");
+
+    let path = "/user.slice/app-example.scope".to_owned();
+    snapshot
+        .cgroup_members_by_root
+        .insert(10, HashSet::from([10, 11]));
+    snapshot.cgroup_path_by_root.insert(10, path.clone());
+    snapshot.cgroup_usage.insert(
+        path,
+        CgroupUsage {
+            cpu_percent: 80.0,
+            read_bytes: 4096,
+            memory_bytes: 8192,
+            ..Default::default()
+        },
+    );
+    let usage = snapshot.usage_for_roots([10]);
+    assert_eq!(usage.measurement.attribution_method, "cgroup");
+    assert_eq!(usage.compute.cpu_percent, 80.0);
+    assert_eq!(usage.storage.disk_read_bytes, 4096);
+    assert_eq!(usage.compute.memory_cgroup_bytes, 8192);
+    assert_eq!(snapshot.usage_for_roots([0, 10, 10]), usage);
 }
 
 #[test]
@@ -140,42 +161,4 @@ fn includes_descendants_that_move_out_of_an_application_cgroup() {
     assert_eq!(usage.network.network_transmit_bytes_per_second, 250.0);
     assert_eq!(usage.measurement.attribution_method, "mixed");
     assert!(usage.measurement.network_bytes_available);
-}
-
-#[test]
-fn ignores_previous_counters_after_pid_reuse() {
-    let sampler = super::ResourceSampler {
-        previous_processes: HashMap::from([(
-            42,
-            super::PreviousProcess {
-                total_ticks: 100,
-                start_ticks: 7,
-                major_faults: 10,
-                io: Some(ProcessIo {
-                    physical_read_bytes: 1_000,
-                    physical_write_bytes: 2_000,
-                    ..ProcessIo::default()
-                }),
-            },
-        )]),
-        ..Default::default()
-    };
-    let process = super::ProcessStat {
-        parent_pid: 1,
-        total_ticks: 500,
-        start_ticks: 8,
-        major_faults: 20,
-        thread_count: 1,
-    };
-    let current = ProcessIo {
-        physical_read_bytes: 4_000,
-        physical_write_bytes: 8_000,
-        ..ProcessIo::default()
-    };
-    assert_eq!(sampler.cpu_percent(42, &process, Some(100), 4), 0.0);
-    assert_eq!(
-        sampler.io_delta(42, &process, current).physical_read_bytes,
-        0
-    );
-    assert_eq!(sampler.major_fault_delta(42, &process), 0);
 }

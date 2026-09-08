@@ -236,13 +236,9 @@ mod tests {
     use anyhow::Context;
 
     #[test]
-    fn rejects_malformed_metrics() {
+    fn parses_valid_drm_counters_and_rejects_malformed_input() -> anyhow::Result<()> {
         assert!(parse_gpu_fdinfo("drm-engine-gfx: nope\n").is_none());
         assert!(parse_gpu_fdinfo("drm-client-id: 4\ndrm-engine-gfx: nope\n").is_none());
-    }
-
-    #[test]
-    fn parses_standard_metrics() -> anyhow::Result<()> {
         let value = "drm-pdev: 0000:03:00.0\ndrm-client-id: 7\ndrm-engine-gfx: 250000000 ns\ndrm-engine-compute: 10 ms\ndrm-memory-vram: 64 MiB\ndrm-resident-vram: 32 MiB\n";
         let (id, client) = parse_gpu_fdinfo(value).context("DRM client metrics")?;
         assert_eq!(id, "0000:03:00.0/7");

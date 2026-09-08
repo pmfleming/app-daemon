@@ -7,19 +7,7 @@ use crate::{
     settings::SettingsStore,
 };
 
-use super::{QueryParams, combined_revision, page, resolve_target, resolve_target_with_cgroup};
-
-#[test]
-fn revisions_round_trip_exactly_through_javascript_numbers() {
-    let catalog = Catalog::from_paths(Vec::new());
-    let windows = Snapshot {
-        revision: u64::MAX,
-        ..Snapshot::default()
-    };
-    let revision = combined_revision(&catalog, &windows, 0);
-    assert!(revision < (1_u64 << 53));
-    assert_eq!(revision as f64 as u64, revision);
-}
+use super::{QueryParams, page, resolve_target, resolve_target_with_cgroup};
 
 #[test]
 fn ranks_prefix_acronym_and_metadata_matches() -> anyhow::Result<()> {
@@ -34,10 +22,14 @@ fn ranks_prefix_acronym_and_metadata_matches() -> anyhow::Result<()> {
     )?;
     let catalog = Catalog::from_paths(vec![directory.path().into()]);
     let resources = ResourceSnapshot::default();
+    let windows = Snapshot {
+        revision: u64::MAX,
+        ..Default::default()
+    };
     let search = |query: &str| {
         page(
             &catalog,
-            &Snapshot::default(),
+            &windows,
             &resources,
             &SettingsStore::load(None),
             &QueryParams {
@@ -61,6 +53,8 @@ fn ranks_prefix_acronym_and_metadata_matches() -> anyhow::Result<()> {
         assert_eq!(search(query).applications[0].match_kind, kind, "{query}");
     }
     let acronym = search("gc");
+    assert!(acronym.revision < (1_u64 << 53));
+    assert_eq!(acronym.revision as f64 as u64, acronym.revision);
     assert_eq!(acronym.applications.len(), 1);
     assert_eq!(acronym.applications[0].identity.name, "Google Contacts");
     assert_eq!(acronym.applications[0].match_kind, "acronym");

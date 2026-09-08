@@ -4,7 +4,7 @@ use super::{HistoryStore, persist_snapshot};
 use crate::model::{ComputeUsage, EnergyUsage, ResourceUsage, StorageUsage};
 
 #[test]
-fn aggregates_and_persists_resource_buckets() -> anyhow::Result<()> {
+fn persists_resource_buckets_and_retains_energy_for_seven_days() -> anyhow::Result<()> {
     let directory = tempfile::tempdir()?;
     let path = directory.path().join("history.json");
     let mut store = HistoryStore::load(Some(path.clone()));
@@ -61,48 +61,44 @@ fn aggregates_and_persists_resource_buckets() -> anyhow::Result<()> {
     assert_eq!(point.storage.disk_write_bytes_per_second, 40.0);
     assert_eq!(point.storage.open_file_disk_bytes, 4096);
     assert_eq!(point.energy_mwh, 6.0);
-    persist_snapshot(store.snapshot(false))?;
-
-    let points = page.points;
-    let mut loaded = HistoryStore::load(Some(path));
+    let until = bucket + 2 * super::ENERGY_BUCKET_MILLISECONDS;
     assert_eq!(
-        loaded.query("example.desktop", None, None, 10)?.points,
-        points
+        store.energy_totals(bucket, bucket + 17_000)[0].energy_mwh,
+        6.0
     );
-    Ok(())
-}
-
-#[test]
-fn keeps_compact_energy_totals_for_week_overviews() -> anyhow::Result<()> {
-    let directory = tempfile::tempdir()?;
-    let path = directory.path().join("history.json");
-    let mut store = HistoryStore::load(Some(path.clone()));
-    let usage = ResourceUsage {
-        energy: EnergyUsage {
-            energy_mwh: 1.25,
-            energy_source: "rapl".into(),
-            energy_confidence: "low".into(),
-            ..EnergyUsage::default()
-        },
-        ..ResourceUsage::default()
-    };
-    let current = super::now_milliseconds();
-    let now = current - current % super::ENERGY_BUCKET_MILLISECONDS + 1_000;
-    store.record("example.desktop", now, 2.0, &usage);
-    store.record("example.desktop", now + 2_000, 2.0, &usage);
-    let totals = store.energy_totals(now.saturating_sub(1), now + 3_000);
-    assert_eq!(totals.len(), 1);
-    assert_eq!(totals[0].energy_mwh, 2.5);
-    assert_eq!(totals[0].energy_source, "rapl");
     persist_snapshot(store.snapshot(true))?;
 
     let mut loaded = HistoryStore::load(Some(path));
-    let totals = loaded.energy_totals(
-        now.saturating_sub(1),
-        now + super::ENERGY_BUCKET_MILLISECONDS,
+    let restored = loaded.query("example.desktop", None, None, 10)?;
+    assert_eq!(
+        restored.points.len(),
+        2,
+        "final save includes the partial bucket"
     );
+    assert_eq!(restored.points.first(), page.points.first());
+    let totals = loaded.energy_totals(bucket, until);
     assert_eq!(totals.len(), 1);
-    assert_eq!(totals[0].energy_mwh, 2.5);
+    assert_eq!(totals[0].energy_mwh, 6.0);
+    assert_eq!(totals[0].energy_source, "rapl");
+    for (days, expected_energy) in [(2, 6.0), (8, 0.0)] {
+        let timestamp = bucket + days * 24 * 60 * 60 * 1000;
+        loaded.record("other.desktop", timestamp, 1.0, &ResourceUsage::default());
+        assert!(
+            loaded
+                .query("example.desktop", None, None, 10)?
+                .points
+                .is_empty()
+        );
+        let energy: f64 = loaded
+            .energy_totals(bucket, timestamp)
+            .iter()
+            .map(|total| total.energy_mwh)
+            .sum();
+        assert_eq!(
+            energy, expected_energy,
+            "energy retention after {days} days"
+        );
+    }
     Ok(())
 }
 

@@ -2,7 +2,7 @@ use super::{GpuProcessStat, ProcessUsage, ResourceSampler, ResourceSnapshot};
 use std::collections::HashMap;
 
 #[test]
-fn sums_gpu_clients_by_engine_then_processes_by_application() {
+fn aggregates_gpu_engines_caps_busy_usage_and_rebaselines_reused_pids() {
     let mut sampler = ResourceSampler::default();
     let counter = |value| GpuProcessStat {
         engine_nanoseconds: HashMap::from([
@@ -19,7 +19,7 @@ fn sums_gpu_clients_by_engine_then_processes_by_application() {
     assert_eq!(engines["0000:03:00.0/gfx"], 70.0);
     assert_eq!(engines["0000:03:00.0/copy"], 10.0);
 
-    let snapshot = ResourceSnapshot {
+    let mut snapshot = ResourceSnapshot {
         processes: HashMap::from([
             (
                 42,
@@ -44,34 +44,16 @@ fn sums_gpu_clients_by_engine_then_processes_by_application() {
     let usage = snapshot.usage_for_roots([42, 43]);
     assert_eq!(usage.compute.gpu_busy_percent, 90.0);
     assert_eq!(usage.compute.gpu_percent, 160.0);
-}
 
-#[test]
-fn caps_gpu_busy_only_after_aggregating_and_ignores_reused_pids() {
-    let snapshot = ResourceSnapshot {
-        processes: HashMap::from([(
-            42,
-            ProcessUsage {
-                gpu_engine_percent: HashMap::from([("gpu/gfx".into(), 120.0)]),
-                ..Default::default()
-            },
-        )]),
-        ..Default::default()
-    };
-    let usage = snapshot.usage_for_roots([42]);
+    snapshot
+        .processes
+        .get_mut(&43)
+        .unwrap()
+        .gpu_engine_percent
+        .insert("0000:03:00.0/gfx".into(), 40.0);
+    let usage = snapshot.usage_for_roots([42, 43]);
     assert_eq!(usage.compute.gpu_busy_percent, 100.0);
-    assert_eq!(usage.compute.gpu_percent, 120.0);
-
-    let mut sampler = ResourceSampler::default();
-    sampler
-        .previous_gpu_engines
-        .insert((42, 1, "gpu/1/gfx".into()), 10);
-    let gpu = GpuProcessStat {
-        engine_nanoseconds: HashMap::from([("gpu/1/gfx".into(), 1_000_000_000)]),
-        ..Default::default()
-    };
-    assert_eq!(
-        sampler.gpu_percent(42, 2, Some(&gpu), 1.0, &mut HashMap::new())["gpu/gfx"],
-        0.0
-    );
+    assert_eq!(usage.compute.gpu_percent, 180.0);
+    let reused = sampler.gpu_percent(42, 2, Some(&counter(100_000_000)), 1.0, &mut HashMap::new());
+    assert!(reused.values().all(|percent| *percent == 0.0));
 }
