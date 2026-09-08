@@ -37,5 +37,4 @@ harness = false
 required-features = ["benchmarks"]
 
 [dev-dependencies]
-rustix = { version = "1", features = ["process"] }
 tempfile = "3"

@@ -31,7 +31,6 @@
             '';
             cargoLock.lockFile = ./Cargo.lock;
             nativeBuildInputs = [ pkgs.makeWrapper ];
-            nativeCheckInputs = [ pkgs.bash pkgs.coreutils pkgs.dbus ];
             strictDeps = true;
             postInstall = ''
               install -Dm644 ${./packaging/systemd/app-daemon.service} $out/share/systemd/user/app-daemon.service
