@@ -26,12 +26,14 @@ use crate::{
 };
 
 mod action;
+mod identity;
 mod query;
 
 pub use action::{ApplicationAction, ExecuteParams};
 use action::{execute_action, operation_result};
+use identity::{group_windows, resolve_target};
 pub use query::QueryParams;
-use query::{combined_revision, page, resolve_target};
+use query::{combined_revision, page};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StateRevision {
@@ -144,9 +146,10 @@ impl ApplicationService {
         self.mark_resource_demand();
         let windows = Arc::clone(&*self.windows.read().await);
         let catalog = Arc::clone(&*self.catalog.read().await);
+        let grouped = group_windows(&catalog, &windows);
         let resources = self.resources.read().await;
         let settings = self.settings.read().await;
-        page(&catalog, &windows, &resources, &settings, &params)
+        page(&catalog, &windows, &resources, &settings, &params, grouped)
     }
 
     pub async fn update_settings(

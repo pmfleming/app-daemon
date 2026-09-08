@@ -687,47 +687,60 @@ impl ResourceSampler {
             .previous_system_ticks
             .map(|previous| system_ticks.saturating_sub(previous))
             .filter(|delta| *delta > 0);
-        let current = provider.processes();
-        let process_children = process_children(&current);
-        let active_roots = active_targets
-            .values()
-            .flatten()
-            .copied()
-            .filter(|pid| *pid > 0)
-            .collect::<HashSet<_>>();
-        let cgroup_path_by_root = cgroup_paths_for_roots(provider.as_ref(), &active_roots);
-        let cgroup_members_by_root =
-            cgroup_members_for_paths(provider.as_ref(), &cgroup_path_by_root);
-        let current_cgroups = cgroup_path_by_root
+        let (sample, mut snapshot) = ProcessSample::discover(provider.as_ref(), active_targets);
+        snapshot.logical_cpus = logical_cpus;
+        snapshot.interval_seconds = interval_seconds;
+        let current_cgroups = snapshot
+            .cgroup_path_by_root
             .values()
             .collect::<HashSet<_>>()
             .into_iter()
             .filter_map(|path| Some((path.clone(), provider.cgroup_counters(path)?)))
-            .collect::<HashMap<_, _>>();
-        let cgroup_usage = self.cgroup_usage(&current_cgroups, interval_seconds);
-        let mut active_processes = descendants(active_roots.iter().copied(), &process_children);
-        for members in cgroup_members_by_root.values() {
-            active_processes.extend(members);
-        }
-        active_processes.retain(|pid| current.contains_key(pid));
-        let identities = active_processes
-            .iter()
-            .filter_map(|&pid| Some((pid, current.get(&pid)?.start_ticks)))
-            .collect::<HashSet<_>>();
+            .collect();
+        snapshot.cgroup_usage = self.cgroup_usage(&current_cgroups, interval_seconds);
+        self.sample_processes(provider.as_ref(), &sample, &mut snapshot, system_delta, now);
+        let energy = self.energy.sample(interval_seconds, provider.as_ref());
+        snapshot.system_energy_mwh = finite_nonnegative(energy.energy_mwh);
+        snapshot.battery_full_mwh = finite_nonnegative(energy.battery_full_mwh);
+        snapshot.energy_source = energy.source;
+        snapshot.app_disk_by_target = self.app_disk.read(&provider, active_targets.keys(), now);
+        self.previous_cgroups = current_cgroups;
+        self.previous_system_ticks = Some(system_ticks);
+        self.previous_sample = Some(now);
+        snapshot
+    }
+
+    // Expensive reads are restricted to discovered application members. All
+    // processes still contribute CPU deltas to the energy-attribution denominator.
+    fn sample_processes(
+        &mut self,
+        provider: &dyn ResourceProvider,
+        sample: &ProcessSample,
+        snapshot: &mut ResourceSnapshot,
+        system_delta: Option<u64>,
+        now: Instant,
+    ) {
+        let ProcessSample {
+            processes: current,
+            active: active_processes,
+            identities,
+        } = sample;
+        let interval_seconds = snapshot.interval_seconds;
+        let logical_cpus = snapshot.logical_cpus;
         self.previous_sockets_by_pid.retain(|pid, _| {
             current
                 .get(pid)
                 .zip(self.previous_processes.get(pid))
                 .is_some_and(|(current, previous)| current.start_ticks == previous.start_ticks)
         });
-        let current_gpu = provider.gpu_processes(&active_processes);
+        let current_gpu = provider.gpu_processes(active_processes);
         self.open_files
-            .refresh(&identities, now, OPEN_FILE_REFRESH_INTERVAL, |pid| {
+            .refresh(identities, now, OPEN_FILE_REFRESH_INTERVAL, |pid| {
                 Arc::new(provider.process_files(pid))
             });
-        let network = self.sample_network(provider.as_ref(), &active_processes);
+        let network = self.sample_network(provider, active_processes);
         self.memory
-            .refresh(&identities, now, MEMORY_REFRESH_INTERVAL, |pid| {
+            .refresh(identities, now, MEMORY_REFRESH_INTERVAL, |pid| {
                 provider.process_memory(pid)
             });
         let sampled_io = active_processes
@@ -735,29 +748,10 @@ impl ResourceSampler {
             .copied()
             .filter_map(|pid| Some((pid, provider.process_io(pid)?)))
             .collect::<HashMap<_, _>>();
-        let energy = self.energy.sample(interval_seconds, provider.as_ref());
-        let app_disk_by_target = self.app_disk.read(&provider, active_targets.keys(), now);
-        let shared_pids =
-            shared_target_pids(active_targets, &process_children, &cgroup_members_by_root);
-        let mut snapshot = ResourceSnapshot {
-            children: process_children,
-            cgroup_members_by_root,
-            cgroup_path_by_root,
-            cgroup_usage,
-            app_disk_by_target,
-            network_deltas: network.deltas,
-            network_counters_available: network.available,
-            shared_pids,
-            logical_cpus,
-            interval_seconds,
-            system_energy_mwh: finite_nonnegative(energy.energy_mwh),
-            battery_full_mwh: finite_nonnegative(energy.battery_full_mwh),
-            energy_source: energy.source,
-            ..ResourceSnapshot::default()
-        };
-
+        snapshot.network_deltas = network.deltas;
+        snapshot.network_counters_available = network.available;
         let mut next_gpu_engines = HashMap::new();
-        for (&pid, process) in &current {
+        for (&pid, process) in current {
             let cpu_percent = self.cpu_percent(pid, process, system_delta, logical_cpus);
             let identity = (pid, process.start_ticks);
             let memory = self
@@ -802,15 +796,9 @@ impl ResourceSampler {
                 },
             );
         }
-        self.remember(
-            (current, sampled_io),
-            current_cgroups,
-            network.current,
-            next_gpu_engines,
-            system_ticks,
-            now,
-        );
-        snapshot
+        self.previous_gpu_engines = next_gpu_engines;
+        self.previous_network_counters = network.current;
+        self.remember_processes(current, &sampled_io);
     }
 
     fn sample_network(
@@ -1002,19 +990,14 @@ impl ResourceSampler {
         engines
     }
 
-    fn remember(
+    fn remember_processes(
         &mut self,
-        processes: (HashMap<u32, ProcessStat>, HashMap<u32, ProcessIo>),
-        current_cgroups: HashMap<String, CgroupCounters>,
-        current_network_counters: HashMap<u64, NetworkCounters>,
-        gpu_engines: HashMap<(u32, u64, String), u64>,
-        system_ticks: u64,
-        now: Instant,
+        current: &HashMap<u32, ProcessStat>,
+        current_io: &HashMap<u32, ProcessIo>,
     ) {
-        let (current, current_io) = processes;
         self.previous_processes = current
-            .into_iter()
-            .map(|(pid, process)| {
+            .iter()
+            .map(|(&pid, process)| {
                 let io = current_io.get(&pid).copied();
                 (
                     pid,
@@ -1027,11 +1010,53 @@ impl ResourceSampler {
                 )
             })
             .collect();
-        self.previous_gpu_engines = gpu_engines;
-        self.previous_cgroups = current_cgroups;
-        self.previous_network_counters = current_network_counters;
-        self.previous_system_ticks = Some(system_ticks);
-        self.previous_sample = Some(now);
+    }
+}
+
+/// Lightweight identity/topology discovery is separate from detailed sampling.
+struct ProcessSample {
+    processes: HashMap<u32, ProcessStat>,
+    active: HashSet<u32>,
+    identities: HashSet<ProcessIdentity>,
+}
+
+impl ProcessSample {
+    fn discover(
+        provider: &dyn ResourceProvider,
+        targets: &HashMap<String, Vec<u32>>,
+    ) -> (Self, ResourceSnapshot) {
+        let processes = provider.processes();
+        let children = process_children(&processes);
+        let roots = targets
+            .values()
+            .flatten()
+            .copied()
+            .filter(|pid| *pid > 0)
+            .collect();
+        let cgroup_path_by_root = cgroup_paths_for_roots(provider, &roots);
+        let cgroup_members_by_root = cgroup_members_for_paths(provider, &cgroup_path_by_root);
+        let mut active = descendants(roots, &children);
+        active.extend(cgroup_members_by_root.values().flatten());
+        active.retain(|pid| processes.contains_key(pid));
+        let identities = active
+            .iter()
+            .filter_map(|&pid| Some((pid, processes.get(&pid)?.start_ticks)))
+            .collect();
+        let shared_pids = shared_target_pids(targets, &children, &cgroup_members_by_root);
+        (
+            Self {
+                processes,
+                active,
+                identities,
+            },
+            ResourceSnapshot {
+                children,
+                cgroup_path_by_root,
+                cgroup_members_by_root,
+                shared_pids,
+                ..Default::default()
+            },
+        )
     }
 }
 

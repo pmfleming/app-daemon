@@ -13,7 +13,7 @@ use crate::{
     model::OperationResult,
 };
 
-use super::query::{resolve_target, target_window};
+use super::identity::{resolve_target, target_window};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "kebab-case")]

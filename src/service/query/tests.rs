@@ -7,7 +7,8 @@ use crate::{
     settings::SettingsStore,
 };
 
-use super::{QueryParams, page, resolve_target, resolve_target_with_cgroup};
+use super::{QueryParams, page};
+use crate::service::identity::{group_windows, resolve_target, resolve_target_with_cgroup};
 
 #[test]
 fn ranks_prefix_acronym_and_metadata_matches() -> anyhow::Result<()> {
@@ -38,6 +39,7 @@ fn ranks_prefix_acronym_and_metadata_matches() -> anyhow::Result<()> {
                 generation: 1,
                 limit: 100,
             },
+            Default::default(),
         )
     };
 
@@ -76,6 +78,7 @@ fn ranks_prefix_acronym_and_metadata_matches() -> anyhow::Result<()> {
             generation: 2,
             limit: 100,
         },
+        Default::default(),
     );
     assert_eq!(code.applications.len(), 1);
     assert_eq!(code.applications[0].identity.name, "Google Contacts");
@@ -154,9 +157,14 @@ fn launch_only_entries_remain_shortcuts_without_claiming_windows() -> anyhow::Re
         mapped: true,
     };
     assert_eq!(resolve_target(&catalog, &window), "window-group:browser");
+    let windows = Snapshot {
+        available: true,
+        clients: vec![window],
+        ..Default::default()
+    };
     let result = page(
         &catalog,
-        &Snapshot::default(),
+        &windows,
         &ResourceSnapshot::default(),
         &SettingsStore::load(None),
         &QueryParams {
@@ -165,7 +173,16 @@ fn launch_only_entries_remain_shortcuts_without_claiming_windows() -> anyhow::Re
             generation: 1,
             limit: 10,
         },
+        group_windows(&catalog, &windows),
     );
-    assert_eq!(result.applications[0].identity.kind, "desktop-shortcut");
+    let shortcut = result
+        .applications
+        .iter()
+        .find(|app| app.identity.id == "manual.desktop")
+        .unwrap();
+    assert_eq!(shortcut.identity.kind, "desktop-shortcut");
+    assert!(!shortcut.runtime.running);
+    assert_eq!(result.applications[0].identity.id, "window-group:browser");
+    assert_eq!(result.applications[0].runtime.running_count, 1);
     Ok(())
 }
