@@ -28,11 +28,11 @@
         ]
       },
       "locked": {
-        "lastModified": 1788384196,
-        "narHash": "sha256-QxDFv7aC4uvLrDpE5nDV8XTnL8mqkX1SFNx+S9w+GN4=",
+        "lastModified": 1789146826,
+        "narHash": "sha256-ksGjX5YP5mNfwXhk/hNJPUQrXC4PEa2H2myX71ErdZk=",
         "ref": "main",
-        "rev": "d667023032344adb3e4526414a63527520357c2f",
-        "revCount": 1,
+        "rev": "00044fe7517d6632d9cbd9e7aa712aa771f6577d",
+        "revCount": 3,
         "type": "git",
         "url": "file:../shelllist-hyprland"
       },

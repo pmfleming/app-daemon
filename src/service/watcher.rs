@@ -19,6 +19,12 @@ impl<W> WatchRecovery<W> {
         }
     }
 
+    pub(super) fn rebuild(&mut self, now: Instant) {
+        self.watcher = None;
+        self.retry_at = now;
+        self.retry_delay = MIN_RETRY;
+    }
+
     pub(super) fn failed(&mut self, now: Instant) {
         self.watcher = None;
         self.retry_at = now + self.retry_delay;

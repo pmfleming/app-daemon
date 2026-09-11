@@ -47,7 +47,6 @@
                   pkgs.lib.makeBinPath [
                     pkgs.coreutils
                     pkgs.gtk3
-                    pkgs.hyprland
                     pkgs.util-linux
                     pkgs.uwsm
                     pkgs.xdg-terminal-exec

@@ -1,5 +1,32 @@
 use super::{ApplicationAction, ApplicationService, ExecuteParams};
 
+#[test]
+fn healthy_streams_reduce_polling_and_reconnects_force_refresh() {
+    use super::*;
+    use shelllist_hyprland::Event;
+    assert_eq!(
+        reconciliation_intervals(true, true),
+        (Duration::from_secs(30), Duration::from_secs(300))
+    );
+    assert_eq!(
+        reconciliation_intervals(false, false),
+        (Duration::from_secs(5), Duration::from_secs(30))
+    );
+    let mut connected = false;
+    assert!(observe_window_event(Event::Connected, &mut connected));
+    assert!(connected);
+    assert!(!observe_window_event(
+        Event::Message("openlayer>>osd".into()),
+        &mut connected
+    ));
+    assert!(observe_window_event(Event::Disconnected, &mut connected));
+    assert!(!connected);
+    assert!(
+        observe_window_event(Event::Connected, &mut connected),
+        "reconnect must refresh even without a client event"
+    );
+}
+
 fn close_missing(expected_revision: Option<u64>) -> ExecuteParams {
     ExecuteParams {
         target_id: "missing-window-group".into(),

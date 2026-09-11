@@ -1,12 +1,10 @@
 use std::{
     collections::hash_map::DefaultHasher,
     hash::{Hash, Hasher},
-    process::Stdio,
-    time::Duration,
 };
 
 use serde::Deserialize;
-use tokio::{process::Command, sync::mpsc, time};
+use tokio::sync::mpsc;
 
 #[derive(Debug, Clone, Default, Deserialize, Hash)]
 pub struct Workspace {
@@ -36,8 +34,6 @@ pub struct Client {
     pub mapped: bool,
 }
 
-const HYPRCTL_TIMEOUT: Duration = Duration::from_secs(2);
-
 const fn unfocused() -> i64 {
     i64::MAX
 }
@@ -54,13 +50,17 @@ pub struct Snapshot {
 
 impl Snapshot {
     pub async fn load() -> Self {
-        let mut command = Command::new("hyprctl");
-        command.args(["clients", "-j"]);
-        let output = match bounded_output(&mut command).await {
-            Some(value) if value.status.success() => value,
-            _ => return Self::default(),
+        let Ok(output) = shelllist_hyprland::Client::default()
+            .request("j/clients")
+            .await
+        else {
+            return Self::default();
         };
-        let Ok(mut clients) = serde_json::from_slice::<Vec<Client>>(&output.stdout) else {
+        Self::from_response(&output)
+    }
+
+    fn from_response(output: &str) -> Self {
+        let Ok(mut clients) = serde_json::from_str::<Vec<Client>>(output) else {
             return Self::default();
         };
         clients.retain(|client| client.mapped && valid_address(&client.address));
@@ -90,6 +90,33 @@ pub fn window_id(address: &str) -> String {
 
 pub async fn watch_events(sender: mpsc::Sender<()>) {
     shelllist_hyprland::watch_events(sender).await;
+}
+
+pub(crate) async fn watch_window_events(sender: mpsc::Sender<shelllist_hyprland::Event>) {
+    shelllist_hyprland::watch_events_detailed(sender).await;
+}
+
+pub(crate) fn window_event_relevant(line: &str) -> bool {
+    let Some((event, _)) = line.split_once(">>") else {
+        return false;
+    };
+    matches!(
+        event,
+        "openwindow"
+            | "closewindow"
+            | "movewindow"
+            | "movewindowv2"
+            | "activewindow"
+            | "activewindowv2"
+            | "windowtitle"
+            | "windowtitlev2"
+            | "workspace"
+            | "workspacev2"
+            | "renameworkspace"
+            | "moveworkspace"
+            | "moveworkspacev2"
+            | "configreloaded"
+    )
 }
 
 pub async fn focus(address: &str) -> anyhow::Result<()> {
@@ -152,23 +179,10 @@ fn workspace_selector(workspace: &str) -> anyhow::Result<&str> {
 }
 
 async fn dispatch(arguments: &[&str]) -> bool {
-    let mut command = Command::new("hyprctl");
-    command
-        .args(arguments)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null());
-    let Some(output) = bounded_output(&mut command).await else {
-        return false;
-    };
-    output.status.success() && String::from_utf8_lossy(&output.stdout).trim() == "ok"
-}
-
-async fn bounded_output(command: &mut Command) -> Option<std::process::Output> {
-    command.kill_on_drop(true);
-    time::timeout(HYPRCTL_TIMEOUT, command.output())
+    shelllist_hyprland::Client::default()
+        .request(&arguments.join(" "))
         .await
-        .ok()?
-        .ok()
+        .is_ok_and(|response| response.trim() == "ok")
 }
 
 fn valid_address(address: &str) -> bool {
@@ -180,6 +194,46 @@ fn valid_address(address: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{address_selector, workspace_selector};
+
+    #[test]
+    fn filters_unrelated_events_but_retains_client_and_focus_changes() {
+        for event in [
+            "openwindow",
+            "closewindow",
+            "movewindowv2",
+            "windowtitlev2",
+            "activewindowv2",
+            "workspacev2",
+            "renameworkspace",
+            "configreloaded",
+        ] {
+            assert!(
+                super::window_event_relevant(&format!("{event}>>data")),
+                "{event}"
+            );
+        }
+        for event in [
+            "openlayer>>bar",
+            "closelayer>>osd",
+            "submap>>resize",
+            "activelayout>>kbd,us",
+            "malformed",
+        ] {
+            assert!(!super::window_event_relevant(event), "{event}");
+        }
+    }
+
+    #[test]
+    fn parses_direct_ipc_snapshot_and_rejects_partial_or_invalid_data() {
+        let state = super::Snapshot::from_response(
+            r#"[{"address":"0x123","mapped":true,"class":"app","pid":42},{"address":"0x0"}]"#,
+        );
+        assert!(state.available);
+        assert_eq!(state.clients.len(), 1);
+        assert_eq!(state.clients[0].pid, 42);
+        assert!(!super::Snapshot::from_response("truncated json").available);
+        assert!(super::Snapshot::from_response("[]").available);
+    }
 
     #[test]
     fn validates_window_selectors_for_dispatch() -> anyhow::Result<()> {
