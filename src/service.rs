@@ -30,6 +30,7 @@ mod action;
 pub(crate) mod benchmarks;
 mod identity;
 mod query;
+mod watcher;
 
 pub use action::{ApplicationAction, ExecuteParams};
 use action::{execute_action, operation_result};
@@ -425,13 +426,11 @@ async fn track_state(service: std::sync::Weak<ApplicationService>) {
     let (window_sender, mut window_events) = mpsc::channel(64);
     tokio::spawn(hyprland::watch_events(window_sender));
     let (catalog_sender, mut catalog_events) = mpsc::channel(64);
-    let _catalog_watcher = match catalog_watcher(catalog_sender) {
-        Ok(watcher) => Some(watcher),
-        Err(error) => {
-            tracing::warn!(%error, "application catalog watcher could not start");
-            None
-        }
-    };
+    // Keep the sender for retries. A failed constructor must not close the
+    // channel and terminate unrelated window/catalog fallback polling.
+    let mut catalog_watch = watcher::WatchRecovery::new(Instant::now());
+    let mut window_events_open = true;
+    let mut catalog_events_open = true;
     let mut window_poll = time::interval(WINDOW_RECOVERY_INTERVAL);
     let mut catalog_poll = time::interval(CATALOG_RECOVERY_INTERVAL);
     window_poll.set_missed_tick_behavior(MissedTickBehavior::Skip);
@@ -450,16 +449,32 @@ async fn track_state(service: std::sync::Weak<ApplicationService>) {
             return;
         };
         tokio::select! {
-            event = window_events.recv() => {
-                if event.is_none() { return; }
+            _ = wait_for_watcher_retry(catalog_watch.retry_deadline()) => {
+                if let Err(error) = catalog_watch.attempt(Instant::now(), || catalog_watcher(catalog_sender.clone())) {
+                    tracing::warn!(%error, "catalog watcher unavailable; polling continues, retry scheduled");
+                }
+            }
+            event = window_events.recv(), if window_events_open => {
+                if event.is_none() {
+                    window_events_open = false;
+                    tracing::warn!("window event stream ended; continuing reconciliation");
+                    continue;
+                }
                 time::sleep(EVENT_DEBOUNCE).await;
                 while window_events.try_recv().is_ok() {}
                 service.refresh_windows().await;
             }
-            event = catalog_events.recv() => {
-                if event.is_none() { return; }
+            event = catalog_events.recv(), if catalog_events_open => {
+                let Some(event) = event else {
+                    catalog_events_open = false;
+                    continue;
+                };
+                let mut failed = matches!(event, CatalogEvent::Failed);
                 time::sleep(EVENT_DEBOUNCE).await;
-                while catalog_events.try_recv().is_ok() {}
+                while let Ok(event) = catalog_events.try_recv() {
+                    failed |= matches!(event, CatalogEvent::Failed);
+                }
+                if failed { catalog_watch.failed(Instant::now()); }
                 service.refresh_catalog().await;
             }
             _ = window_poll.tick() => service.refresh_windows().await,
@@ -468,19 +483,36 @@ async fn track_state(service: std::sync::Weak<ApplicationService>) {
     }
 }
 
-fn catalog_watcher(sender: mpsc::Sender<()>) -> notify::Result<RecommendedWatcher> {
+async fn wait_for_watcher_retry(deadline: Option<Instant>) {
+    match deadline {
+        Some(deadline) => time::sleep_until(time::Instant::from_std(deadline)).await,
+        None => std::future::pending().await,
+    }
+}
+
+enum CatalogEvent {
+    Changed,
+    Failed,
+}
+
+fn catalog_watcher(sender: mpsc::Sender<CatalogEvent>) -> notify::Result<RecommendedWatcher> {
     let mut watcher = notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
-        if event.is_ok() {
-            let _ = sender.try_send(());
-        }
+        let event = match event {
+            Ok(_) => CatalogEvent::Changed,
+            Err(error) => {
+                tracing::warn!(%error, "catalog watcher failed; rebuilding watch");
+                CatalogEvent::Failed
+            }
+        };
+        let _ = sender.try_send(event);
     })?;
     for path in default_catalog_paths()
         .into_iter()
         .filter(|path| path.exists())
     {
-        if let Err(error) = watcher.watch(&path, RecursiveMode::Recursive) {
-            tracing::warn!(%error, path = %path.display(), "application directory could not be watched");
-        }
+        // A partially installed watch is not healthy either: retain fallback
+        // polling and retry the complete watch set when resources recover.
+        watcher.watch(&path, RecursiveMode::Recursive)?;
     }
     Ok(watcher)
 }
