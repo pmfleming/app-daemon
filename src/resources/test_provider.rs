@@ -23,6 +23,7 @@ pub(super) struct TestProvider {
 #[derive(Debug, Clone, Default)]
 pub(super) struct TestState {
     pub system_ticks: u64,
+    pub rapl: HashMap<PathBuf, (u64, u64)>,
     pub processes: HashMap<u32, ProcessStat>,
     pub io: HashMap<u32, ProcessIo>,
     pub memory: HashMap<u32, MemoryUsage>,
@@ -34,7 +35,7 @@ pub(super) struct TestState {
 
 impl EnergyProvider for TestProvider {
     fn rapl_zones(&self) -> HashMap<PathBuf, (u64, u64)> {
-        HashMap::new()
+        self.state.lock().unwrap().rapl.clone()
     }
     fn batteries(&self) -> BatterySample {
         BatterySample::default()

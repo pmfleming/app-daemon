@@ -15,6 +15,8 @@ mod disk;
 mod energy;
 mod gpu;
 mod network;
+#[cfg(test)]
+mod resume_tests;
 mod system;
 
 use disk::AppDiskCache;
@@ -622,6 +624,7 @@ pub struct ResourceSampler {
     previous_sockets_by_pid: HashMap<u32, Arc<HashSet<u64>>>,
     previous_network_available: bool,
     previous_sample: Option<Instant>,
+    resume_clock: crate::resume::ResumeClock,
     memory: ProcessCache<MemoryUsage>,
     open_files: ProcessCache<Arc<ProcessFiles>>,
     app_disk: AppDiskCache,
@@ -640,6 +643,7 @@ impl Default for ResourceSampler {
             previous_sockets_by_pid: HashMap::new(),
             previous_network_available: false,
             previous_sample: None,
+            resume_clock: crate::resume::ResumeClock::default(),
             memory: ProcessCache::default(),
             open_files: ProcessCache::default(),
             app_disk: AppDiskCache::default(),
@@ -671,10 +675,29 @@ struct DiskBreakdown {
 }
 
 impl ResourceSampler {
+    /// Keep disk workers and completed footprints, but never carry counter
+    /// deltas or short-lived process caches across an unobserved sleep cycle.
+    pub(crate) fn reset_after_resume(&mut self) {
+        self.previous_processes.clear();
+        self.previous_gpu_engines.clear();
+        self.previous_system_ticks = None;
+        self.previous_cgroups.clear();
+        self.previous_network_counters.clear();
+        self.previous_sockets_by_pid.clear();
+        self.previous_network_available = false;
+        self.previous_sample = None;
+        self.energy = EnergySampler::default();
+        self.memory = ProcessCache::default();
+        self.open_files = ProcessCache::default();
+    }
+
     pub fn sample_for_targets(
         &mut self,
         active_targets: &HashMap<String, Vec<u32>>,
     ) -> ResourceSnapshot {
+        if self.resume_clock.resumed() {
+            self.reset_after_resume();
+        }
         let now = Instant::now();
         let interval_seconds = self
             .previous_sample
@@ -707,6 +730,12 @@ impl ResourceSampler {
         self.previous_cgroups = current_cgroups;
         self.previous_system_ticks = Some(system_ticks);
         self.previous_sample = Some(now);
+        if self.resume_clock.resumed() {
+            // The process may have been frozen halfway through /proc/sysfs
+            // reads. Discard that mixed interval rather than persisting it.
+            self.reset_after_resume();
+            return ResourceSnapshot::default();
+        }
         snapshot
     }
 

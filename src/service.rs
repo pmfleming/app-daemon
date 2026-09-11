@@ -7,7 +7,7 @@ use std::{
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use serde::Deserialize;
 use tokio::{
-    sync::{Mutex, Notify, RwLock, broadcast, mpsc, oneshot},
+    sync::{Mutex, Notify, RwLock, broadcast, mpsc, oneshot, watch},
     task::AbortHandle,
     time::{self, MissedTickBehavior},
 };
@@ -63,12 +63,14 @@ pub struct ApplicationService {
     operations: Mutex<HashMap<String, ActiveOperation>>,
     resource_sampling: StdMutex<ResourceSamplingPolicy>,
     resource_demand_changed: Notify,
+    resume_events: watch::Receiver<u64>,
 }
 
 impl ApplicationService {
     pub fn new() -> Arc<Self> {
         let (state_changes, _) = broadcast::channel(32);
         let (operation_changes, _) = broadcast::channel(64);
+        let (resume_sender, resume_events) = watch::channel(0);
         let service = Arc::new(Self {
             catalog: RwLock::new(Arc::new(Catalog::default())),
             windows: RwLock::new(Arc::new(Snapshot::default())),
@@ -81,8 +83,10 @@ impl ApplicationService {
             operations: Mutex::new(HashMap::new()),
             resource_sampling: StdMutex::new(ResourceSamplingPolicy::default()),
             resource_demand_changed: Notify::new(),
+            resume_events,
         });
         if tokio::runtime::Handle::try_current().is_ok() {
+            tokio::spawn(crate::resume::monitor(resume_sender));
             tokio::spawn(track_state(Arc::downgrade(&service)));
             tokio::spawn(track_resources(Arc::downgrade(&service)));
         }
@@ -521,12 +525,23 @@ async fn track_resources(service: std::sync::Weak<ApplicationService>) {
     let mut sampler = ResourceSampler::default();
     let mut last_sample = None;
     let mut last_save = Instant::now();
+    let Some(initial) = service.upgrade() else {
+        return;
+    };
+    let mut resumes = initial.resume_events.clone();
+    let mut resume_generation = *resumes.borrow_and_update();
+    drop(initial);
     loop {
         let Some(service) = service.upgrade() else {
             return;
         };
-        if !resource_sample_due(&service, last_sample).await {
+        if !resource_sample_due(&service, last_sample, &mut resumes).await {
             continue;
+        }
+        let generation = *resumes.borrow_and_update();
+        if generation != resume_generation {
+            sampler.reset_after_resume();
+            resume_generation = generation;
         }
         sample_resources(&service, &mut sampler).await;
         last_sample = Some(Instant::now());
@@ -537,7 +552,11 @@ async fn track_resources(service: std::sync::Weak<ApplicationService>) {
     }
 }
 
-async fn resource_sample_due(service: &ApplicationService, last_sample: Option<Instant>) -> bool {
+async fn resource_sample_due(
+    service: &ApplicationService,
+    last_sample: Option<Instant>,
+    resumes: &mut watch::Receiver<u64>,
+) -> bool {
     let now = Instant::now();
     let Some(last_sample) = last_sample else {
         return true;
@@ -549,6 +568,7 @@ async fn resource_sample_due(service: &ApplicationService, last_sample: Option<I
     tokio::select! {
         () = time::sleep_until(time::Instant::from_std(deadline)) => true,
         () = service.resource_demand_changed.notified() => false,
+        _ = resumes.changed(), if resumes.has_changed().is_ok() => true,
     }
 }
 
