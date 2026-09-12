@@ -1,0 +1,21 @@
+[package]
+name = "shelllist-hyprland"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT"
+description = "Shared bounded Hyprland IPC transport for Shelllist daemons"
+
+[dependencies]
+anyhow = "1"
+tokio = { version = "1", features = ["fs", "io-util", "macros", "net", "sync", "time"] }
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { version = "1", features = ["rt"] }
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = "warn"

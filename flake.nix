@@ -2,17 +2,9 @@
   description = "Application catalog and activation daemon for Shelllist";
 
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-26.05";
-  inputs.daemonFramework = {
-    url = "git+file:../daemon-framework?ref=main";
-    inputs.nixpkgs.follows = "nixpkgs";
-  };
-  inputs.hyprlandIpc = {
-    url = "git+file:../shelllist-hyprland?ref=main";
-    inputs.nixpkgs.follows = "nixpkgs";
-  };
 
   outputs =
-    { self, nixpkgs, daemonFramework, hyprlandIpc }:
+    { self, nixpkgs }:
     let
       systems = [ "x86_64-linux" ];
       forAllSystems = f: nixpkgs.lib.genAttrs systems (system: f system nixpkgs.legacyPackages.${system});
@@ -25,12 +17,9 @@
             pname = "app-daemon";
             version = "0.1.0";
             src = ./.;
-            postUnpack = ''
-              cp -R --no-preserve=mode ${daemonFramework} "$(dirname "$sourceRoot")/daemon-framework"
-              cp -R --no-preserve=mode ${hyprlandIpc} "$(dirname "$sourceRoot")/shelllist-hyprland"
-            '';
             cargoLock.lockFile = ./Cargo.lock;
             nativeBuildInputs = [ pkgs.makeWrapper ];
+            nativeCheckInputs = [ pkgs.bash pkgs.coreutils pkgs.dbus ];
             strictDeps = true;
             postInstall = ''
               install -Dm644 ${./packaging/systemd/app-daemon.service} $out/share/systemd/user/app-daemon.service

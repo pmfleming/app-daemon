@@ -4,9 +4,11 @@ Rust application catalog, Hyprland window identity, process-tree CPU and residen
 
 ```sh
 nix develop
-cargo test
+cargo test --locked
 nix build
 ```
+
+A single checkout is sufficient: the small Shelllist libraries are pinned source snapshots under `vendor/` (provenance and update instructions in `vendor/README.md`). Cargo and Nix do not require neighboring repositories or local Git URLs. Without Nix, install a current stable Rust toolchain plus `sh`, `sleep`, and `dbus-daemon` for tests, then run `cargo test --locked` and `cargo build --release --locked`. Runtime launching needs UWSM, or a user systemd manager plus `systemd-run`, `gtk-launch`, and `xdg-terminal-exec` as appropriate. Registry dependencies/Nixpkgs require downloading on a cold build; this is a standalone-source guarantee, not a completely offline distribution.
 
 `app-daemon daemon` exports `org.laufan.AppDaemon`; `app-daemon client` bridges JSONL requests to the session service using `app-api` v1. Resource collection is isolated behind an injectable Linux provider so procfs, cgroup, and energy edge cases can be tested without relying on the host.
 

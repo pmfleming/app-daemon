@@ -65,3 +65,9 @@ Validation: 52 tests including D-Bus-only catalog/action visibility and address 
 Move named-unit identity resolution into the catalog and independently discover the current user's application cgroups during sampling. Retain observed process/descendant identities across window closure and reparenting, prune on exit/PID reuse, exclude separately owned application children, and never attribute launch-only/generic daemon scopes. Publish background running state, topology revisions, history and energy without requiring windows. Per-window views remain distinct from application totals.
 
 Validation: regression tests exercise windowless cgroups through sampling/query/history, orphaned helpers, PID reuse, separate child ownership and named-unit formats; strict Clippy and formatting. Unidentified, never-observed unmanaged processes remain explicitly outside attributable application accounting.
+
+## 11. Standalone source builds
+
+Vendor the three small Shelllist libraries from recorded commits, including available upstream licenses and update/provenance documentation. Cargo now resolves only in-tree path dependencies; remove all local-file flake inputs and sibling-copy hooks. Add explicit Nix check tools and document cold-build/runtime requirements.
+
+Validation: 56 tests and strict Clippy pass using the vendored libraries. An isolated source export under /tmp builds and passes all 56 tests with --locked --offline, without sibling checkouts. Nix flake evaluation succeeds. An offline Nix package build cannot complete because the pinned Nixpkgs bootstrap sources/substitutes are absent from the host store (stage0-posix-1.9.1-source); this is recorded rather than claiming a successful package build.

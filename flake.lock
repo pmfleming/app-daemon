@@ -1,47 +1,5 @@
 {
   "nodes": {
-    "daemonFramework": {
-      "inputs": {
-        "nixpkgs": [
-          "nixpkgs"
-        ]
-      },
-      "locked": {
-        "lastModified": 1788384005,
-        "narHash": "sha256-b+tVRRctw4KIo69/c6sxshBsKmgRrVcOMGVzuwf5gPo=",
-        "ref": "main",
-        "rev": "c90883428ed83baa8e451dec5b598ad4e3141d25",
-        "revCount": 28,
-        "type": "git",
-        "url": "file:../daemon-framework"
-      },
-      "original": {
-        "ref": "main",
-        "type": "git",
-        "url": "file:../daemon-framework"
-      }
-    },
-    "hyprlandIpc": {
-      "inputs": {
-        "nixpkgs": [
-          "nixpkgs"
-        ]
-      },
-      "locked": {
-        "lastModified": 1789146826,
-        "narHash": "sha256-ksGjX5YP5mNfwXhk/hNJPUQrXC4PEa2H2myX71ErdZk=",
-        "ref": "main",
-        "rev": "00044fe7517d6632d9cbd9e7aa712aa771f6577d",
-        "revCount": 3,
-        "type": "git",
-        "url": "file:../shelllist-hyprland"
-      },
-      "original": {
-        "ref": "main",
-        "type": "git",
-        "url": "file:../shelllist-hyprland"
-      }
-    },
     "nixpkgs": {
       "locked": {
         "lastModified": 1786089803,
@@ -60,8 +18,6 @@
     },
     "root": {
       "inputs": {
-        "daemonFramework": "daemonFramework",
-        "hyprlandIpc": "hyprlandIpc",
         "nixpkgs": "nixpkgs"
       }
     }
