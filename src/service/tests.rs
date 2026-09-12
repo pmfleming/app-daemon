@@ -60,5 +60,15 @@ async fn rejects_stale_actions_and_reports_accepted_operation_outcomes() -> anyh
     assert_eq!(running.status, "running");
     assert_eq!(failed.id, accepted.id);
     assert_eq!(failed.status, "failed");
+    assert_eq!(
+        service.operation_status_owned(&accepted.id, None).await,
+        Some(failed)
+    );
+    assert!(
+        service
+            .operation_status_owned(&accepted.id, Some(":1.2"))
+            .await
+            .is_none()
+    );
     Ok(())
 }

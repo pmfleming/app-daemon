@@ -71,6 +71,14 @@
         "stream": "applications.operation"
       },
       {
+        "name": "applications.operation.status",
+        "params_example": {
+          "operation_id": "operation-example"
+        },
+        "response_key": "operation_status",
+        "stream": "applications.operation"
+      },
+      {
         "name": "applications.settings.update",
         "params_example": {
           "target_id": "org.example.App.desktop",

@@ -7,7 +7,6 @@ use std::{
 use serde::Deserialize;
 use tokio::{
     sync::{Mutex, Notify, RwLock, broadcast, mpsc, oneshot, watch},
-    task::AbortHandle,
     time,
 };
 use uuid::Uuid;
@@ -30,8 +29,10 @@ use catalog_watch::CatalogEvent;
 #[cfg(feature = "benchmarks")]
 pub(crate) mod benchmarks;
 mod identity;
+mod operations;
 mod query;
 mod watcher;
+use operations::{ActiveOperation, OperationRegistry};
 
 pub use action::{ApplicationAction, ExecuteParams};
 use action::{execute_action, operation_result};
@@ -46,12 +47,6 @@ pub struct StateRevision {
     pub settings: u64,
 }
 
-struct ActiveOperation {
-    abort: AbortHandle,
-    accepted: OperationResult,
-    owner: Option<String>,
-}
-
 pub struct ApplicationService {
     catalog: RwLock<Arc<Catalog>>,
     windows: RwLock<Arc<Snapshot>>,
@@ -61,7 +56,7 @@ pub struct ApplicationService {
     settings_updates: Mutex<()>,
     state_changes: broadcast::Sender<StateRevision>,
     operation_changes: broadcast::Sender<OperationResult>,
-    operations: Mutex<HashMap<String, ActiveOperation>>,
+    operations: Mutex<OperationRegistry>,
     launch_locks: StdMutex<HashMap<String, std::sync::Weak<Mutex<()>>>>,
     resource_sampling: StdMutex<ResourceSamplingPolicy>,
     resource_demand_changed: Notify,
@@ -82,7 +77,7 @@ impl ApplicationService {
             settings_updates: Mutex::new(()),
             state_changes,
             operation_changes,
-            operations: Mutex::new(HashMap::new()),
+            operations: Mutex::new(OperationRegistry::default()),
             launch_locks: StdMutex::new(HashMap::new()),
             resource_sampling: StdMutex::new(ResourceSamplingPolicy::default()),
             resource_demand_changed: Notify::new(),
@@ -345,6 +340,8 @@ impl ApplicationService {
         let operation_id = accepted.id.clone();
         let service = Arc::clone(self);
         let (start_sender, start_receiver) = oneshot::channel();
+        let mut operations = self.operations.lock().await;
+        operations.admit(owner.as_deref())?;
         let task = tokio::spawn(async move {
             let _ = start_receiver.await;
             let running = operation_result(
@@ -354,7 +351,13 @@ impl ApplicationService {
                 "Operation running".into(),
                 None,
             );
-            let _ = service.operation_changes.send(running);
+            {
+                let mut operations = service.operations.lock().await;
+                if !operations.running(running.clone()) {
+                    return;
+                }
+                let _ = service.operation_changes.send(running);
+            }
             let lock = service.launch_lock(&params.target_id);
             let _launch = lock.lock().await;
             let result = execute_action(&catalog, &params).await;
@@ -374,21 +377,15 @@ impl ApplicationService {
                     None,
                 ),
             };
-            if service
-                .operations
-                .lock()
-                .await
-                .remove(&operation_id)
-                .is_some()
-            {
+            if service.operations.lock().await.finish(completed.clone()) {
                 let _ = service.operation_changes.send(completed);
             }
         });
-        self.operations.lock().await.insert(
+        operations.insert(
             accepted.id.clone(),
             ActiveOperation {
                 abort: task.abort_handle(),
-                accepted: accepted.clone(),
+                result: accepted.clone(),
                 owner,
             },
         );
@@ -405,18 +402,23 @@ impl ApplicationService {
         operation_id: &str,
         owner: Option<&str>,
     ) -> Option<OperationResult> {
-        let mut operations = self.operations.lock().await;
-        if operations.get(operation_id)?.owner.as_deref() != owner {
-            return None;
-        }
-        let active = operations.remove(operation_id)?;
-        drop(operations);
-        active.abort.abort();
-        let mut cancelled = active.accepted;
-        cancelled.status = "cancelled".into();
-        cancelled.message = "Operation cancelled".into();
+        let cancelled = self.operations.lock().await.cancel(operation_id, owner)?;
         let _ = self.operation_changes.send(cancelled.clone());
         Some(cancelled)
+    }
+
+    pub async fn operation_status_owned(
+        &self,
+        operation_id: &str,
+        owner: Option<&str>,
+    ) -> Option<OperationResult> {
+        self.operations.lock().await.status(operation_id, owner)
+    }
+
+    pub async fn cancel_all_operations(&self) {
+        for cancelled in self.operations.lock().await.cancel_all() {
+            let _ = self.operation_changes.send(cancelled);
+        }
     }
 }
 

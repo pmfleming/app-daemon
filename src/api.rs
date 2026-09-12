@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use serde::de::DeserializeOwned;
+use serde::{Deserialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 use shelllist_daemon_core::{ApiError as EnvelopeError, ApiIdentity, error as error_envelope};
 
@@ -57,6 +57,9 @@ impl ApiService {
             "applications.energyOverview" => self.energy_overview(params).await,
             "applications.refresh" => self.refresh(params).await,
             "applications.execute" => self.execute(params, owner).await,
+            "applications.operation.status" => {
+                self.operation_status(params, owner.as_deref()).await
+            }
             "applications.settings.update" => self.update_settings(params).await,
             _ => Err((
                 "unsupported-method",
@@ -111,6 +114,28 @@ impl ApiService {
                 }})
             })
             .map_err(|error| ("validation-error", error.to_string()))
+    }
+
+    async fn operation_status(
+        &self,
+        params: Value,
+        owner: Option<&str>,
+    ) -> Result<Value, ApiError> {
+        #[derive(Deserialize)]
+        struct Params {
+            operation_id: String,
+        }
+        let params: Params = decode(params)?;
+        self.applications
+            .operation_status_owned(&params.operation_id, owner)
+            .await
+            .map(|operation| json!({ "operation_status": operation }))
+            .ok_or_else(|| {
+                (
+                    "request-not-found",
+                    "Operation is unknown, expired, or belongs to another client".into(),
+                )
+            })
     }
 
     async fn execute(&self, params: Value, owner: Option<String>) -> Result<Value, ApiError> {

@@ -20,7 +20,12 @@ struct AppCorrelation;
 impl CorrelationPolicy for AppCorrelation {
     fn response_id(&self, response: &Value) -> Option<TrackedId> {
         tracked(
-            response.pointer("/data/operation/id"),
+            response.pointer("/data/operation/id").filter(|_| {
+                response
+                    .pointer("/data/operation/status")
+                    .and_then(Value::as_str)
+                    == Some("accepted")
+            }),
             TrackedKind::Operation,
         )
         .or_else(|| {
@@ -33,7 +38,9 @@ impl CorrelationPolicy for AppCorrelation {
 
     fn event_id(&self, stream: &str, event: &Value) -> Option<String> {
         if stream == protocol::stream::OPERATION {
-            event.pointer("/operation/id")
+            event
+                .pointer("/operation/id")
+                .or_else(|| event.get("subscription_id"))
         } else {
             event.get("subscription_id")
         }
@@ -90,7 +97,9 @@ mod tests {
     fn correlates_application_operations_and_subscriptions() -> anyhow::Result<()> {
         let policy = AppCorrelation;
         let operation = policy
-            .response_id(&json!({ "data": { "operation": { "id": "operation-1" } } }))
+            .response_id(
+                &json!({ "data": { "operation": { "id": "operation-1", "status": "accepted" } } }),
+            )
             .context("operation correlation")?;
         assert_eq!(operation.id, "operation-1");
         assert_eq!(operation.kind, TrackedKind::Operation);
@@ -100,6 +109,15 @@ mod tests {
                 &json!({ "operation": { "id": "operation-1" } })
             ),
             Some("operation-1".into())
+        );
+        assert_eq!(
+            policy.event_id(
+                protocol::stream::OPERATION,
+                &json!({
+                    "event": "resync-required", "subscription_id": "sub-1"
+                })
+            ),
+            Some("sub-1".into())
         );
         assert!(policy.is_terminal(
             protocol::stream::OPERATION,

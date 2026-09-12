@@ -41,3 +41,9 @@ Validation: helper subprocess tests for success, rejection/exit 42, missing exec
 Add a systemd-run fallback: GTK handoffs use independent scopes; long-running terminal/action executables use exec-type, cgroup-lifetime services with inherited environment and working directory. UWSM actions also use explicit unique units. Refuse unmanaged direct launching in service cgroups when neither helper exists. Keep the daemon service's normal control-group cleanup policy.
 
 Validation: 46 tests, including backend selection and scope/service command contracts, strict Clippy and formatting. Real user-systemd lifetime behavior remains an explicit integration boundary; fixture integration is restored in a later step.
+
+## 7. Recoverable operation outcomes
+
+Retain bounded, expiring terminal outcomes and current running state with owner-scoped status lookup. Add applications.operation.status to the protocol contract; status responses do not create new client correlation lifetimes. Lagging streams emit resync-required. Bound active operations globally/per owner, and ensure cancellation cannot be overwritten by late running/completed updates.
+
+Validation: 48 tests including retention, expiry, admission, ownership, cancellation races, status lookup and stream-control correlation; strict Clippy and formatting.

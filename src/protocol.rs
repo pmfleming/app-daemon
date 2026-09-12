@@ -16,6 +16,7 @@ pub const METHODS: &[&str] = &[
     "applications.energyOverview",
     "applications.refresh",
     "applications.execute",
+    "applications.operation.status",
     "applications.settings.update",
 ];
 pub const STREAMS: &[&str] = &[stream::APPLICATIONS, stream::WINDOWS, stream::OPERATION];

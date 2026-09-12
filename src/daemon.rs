@@ -208,6 +208,8 @@ async fn forward_events(
                     }
                     Err(broadcast::error::RecvError::Lagged(count)) => {
                         tracing::warn!(count, "application operation subscriber lagged");
+                        emit_event(&emitter, protocol::stream::OPERATION, "resync-required", &subscription_id,
+                            json!({ "dropped_events": count, "recovery_method": "applications.operation.status" })).await;
                     }
                     Err(broadcast::error::RecvError::Closed) => return,
                 }
