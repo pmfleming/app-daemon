@@ -83,3 +83,17 @@ Validation: 56 unit + 8 private-session integration tests pass, as do strict all
 Require an exact catalog/unit identity match before borrowing cgroup members or counters for a known process root. An application's PID inside an unrelated launcher service must not charge sibling processes to that application. Also recognize stable bus-ID user services for DBusActivatable entries, including nested cgroups, without accepting arbitrary generic services.
 
 Validation: 57 unit tests and strict Clippy pass, including a regression combining unrelated launcher siblings with stable D-Bus service discovery.
+
+## Final validation
+
+Implementation commit validated: `93deac6` (this final record changes documentation only).
+
+- `cargo test --locked --all-features`: 57 unit + 8 private-session tests pass.
+- `cargo test --locked --test systemd_lifetime -- --ignored isolated_`: both real-systemd lifetime tests pass; the internal child helper is not run directly.
+- `cargo clippy --locked --all-targets --all-features -- -D warnings`, formatting, and Git diff checks pass.
+- A fresh `git archive` export under /tmp passes all 65 tests with `--locked --offline --all-features`, using the Cargo cache but no sibling source repositories.
+- Vendored framework (6 core + 6 Tokio tests) and Hyprland transport (3 tests) pass independently in an isolated export, seeded from the root lockfile.
+- `nix build --no-link --max-jobs 2` succeeds on the final implementation, including the sandbox check phase. Real-systemd tests remain opt-in outside the sandbox.
+- Temporary real-systemd fixture units are cleaned up. No remote Git push was performed.
+
+Intentional safety boundaries remain documented in README.md: ambiguous singleton/multi-window launches are not moved speculatively; never-observed unmanaged processes without a resolvable application identity are not guessed. Benchmarks, fresh coverage percentages, and dependency vulnerability auditing were not part of this validation.
