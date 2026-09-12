@@ -15,6 +15,9 @@ use crate::{
 
 use super::identity::{resolve_target, target_window};
 
+#[cfg(test)]
+mod tests;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum ApplicationAction {
@@ -89,10 +92,12 @@ impl ActionOutcome {
 
 pub(super) async fn execute_action(
     catalog: &Catalog,
-    windows: &Snapshot,
     params: &ExecuteParams,
 ) -> anyhow::Result<ActionOutcome> {
-    params.action.execute(catalog, windows, params).await
+    // The caller holds the application's launch lock. Never use a cached window
+    // baseline: a preceding launch or compositor event may not have reconciled yet.
+    let windows = Snapshot::load().await;
+    params.action.execute(catalog, &windows, params).await
 }
 
 impl ApplicationAction {
@@ -105,9 +110,7 @@ impl ApplicationAction {
         let target_id = &params.target_id;
         match self {
             Self::Activate => activate(catalog, windows, params).await,
-            Self::Launch => launch_on_workspace(catalog, windows, params)
-                .await
-                .map(|launch| ActionOutcome::new(catalog, target_id, "Launched", Some(launch))),
+            Self::Launch => launch_on_workspace(catalog, windows, params).await,
             Self::FocusWindow => focus_window(catalog, windows, params)
                 .await
                 .map(|()| ActionOutcome::new(catalog, target_id, "Focused", None)),
@@ -149,11 +152,11 @@ async fn activate(
         return Ok(ActionOutcome::new(catalog, target_id, "Focused", None));
     }
     let launch = launch(catalog, target_id).await?;
-    let placed = place_launched_window(catalog, windows, params, true).await?;
+    let placed = place_launched_window(catalog, windows, params, &launch, true).await?;
     let verb = if placed {
         "Launched and focused"
     } else {
-        "Launched"
+        "Launched (no safely attributable new window to place/focus)"
     };
     Ok(ActionOutcome::new(catalog, target_id, verb, Some(launch)))
 }
@@ -162,28 +165,51 @@ async fn launch_on_workspace(
     catalog: &Catalog,
     windows: &Snapshot,
     params: &ExecuteParams,
-) -> anyhow::Result<LaunchReceipt> {
+) -> anyhow::Result<ActionOutcome> {
     let launch = launch(catalog, &params.target_id).await?;
-    if params.workspace_id.is_some() {
-        place_launched_window(catalog, windows, params, false).await?;
-    }
-    Ok(launch)
+    let placed = if params.workspace_id.is_some() {
+        place_launched_window(catalog, windows, params, &launch, false).await?
+    } else {
+        true
+    };
+    let verb = if placed {
+        "Launched"
+    } else {
+        "Launched (workspace placement unavailable: no safely attributable new window)"
+    };
+    Ok(ActionOutcome::new(
+        catalog,
+        &params.target_id,
+        verb,
+        Some(launch),
+    ))
 }
 
 async fn place_launched_window(
     catalog: &Catalog,
     previous: &Snapshot,
     params: &ExecuteParams,
+    launch: &LaunchReceipt,
     focus: bool,
 ) -> anyhow::Result<bool> {
+    let Some(unit) = launch.unit.as_deref().filter(|_| previous.available) else {
+        // Direct/D-Bus singleton launches may not expose a provable process or
+        // unit relationship. Do not move an unrelated instance as a fallback.
+        return Ok(false);
+    };
     if catalog
         .by_id(&params.target_id)
         .is_some_and(|entry| entry.launch_only)
     {
         return Ok(false);
     }
-    let previous_addresses = application_window_addresses(catalog, previous, &params.target_id);
-    let Some(address) = wait_for_new_window(catalog, &params.target_id, &previous_addresses).await
+    let previous_addresses = previous
+        .clients
+        .iter()
+        .map(|window| window.address.clone())
+        .collect::<Vec<_>>();
+    let Some(address) =
+        wait_for_new_window(catalog, &params.target_id, &previous_addresses, unit).await
     else {
         return Ok(false);
     };
@@ -200,6 +226,7 @@ async fn wait_for_new_window(
     catalog: &Catalog,
     target_id: &str,
     previous_addresses: &[String],
+    unit: &str,
 ) -> Option<String> {
     const WINDOW_TIMEOUT: Duration = Duration::from_secs(8);
     const WINDOW_RETRY_INTERVAL: Duration = Duration::from_millis(100);
@@ -207,10 +234,10 @@ async fn wait_for_new_window(
     let deadline = Instant::now() + WINDOW_TIMEOUT;
     loop {
         let windows = Snapshot::load().await;
-        if let Some(address) = windows.clients.iter().find_map(|window| {
-            (resolve_target(catalog, window) == target_id
-                && !previous_addresses.contains(&window.address))
-            .then(|| window.address.clone())
+        if let Some(address) = correlated_window(&windows, previous_addresses, unit, |window| {
+            (resolve_target(catalog, window) == target_id)
+                .then(|| crate::resources::process_cgroup(window.pid))
+                .flatten()
         }) {
             return Some(address);
         }
@@ -219,6 +246,21 @@ async fn wait_for_new_window(
         }
         time::sleep(WINDOW_RETRY_INTERVAL).await;
     }
+}
+
+fn correlated_window(
+    windows: &Snapshot,
+    previous_addresses: &[String],
+    unit: &str,
+    cgroup: impl Fn(&Client) -> Option<String>,
+) -> Option<String> {
+    let mut matches = windows.clients.iter().filter(|window| {
+        !previous_addresses.contains(&window.address)
+            && cgroup(window).is_some_and(|path| path.split('/').any(|part| part == unit))
+    });
+    let window = matches.next()?;
+    // A multi-window launch is ambiguous too; leave all windows untouched.
+    matches.next().is_none().then(|| window.address.clone())
 }
 
 async fn focus_window(

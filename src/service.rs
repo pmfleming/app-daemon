@@ -62,6 +62,7 @@ pub struct ApplicationService {
     state_changes: broadcast::Sender<StateRevision>,
     operation_changes: broadcast::Sender<OperationResult>,
     operations: Mutex<HashMap<String, ActiveOperation>>,
+    launch_locks: StdMutex<HashMap<String, std::sync::Weak<Mutex<()>>>>,
     resource_sampling: StdMutex<ResourceSamplingPolicy>,
     resource_demand_changed: Notify,
     resume_events: watch::Receiver<u64>,
@@ -82,6 +83,7 @@ impl ApplicationService {
             state_changes,
             operation_changes,
             operations: Mutex::new(HashMap::new()),
+            launch_locks: StdMutex::new(HashMap::new()),
             resource_sampling: StdMutex::new(ResourceSamplingPolicy::default()),
             resource_demand_changed: Notify::new(),
             resume_events,
@@ -285,6 +287,20 @@ impl ApplicationService {
         }
     }
 
+    fn launch_lock(&self, target_id: &str) -> Arc<Mutex<()>> {
+        let mut locks = self
+            .launch_locks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        locks.retain(|_, lock| lock.strong_count() > 0);
+        if let Some(lock) = locks.get(target_id).and_then(std::sync::Weak::upgrade) {
+            return lock;
+        }
+        let lock = Arc::new(Mutex::new(()));
+        locks.insert(target_id.to_owned(), Arc::downgrade(&lock));
+        lock
+    }
+
     pub async fn execute(
         self: &Arc<Self>,
         params: ExecuteParams,
@@ -339,7 +355,9 @@ impl ApplicationService {
                 None,
             );
             let _ = service.operation_changes.send(running);
-            let result = execute_action(&catalog, &windows, &params).await;
+            let lock = service.launch_lock(&params.target_id);
+            let _launch = lock.lock().await;
+            let result = execute_action(&catalog, &params).await;
             let completed = match result {
                 Ok(outcome) => operation_result(
                     operation_id.clone(),

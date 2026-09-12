@@ -68,7 +68,7 @@ fn cgroup_target(catalog: &Catalog, path: &str) -> Option<String> {
 }
 
 fn is_instance_token(value: &str) -> bool {
-    value.len() == 8 && value.chars().all(|character| character.is_ascii_hexdigit())
+    matches!(value.len(), 8 | 32) && value.chars().all(|character| character.is_ascii_hexdigit())
 }
 
 fn systemd_unescape(value: &str) -> String {

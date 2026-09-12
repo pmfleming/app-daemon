@@ -45,6 +45,9 @@ impl LaunchBackend {
 pub struct LaunchReceipt {
     pub backend: String,
     pub scope: String,
+    /// Exact unit used for this launch; never infer ownership from application class alone.
+    #[serde(skip)]
+    pub(crate) unit: Option<String>,
 }
 
 impl From<LaunchBackend> for LaunchReceipt {
@@ -52,6 +55,7 @@ impl From<LaunchBackend> for LaunchReceipt {
         Self {
             backend: backend.name().into(),
             scope: backend.scope().into(),
+            unit: None,
         }
     }
 }
@@ -61,6 +65,11 @@ const LAUNCH_HANDOFF_TIMEOUT: Duration = Duration::from_secs(10);
 pub async fn launch_desktop(id: &str) -> anyhow::Result<LaunchReceipt> {
     let backend = LaunchBackend::detect();
     let mut command = desktop_command(backend, id);
+    let unit = (backend == LaunchBackend::Uwsm).then(|| application_unit(id));
+    if let Some(unit) = &unit {
+        // Insert the override before the command's `--` delimiter.
+        command = uwsm_desktop_command(id, unit);
+    }
     if backend == LaunchBackend::Direct {
         let mut child = command
             .stdin(Stdio::null())
@@ -74,7 +83,10 @@ pub async fn launch_desktop(id: &str) -> anyhow::Result<LaunchReceipt> {
     } else {
         checked_handoff(command, "desktop application").await?;
     }
-    Ok(backend.into())
+    Ok(LaunchReceipt {
+        unit,
+        ..backend.into()
+    })
 }
 
 pub async fn launch_desktop_action(id: &str, action_id: &str) -> anyhow::Result<LaunchReceipt> {
@@ -120,6 +132,25 @@ pub fn spawn(
         let _ = child.wait().await;
     });
     Ok(backend.into())
+}
+
+pub(crate) fn application_unit(id: &str) -> String {
+    let mut escaped = String::new();
+    for byte in id.trim_end_matches(".desktop").bytes() {
+        if byte.is_ascii_alphanumeric() || b"_.:-".contains(&byte) {
+            escaped.push(char::from(byte));
+        } else {
+            use std::fmt::Write;
+            let _ = write!(escaped, "\\x{byte:02x}");
+        }
+    }
+    format!("app-{escaped}@{}.service", uuid::Uuid::new_v4().simple())
+}
+
+fn uwsm_desktop_command(id: &str, unit: &str) -> Command {
+    let mut command = Command::new("uwsm-app");
+    command.args(["-t", "service", "-u", unit, "--", id]);
+    command
 }
 
 fn desktop_command(backend: LaunchBackend, id: &str) -> Command {
