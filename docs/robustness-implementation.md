@@ -29,3 +29,9 @@ Validation: six history tests including restart persistence, duplicate repair, c
 CPU, memory and I/O counters now use independent optional values. Missing/malformed controllers preserve available procfs metrics, readable idle I/O remains supported zero, and controller recovery establishes an independent baseline. Memory gauges remain available on the initial sample.
 
 Validation: 16 resource tests, including fixture-filesystem controller reads and sampler fallback/recovery assertions; strict Clippy and formatting.
+
+## 5. Checked direct-launch handoff
+
+Observe gtk-launch exit status under the same bounded handoff policy as UWSM. Capture at most 8 KiB of diagnostics while draining the pipe, and do not wait for descendant stderr EOF. Timeouts/cancellation kill the pending helper, not a successfully handed-off application.
+
+Validation: helper subprocess tests for success, rejection/exit 42, missing executable, timeout, bounded diagnostics and inherited stderr; strict Clippy and formatting.

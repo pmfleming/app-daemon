@@ -2,9 +2,12 @@ use std::{process::Stdio, time::Duration};
 
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
-use tokio::process::Command;
+use tokio::{io::AsyncReadExt, process::Command};
 
 use crate::platform::command_available;
+
+#[cfg(test)]
+mod tests;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LaunchBackend {
@@ -70,19 +73,7 @@ pub async fn launch_desktop(id: &str) -> anyhow::Result<LaunchReceipt> {
         // Insert the override before the command's `--` delimiter.
         command = uwsm_desktop_command(id, unit);
     }
-    if backend == LaunchBackend::Direct {
-        let mut child = command
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .context("start desktop application")?;
-        tokio::spawn(async move {
-            let _ = child.wait().await;
-        });
-    } else {
-        checked_handoff(command, "desktop application").await?;
-    }
+    checked_handoff(command, "desktop application").await?;
     Ok(LaunchReceipt {
         unit,
         ..backend.into()
@@ -101,20 +92,67 @@ pub async fn launch_desktop_action(id: &str, action_id: &str) -> anyhow::Result<
     Ok(backend.into())
 }
 
-async fn checked_handoff(mut command: Command, description: &str) -> anyhow::Result<()> {
-    command.kill_on_drop(true);
-    let output = tokio::time::timeout(LAUNCH_HANDOFF_TIMEOUT, command.output())
-        .await
-        .with_context(|| format!("{description} launch handoff timed out"))?
+async fn checked_handoff(command: Command, description: &str) -> anyhow::Result<()> {
+    checked_handoff_with_timeout(command, description, LAUNCH_HANDOFF_TIMEOUT).await
+}
+
+async fn checked_handoff_with_timeout(
+    mut command: Command,
+    description: &str,
+    timeout: Duration,
+) -> anyhow::Result<()> {
+    let mut child = command
+        .kill_on_drop(true)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
         .with_context(|| format!("start {description}"))?;
-    if output.status.success() {
+    let mut stderr = child
+        .stderr
+        .take()
+        .context("capture launcher diagnostics")?;
+    let mut detail = Vec::new();
+    let mut buffer = [0_u8; 4096];
+    let mut open = true;
+    let status = tokio::time::timeout(timeout, async {
+        loop {
+            tokio::select! {
+                status = child.wait() => return status,
+                read = stderr.read(&mut buffer), if open => {
+                    match read {
+                        Ok(0) | Err(_) => open = false,
+                        Ok(count) => capture_diagnostic(&mut detail, &buffer[..count]),
+                    }
+                }
+            }
+        }
+    })
+    .await
+    .with_context(|| format!("{description} launch handoff timed out"))?
+    .with_context(|| format!("wait for {description} launcher"))?;
+    // GTK may pass stderr to an application. Observe the launcher's exit, not
+    // descendant EOF, and never retain unbounded diagnostics from a noisy helper.
+    let _ = tokio::time::timeout(Duration::from_millis(20), async {
+        while let Ok(count) = stderr.read(&mut buffer).await {
+            if count == 0 {
+                break;
+            }
+            capture_diagnostic(&mut detail, &buffer[..count]);
+        }
+    })
+    .await;
+    if status.success() {
         return Ok(());
     }
-    let detail = String::from_utf8_lossy(&output.stderr).trim().to_owned();
-    if detail.is_empty() {
-        anyhow::bail!("{description} launch failed");
-    }
-    anyhow::bail!("{description} launch failed: {detail}")
+    let detail = String::from_utf8_lossy(&detail).trim().to_owned();
+    anyhow::bail!("{description} launch failed ({status}): {detail}")
+}
+
+fn capture_diagnostic(detail: &mut Vec<u8>, bytes: &[u8]) {
+    const MAX_DIAGNOSTIC: usize = 8192;
+    detail
+        .extend_from_slice(&bytes[..bytes.len().min(MAX_DIAGNOSTIC.saturating_sub(detail.len()))]);
 }
 
 pub fn spawn(
