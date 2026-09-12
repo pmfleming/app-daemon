@@ -45,6 +45,10 @@ impl AppDaemon {
         #[zbus(header)] header: Header<'_>,
         #[zbus(signal_emitter)] emitter: SignalEmitter<'_>,
     ) -> String {
+        let _permit = match self.applications.request_permit().await {
+            Ok(permit) => permit,
+            Err(error) => return api::error("daemon-unavailable", error.to_string()).to_string(),
+        };
         let selected = match selected_streams(&streams) {
             Ok(selected) => selected,
             Err(stream) => {
@@ -282,6 +286,6 @@ pub async fn run() -> Result<()> {
         "app-daemon started"
     );
     let result = shelllist_daemon_tokio::wait_for_shutdown().await;
-    shutdown_applications.save_history_final().await;
+    shutdown_applications.shutdown().await;
     result
 }

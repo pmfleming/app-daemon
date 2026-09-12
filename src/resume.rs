@@ -43,6 +43,7 @@ fn suspend_offset() -> Option<i128> {
 pub(crate) async fn monitor(sender: watch::Sender<u64>) {
     let (events, mut signals) = mpsc::channel(8);
     let task = tokio::spawn(logind_events(events));
+    let _logind = crate::platform::AbortOnDrop(task.abort_handle());
     let mut poll = interval(Duration::from_secs(2));
     poll.set_missed_tick_behavior(MissedTickBehavior::Skip);
     let mut clock = ResumeClock::default();

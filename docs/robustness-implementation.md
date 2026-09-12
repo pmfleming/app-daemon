@@ -47,3 +47,9 @@ Validation: 46 tests, including backend selection and scope/service command cont
 Retain bounded, expiring terminal outcomes and current running state with owner-scoped status lookup. Add applications.operation.status to the protocol contract; status responses do not create new client correlation lifetimes. Lagging streams emit resync-required. Bound active operations globally/per owner, and ensure cancellation cannot be overwritten by late running/completed updates.
 
 Validation: 48 tests including retention, expiry, admission, ownership, cancellation races, status lookup and stream-control correlation; strict Clippy and formatting.
+
+## 8. Coordinated shutdown and persistence
+
+Shutdown closes request admission, drains admitted calls, cancels operations, stops owned monitor/event tasks, and joins the sampler before saving final history. Persistence is serialized from snapshot creation through completed atomic write; the serialization guard lives in the blocking writer so cancellation cannot release it early. Repeated shutdown is idempotent.
+
+Validation: 50 tests, including delayed sampling/older-write shutdown ordering, admission rejection and operation cancellation; strict Clippy and formatting.

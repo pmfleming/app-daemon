@@ -38,6 +38,10 @@ impl ApiService {
         params: Value,
         owner: Option<String>,
     ) -> Value {
+        let _permit = match self.applications.request_permit().await {
+            Ok(permit) => permit,
+            Err(error) => return self::error("daemon-unavailable", error.to_string()),
+        };
         tracing::debug!(%method, "app-api request started");
         self.request(method, params, owner)
             .await

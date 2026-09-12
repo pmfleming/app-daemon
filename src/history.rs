@@ -95,7 +95,7 @@ impl HistoryStore {
         Self::load(history_path())
     }
 
-    fn load(path: Option<PathBuf>) -> Self {
+    pub(crate) fn load(path: Option<PathBuf>) -> Self {
         let file = path
             .as_ref()
             .and_then(|path| fs::read(path).ok())

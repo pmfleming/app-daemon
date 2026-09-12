@@ -27,7 +27,7 @@ fn healthy_streams_reduce_polling_and_reconnects_force_refresh() {
     );
 }
 
-fn close_missing(expected_revision: Option<u64>) -> ExecuteParams {
+pub(super) fn close_missing(expected_revision: Option<u64>) -> ExecuteParams {
     ExecuteParams {
         target_id: "missing-window-group".into(),
         action: ApplicationAction::Close,

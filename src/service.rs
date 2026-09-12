@@ -1,6 +1,10 @@
 use std::{
     collections::HashMap,
-    sync::{Arc, Mutex as StdMutex},
+    future::Future,
+    sync::{
+        Arc, Mutex as StdMutex,
+        atomic::{AtomicBool, Ordering},
+    },
     time::{Duration, Instant},
 };
 
@@ -61,13 +65,24 @@ pub struct ApplicationService {
     resource_sampling: StdMutex<ResourceSamplingPolicy>,
     resource_demand_changed: Notify,
     resume_events: watch::Receiver<u64>,
+    stopping: AtomicBool,
+    stop: watch::Sender<bool>,
+    background_tasks: StdMutex<Vec<tokio::task::JoinHandle<()>>>,
+    shutdown_lock: Mutex<()>,
+    request_gate: RwLock<()>,
+    history_saves: Arc<Mutex<()>>,
 }
 
 impl ApplicationService {
     pub fn new() -> Arc<Self> {
+        Self::build(true)
+    }
+
+    fn build(trackers: bool) -> Arc<Self> {
         let (state_changes, _) = broadcast::channel(32);
         let (operation_changes, _) = broadcast::channel(64);
         let (resume_sender, resume_events) = watch::channel(0);
+        let (stop, _) = watch::channel(false);
         let service = Arc::new(Self {
             catalog: RwLock::new(Arc::new(Catalog::default())),
             windows: RwLock::new(Arc::new(Snapshot::default())),
@@ -82,13 +97,65 @@ impl ApplicationService {
             resource_sampling: StdMutex::new(ResourceSamplingPolicy::default()),
             resource_demand_changed: Notify::new(),
             resume_events,
+            stopping: AtomicBool::new(false),
+            stop,
+            background_tasks: StdMutex::new(Vec::new()),
+            shutdown_lock: Mutex::new(()),
+            request_gate: RwLock::new(()),
+            history_saves: Arc::new(Mutex::new(())),
         });
-        if tokio::runtime::Handle::try_current().is_ok() {
-            tokio::spawn(crate::resume::monitor(resume_sender));
-            tokio::spawn(track_state(Arc::downgrade(&service)));
-            tokio::spawn(track_resources(Arc::downgrade(&service)));
+        if trackers && tokio::runtime::Handle::try_current().is_ok() {
+            let tasks = vec![
+                tokio::spawn(until_shutdown(
+                    crate::resume::monitor(resume_sender),
+                    service.stop.subscribe(),
+                )),
+                tokio::spawn(until_shutdown(
+                    track_state(Arc::downgrade(&service)),
+                    service.stop.subscribe(),
+                )),
+                tokio::spawn(track_resources(Arc::downgrade(&service))),
+            ];
+            *service
+                .background_tasks
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = tasks;
         }
         service
+    }
+
+    pub(crate) async fn request_permit(
+        &self,
+    ) -> anyhow::Result<tokio::sync::RwLockReadGuard<'_, ()>> {
+        let permit = self.request_gate.read().await;
+        anyhow::ensure!(
+            !self.stopping.load(Ordering::Acquire),
+            "application service is shutting down"
+        );
+        Ok(permit)
+    }
+
+    pub async fn shutdown(&self) {
+        let _shutdown = self.shutdown_lock.lock().await;
+        if self.stopping.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        self.stop.send_replace(true);
+        // Finish already admitted API calls before cancelling their operations.
+        let _requests = self.request_gate.write().await;
+        self.cancel_all_operations().await;
+        let tasks = std::mem::take(
+            &mut *self
+                .background_tasks
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        );
+        for task in tasks {
+            if let Err(error) = task.await {
+                tracing::warn!(%error, "background task failed during shutdown");
+            }
+        }
+        self.save_history_final().await;
     }
 
     pub async fn refresh(&self) {
@@ -274,8 +341,16 @@ impl ApplicationService {
     }
 
     async fn persist_history(&self, final_save: bool, message: &'static str) {
+        // Transfer the guard to the writer: cancelling the awaiting future must
+        // not release serialization while an older blocking write still runs.
+        let save = Arc::clone(&self.history_saves).lock_owned().await;
         let snapshot = self.history.lock().await.snapshot(final_save);
-        match tokio::task::spawn_blocking(move || persist_snapshot(snapshot)).await {
+        match tokio::task::spawn_blocking(move || {
+            let _save = save;
+            persist_snapshot(snapshot)
+        })
+        .await
+        {
             Ok(Ok(())) => {}
             Ok(Err(error)) => tracing::warn!(%error, "{message}"),
             Err(error) => tracing::warn!(%error, "resource history persistence task failed"),
@@ -341,6 +416,10 @@ impl ApplicationService {
         let service = Arc::clone(self);
         let (start_sender, start_receiver) = oneshot::channel();
         let mut operations = self.operations.lock().await;
+        anyhow::ensure!(
+            !self.stopping.load(Ordering::Acquire),
+            "application service is shutting down"
+        );
         operations.admit(owner.as_deref())?;
         let task = tokio::spawn(async move {
             let _ = start_receiver.await;
@@ -453,7 +532,8 @@ impl ResourceSamplingPolicy {
 
 async fn track_state(service: std::sync::Weak<ApplicationService>) {
     let (window_sender, mut window_events) = mpsc::channel(64);
-    tokio::spawn(hyprland::watch_window_events(window_sender));
+    let events_task = tokio::spawn(hyprland::watch_window_events(window_sender));
+    let _events = crate::platform::AbortOnDrop(events_task.abort_handle());
     let (catalog_sender, mut catalog_events) = mpsc::channel(64);
     let mut catalog_watch = watcher::WatchRecovery::new(Instant::now());
     let mut window_events_open = true;
@@ -595,6 +675,9 @@ async fn track_resources(service: std::sync::Weak<ApplicationService>) {
         let Some(service) = service.upgrade() else {
             return;
         };
+        if service.stopping.load(Ordering::Acquire) {
+            return;
+        }
         if !resource_sample_due(&service, last_sample, &mut resumes).await {
             continue;
         }
@@ -605,6 +688,9 @@ async fn track_resources(service: std::sync::Weak<ApplicationService>) {
         }
         sample_resources(&service, &mut sampler).await;
         last_sample = Some(Instant::now());
+        if service.stopping.load(Ordering::Acquire) {
+            return;
+        }
         if last_save.elapsed() >= HISTORY_SAVE_INTERVAL {
             service.save_history().await;
             last_save = Instant::now();
@@ -625,10 +711,27 @@ async fn resource_sample_due(
     if now >= deadline {
         return true;
     }
+    let mut stop = service.stop.subscribe();
     tokio::select! {
+        () = wait_for_stop(&mut stop) => false,
         () = time::sleep_until(time::Instant::from_std(deadline)) => true,
         () = service.resource_demand_changed.notified() => false,
         _ = resumes.changed(), if resumes.has_changed().is_ok() => true,
+    }
+}
+
+async fn wait_for_stop(stop: &mut watch::Receiver<bool>) {
+    while !*stop.borrow_and_update() {
+        if stop.changed().await.is_err() {
+            return;
+        }
+    }
+}
+
+async fn until_shutdown(task: impl Future<Output = ()>, mut stop: watch::Receiver<bool>) {
+    tokio::select! {
+        () = task => {},
+        () = wait_for_stop(&mut stop) => {},
     }
 }
 
@@ -707,5 +810,7 @@ const fn default_energy_limit() -> usize {
     20
 }
 
+#[cfg(test)]
+mod shutdown_tests;
 #[cfg(test)]
 mod tests;
