@@ -48,6 +48,7 @@
                     pkgs.coreutils
                     pkgs.gtk3
                     pkgs.util-linux
+                    pkgs.systemd
                     pkgs.uwsm
                     pkgs.xdg-terminal-exec
                   ]

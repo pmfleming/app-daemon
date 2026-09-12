@@ -34,6 +34,10 @@ impl CatalogEntry {
         self.entry.terminal()
     }
 
+    pub fn working_directory(&self) -> Option<&str> {
+        self.entry.path().filter(|path| !path.is_empty())
+    }
+
     pub fn kind(&self) -> &'static str {
         if self.launch_only {
             "desktop-shortcut"

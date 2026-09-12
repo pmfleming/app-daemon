@@ -35,3 +35,9 @@ Validation: 16 resource tests, including fixture-filesystem controller reads and
 Observe gtk-launch exit status under the same bounded handoff policy as UWSM. Capture at most 8 KiB of diagnostics while draining the pipe, and do not wait for descendant stderr EOF. Timeouts/cancellation kill the pending helper, not a successfully handed-off application.
 
 Validation: helper subprocess tests for success, rejection/exit 42, missing executable, timeout, bounded diagnostics and inherited stderr; strict Clippy and formatting.
+
+## 6. Launch lifetime isolation
+
+Add a systemd-run fallback: GTK handoffs use independent scopes; long-running terminal/action executables use exec-type, cgroup-lifetime services with inherited environment and working directory. UWSM actions also use explicit unique units. Refuse unmanaged direct launching in service cgroups when neither helper exists. Keep the daemon service's normal control-group cleanup policy.
+
+Validation: 46 tests, including backend selection and scope/service command contracts, strict Clippy and formatting. Real user-systemd lifetime behavior remains an explicit integration boundary; fixture integration is restored in a later step.

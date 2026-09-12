@@ -363,21 +363,30 @@ async fn launch(catalog: &Catalog, target_id: &str) -> anyhow::Result<LaunchRece
     let entry = catalog
         .by_id(target_id)
         .context("application is no longer available")?;
-    if entry.requires_terminal() && launch::LaunchBackend::detect() == launch::LaunchBackend::Direct
-    {
-        return launch_in_terminal(entry.launch_command()?);
+    if entry.requires_terminal() && launch::LaunchBackend::detect() != launch::LaunchBackend::Uwsm {
+        return launch_in_terminal(
+            target_id,
+            entry.launch_command()?,
+            entry.working_directory(),
+        )
+        .await;
     }
     launch::launch_desktop(target_id).await
 }
 
-fn launch_in_terminal(command: Vec<String>) -> anyhow::Result<LaunchReceipt> {
+async fn launch_in_terminal(
+    target_id: &str,
+    command: Vec<String>,
+    directory: Option<&str>,
+) -> anyhow::Result<LaunchReceipt> {
     let (program, command_arguments) = command
         .split_first()
         .context("desktop application command is empty")?;
     let mut arguments = Vec::with_capacity(command_arguments.len() + 2);
     arguments.extend(["--", program.as_str()]);
     arguments.extend(command_arguments.iter().map(String::as_str));
-    launch::spawn("xdg-terminal-exec", arguments)
+    launch::spawn_for_application(target_id, "xdg-terminal-exec", arguments, directory)
+        .await
         .context("start application in the default terminal")
 }
 
@@ -396,5 +405,10 @@ async fn launch_action(
     let (program, arguments) = args
         .split_first()
         .context("desktop action command is empty")?;
-    launch::spawn(program, arguments).context("start desktop action")
+    if entry.requires_terminal() {
+        return launch_in_terminal(target_id, args, entry.working_directory()).await;
+    }
+    launch::spawn_for_application(target_id, program, arguments, entry.working_directory())
+        .await
+        .context("start desktop action")
 }

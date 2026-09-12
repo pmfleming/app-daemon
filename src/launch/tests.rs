@@ -1,5 +1,35 @@
 use super::*;
 
+#[test]
+fn fallback_launches_use_independent_scope_or_exec_service() {
+    assert_eq!(LaunchBackend::detect_with(|_| true), LaunchBackend::Uwsm);
+    assert_eq!(
+        LaunchBackend::detect_with(|name| name == "systemd-run"),
+        LaunchBackend::Systemd
+    );
+    assert_eq!(LaunchBackend::detect_with(|_| false), LaunchBackend::Direct);
+    let (command, unit) = desktop_command(LaunchBackend::Systemd, "org.example.App.desktop");
+    let args = command
+        .as_std()
+        .get_args()
+        .map(|arg| arg.to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
+    assert!(unit.unwrap().ends_with(".scope"));
+    assert!(args.iter().any(|arg| arg == "--scope"));
+    assert_eq!(
+        &args[args.len() - 3..],
+        ["--", "gtk-launch", "org.example.App"]
+    );
+    let command = systemd_command("app", "app-test@12345678.service", false);
+    let args = command.as_std().get_args().collect::<Vec<_>>();
+    assert!(args.contains(&std::ffi::OsStr::new("--service-type=exec")));
+    assert!(args.contains(&std::ffi::OsStr::new("--property=ExitType=cgroup")));
+    assert!(!args.contains(&std::ffi::OsStr::new("--wait")));
+    assert!(service_cgroup("/user.slice/app-daemon.service"));
+    assert!(service_cgroup("/app-daemon.service/child"));
+    assert!(!service_cgroup("/session-1.scope"));
+}
+
 fn shell(script: &str) -> Command {
     let mut command = Command::new("sh");
     command.args(["-c", script]);

@@ -12,6 +12,7 @@ mod tests;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LaunchBackend {
     Uwsm,
+    Systemd,
     Direct,
 }
 
@@ -20,9 +21,11 @@ impl LaunchBackend {
         Self::detect_with(command_available)
     }
 
-    fn detect_with(available: impl FnOnce(&str) -> bool) -> Self {
+    fn detect_with(available: impl Fn(&str) -> bool) -> Self {
         if available("uwsm-app") {
             Self::Uwsm
+        } else if available("systemd-run") {
+            Self::Systemd
         } else {
             Self::Direct
         }
@@ -31,6 +34,7 @@ impl LaunchBackend {
     const fn description(self) -> (&'static str, &'static str) {
         match self {
             Self::Uwsm => ("uwsm-app", "app-graphical.slice"),
+            Self::Systemd => ("systemd-run", "app-graphical.slice"),
             Self::Direct => ("direct", "inherited"),
         }
     }
@@ -67,12 +71,8 @@ const LAUNCH_HANDOFF_TIMEOUT: Duration = Duration::from_secs(10);
 
 pub async fn launch_desktop(id: &str) -> anyhow::Result<LaunchReceipt> {
     let backend = LaunchBackend::detect();
-    let mut command = desktop_command(backend, id);
-    let unit = (backend == LaunchBackend::Uwsm).then(|| application_unit(id));
-    if let Some(unit) = &unit {
-        // Insert the override before the command's `--` delimiter.
-        command = uwsm_desktop_command(id, unit);
-    }
+    ensure_safe_backend(backend)?;
+    let (command, unit) = desktop_command(backend, id);
     checked_handoff(command, "desktop application").await?;
     Ok(LaunchReceipt {
         unit,
@@ -84,12 +84,12 @@ pub async fn launch_desktop_action(id: &str, action_id: &str) -> anyhow::Result<
     let backend = LaunchBackend::detect();
     anyhow::ensure!(backend == LaunchBackend::Uwsm, "UWSM is unavailable");
     let target = format!("{id}:{action_id}");
-    checked_handoff(
-        command(backend, &target, std::iter::empty::<&str>()),
-        "desktop action",
-    )
-    .await?;
-    Ok(backend.into())
+    let unit = application_unit(id);
+    checked_handoff(uwsm_desktop_command(&target, &unit), "desktop action").await?;
+    Ok(LaunchReceipt {
+        unit: Some(unit),
+        ..backend.into()
+    })
 }
 
 async fn checked_handoff(command: Command, description: &str) -> anyhow::Result<()> {
@@ -155,21 +155,64 @@ fn capture_diagnostic(detail: &mut Vec<u8>, bytes: &[u8]) {
         .extend_from_slice(&bytes[..bytes.len().min(MAX_DIAGNOSTIC.saturating_sub(detail.len()))]);
 }
 
-pub fn spawn(
+pub async fn spawn(
     program: &str,
     arguments: impl IntoIterator<Item = impl AsRef<std::ffi::OsStr>>,
 ) -> anyhow::Result<LaunchReceipt> {
+    spawn_for_application(program, program, arguments, None).await
+}
+
+pub(crate) async fn spawn_for_application(
+    target_id: &str,
+    program: &str,
+    arguments: impl IntoIterator<Item = impl AsRef<std::ffi::OsStr>>,
+    directory: Option<&str>,
+) -> anyhow::Result<LaunchReceipt> {
     let backend = LaunchBackend::detect();
-    let mut child = command(backend, program, arguments)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .with_context(|| format!("start application command {program}"))?;
-    tokio::spawn(async move {
-        let _ = child.wait().await;
-    });
-    Ok(backend.into())
+    ensure_safe_backend(backend)?;
+    let unit = (backend != LaunchBackend::Direct).then(|| application_unit(target_id));
+    let mut command = match backend {
+        LaunchBackend::Uwsm => uwsm_desktop_command(program, unit.as_deref().unwrap_or_default()),
+        LaunchBackend::Systemd => {
+            systemd_command(program, unit.as_deref().unwrap_or_default(), false)
+        }
+        LaunchBackend::Direct => Command::new(program),
+    };
+    if let Some(directory) = directory.filter(|value| !value.is_empty()) {
+        command.current_dir(directory);
+    }
+    command.args(arguments);
+    if backend == LaunchBackend::Direct {
+        let mut child = command
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .with_context(|| format!("start application command {program}"))?;
+        tokio::spawn(async move {
+            let _ = child.wait().await;
+        });
+    } else {
+        checked_handoff(command, "application command").await?;
+    }
+    Ok(LaunchReceipt {
+        unit,
+        ..backend.into()
+    })
+}
+
+fn ensure_safe_backend(backend: LaunchBackend) -> anyhow::Result<()> {
+    let cgroup = crate::resources::process_cgroup(std::process::id());
+    anyhow::ensure!(
+        backend != LaunchBackend::Direct
+            || cgroup.as_deref().is_some_and(|path| !service_cgroup(path)),
+        "safe launch isolation is unavailable; install uwsm-app or systemd-run (refusing to launch inside the daemon's service cgroup)"
+    );
+    Ok(())
+}
+
+fn service_cgroup(path: &str) -> bool {
+    path.split('/').any(|part| part.ends_with(".service"))
 }
 
 pub(crate) fn application_unit(id: &str) -> String {
@@ -191,31 +234,57 @@ fn uwsm_desktop_command(id: &str, unit: &str) -> Command {
     command
 }
 
-fn desktop_command(backend: LaunchBackend, id: &str) -> Command {
+fn desktop_command(backend: LaunchBackend, id: &str) -> (Command, Option<String>) {
     match backend {
-        // uwsm-app is the fast, drop-in client for `uwsm app`. Passing the
-        // desktop ID lets UWSM honor Terminal, Path, and other entry metadata.
-        LaunchBackend::Uwsm => command(backend, id, std::iter::empty::<&str>()),
-        LaunchBackend::Direct => command(backend, "gtk-launch", [id.trim_end_matches(".desktop")]),
+        LaunchBackend::Uwsm => {
+            let unit = application_unit(id);
+            (uwsm_desktop_command(id, &unit), Some(unit))
+        }
+        LaunchBackend::Systemd => {
+            let unit = application_unit(id)
+                .trim_end_matches(".service")
+                .replace('@', "-")
+                + ".scope";
+            let mut command = systemd_command("gtk-launch", &unit, true);
+            command.arg(id.trim_end_matches(".desktop"));
+            (command, Some(unit))
+        }
+        LaunchBackend::Direct => {
+            let mut command = Command::new("gtk-launch");
+            command.arg(id.trim_end_matches(".desktop"));
+            (command, None)
+        }
     }
 }
 
-fn command(
-    backend: LaunchBackend,
-    program: &str,
-    arguments: impl IntoIterator<Item = impl AsRef<std::ffi::OsStr>>,
-) -> Command {
-    let mut command = match backend {
-        LaunchBackend::Uwsm => {
-            let mut command = Command::new("uwsm-app");
-            // A scope-mode systemd-run remains attached to foreground applications.
-            // Service mode returns once exec succeeds, making operation completion a
-            // launch handoff rather than an application-lifetime notification.
-            command.args(["-t", "service", "--"]).arg(program);
-            command
+fn systemd_command(program: &str, unit: &str, launcher: bool) -> Command {
+    let mut command = Command::new("systemd-run");
+    command.args([
+        "--user",
+        "--quiet",
+        "--collect",
+        "--unit",
+        unit,
+        "--slice=app-graphical.slice",
+    ]);
+    if launcher {
+        // Scope mode waits for gtk-launch itself, NOT the application's lifetime.
+        // Its descendants remain in an independently managed scope after handoff.
+        command.arg("--scope");
+    } else {
+        // Direct application executables may run forever. Service exec handoff
+        // reports exec failure without waiting for application termination.
+        command.args([
+            "--service-type=exec",
+            "--property=ExitType=cgroup",
+            "--same-dir",
+        ]);
+        for (name, _) in std::env::vars_os() {
+            if let Some(name) = name.to_str().filter(|name| !name.contains('=')) {
+                command.arg(format!("--setenv={name}"));
+            }
         }
-        LaunchBackend::Direct => Command::new(program),
-    };
-    command.args(arguments);
+    }
+    command.arg("--").arg(program);
     command
 }
