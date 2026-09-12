@@ -11,3 +11,9 @@ Each step is committed locally; no remote push is part of this work.
 - Unit tests cover exact unit matching, existing addresses, ambiguity, unique units and per-target serialization.
 
 Validation: 35 tests, strict all-target/all-feature Clippy, formatting.
+
+## 2. Catalog launch-metadata invalidation
+
+Hash complete ordered desktop-entry groups and the source path, not only presentation fields. Tests independently change Exec, Terminal, Path, DBusActivatable, and action Exec while preserving presentation, and verify stable hashes for unchanged entries.
+
+Validation: catalog regression tests and formatting.
