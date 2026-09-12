@@ -7,7 +7,7 @@ use serde::Deserialize;
 use tokio::time;
 
 use crate::{
-    catalog::Catalog,
+    catalog::{Catalog, CatalogEntry},
     hyprland::{self, Client, Snapshot},
     launch::{self, LaunchReceipt},
     model::OperationResult,
@@ -363,6 +363,9 @@ async fn launch(catalog: &Catalog, target_id: &str) -> anyhow::Result<LaunchRece
     let entry = catalog
         .by_id(target_id)
         .context("application is no longer available")?;
+    if let Some(receipt) = activate_dbus_entry(entry, None).await? {
+        return Ok(receipt);
+    }
     if entry.requires_terminal() && launch::LaunchBackend::detect() != launch::LaunchBackend::Uwsm {
         return launch_in_terminal(
             target_id,
@@ -372,6 +375,29 @@ async fn launch(catalog: &Catalog, target_id: &str) -> anyhow::Result<LaunchRece
         .await;
     }
     launch::launch_desktop(target_id).await
+}
+
+async fn activate_dbus_entry(
+    entry: &CatalogEntry,
+    action: Option<&str>,
+) -> anyhow::Result<Option<LaunchReceipt>> {
+    if !entry.dbus_activatable() {
+        return Ok(None);
+    }
+    match launch::activate_dbus(&entry.id, action).await {
+        Ok(receipt) => Ok(Some(receipt)),
+        Err(error) => {
+            let fallback = action.map_or_else(
+                || entry.launch_command(),
+                |action| entry.parse_action(action),
+            );
+            if fallback.is_err() {
+                return Err(error.context("activate desktop entry without an Exec fallback"));
+            }
+            tracing::debug!(target_id = %entry.id, %error, "D-Bus activation failed; using desktop Exec fallback");
+            Ok(None)
+        }
+    }
 }
 
 async fn launch_in_terminal(
@@ -398,6 +424,13 @@ async fn launch_action(
     let entry = catalog
         .by_id(target_id)
         .context("application is no longer available")?;
+    anyhow::ensure!(
+        entry.actions.iter().any(|action| action.id == action_id),
+        "desktop action is unavailable"
+    );
+    if let Some(receipt) = activate_dbus_entry(entry, Some(action_id)).await? {
+        return Ok(receipt);
+    }
     let args = entry.parse_action(action_id)?;
     if launch::LaunchBackend::detect() == launch::LaunchBackend::Uwsm {
         return launch::launch_desktop_action(target_id, action_id).await;

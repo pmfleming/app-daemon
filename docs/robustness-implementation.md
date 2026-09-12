@@ -53,3 +53,9 @@ Validation: 48 tests including retention, expiry, admission, ownership, cancella
 Shutdown closes request admission, drains admitted calls, cancels operations, stops owned monitor/event tasks, and joins the sampler before saving final history. Persistence is serialized from snapshot creation through completed atomic write; the serialization guard lives in the blocking writer so cancellation cannot release it early. Repeated shutdown is idempotent.
 
 Validation: 50 tests, including delayed sampling/older-write shutdown ordering, admission rejection and operation cancellation; strict Clippy and formatting.
+
+## 9. D-Bus-only catalog entries
+
+Accept DBusActivatable entries without Exec. Launch and desktop actions use validated org.freedesktop.Application addresses, forward activation platform data, and bound activation calls. Exec fallback is used only when available; unsupported activation fails explicitly. D-Bus singleton placement remains conservative.
+
+Validation: 52 tests including D-Bus-only catalog/action visibility and address validation; strict Clippy and formatting. Actual private-bus activation is covered by the integration step.

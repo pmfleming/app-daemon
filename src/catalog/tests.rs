@@ -32,6 +32,30 @@ fn launch_metadata_changes_invalidate_catalog_even_when_presentation_is_identica
 }
 
 #[test]
+fn dbus_activatable_entries_do_not_require_exec() -> anyhow::Result<()> {
+    let directory = tempfile::tempdir()?;
+    for (id, activation) in [
+        ("org.example.BusOnly", "true"),
+        ("org.example.Invalid", "false"),
+    ] {
+        fs::write(
+            directory.path().join(format!("{id}.desktop")),
+            format!(
+                "[Desktop Entry]\nType=Application\nName={id}\nDBusActivatable={activation}\nActions=inspect;\n[Desktop Action inspect]\nName=Inspect\n"
+            ),
+        )?;
+    }
+    let catalog = Catalog::from_paths(vec![directory.path().into()]);
+    assert_eq!(catalog.entries.len(), 1);
+    let entry = &catalog.entries[0];
+    assert_eq!(entry.id, "org.example.BusOnly.desktop");
+    assert!(entry.dbus_activatable());
+    assert!(entry.launch_command().is_err());
+    assert_eq!(entry.actions[0].id, "inspect");
+    Ok(())
+}
+
+#[test]
 fn preserves_empty_optional_fields_and_honors_precedence() -> anyhow::Result<()> {
     let high = tempfile::tempdir()?;
     let low = tempfile::tempdir()?;

@@ -69,6 +69,66 @@ impl From<LaunchBackend> for LaunchReceipt {
 
 const LAUNCH_HANDOFF_TIMEOUT: Duration = Duration::from_secs(10);
 
+pub(crate) async fn activate_dbus(id: &str, action: Option<&str>) -> anyhow::Result<LaunchReceipt> {
+    tokio::time::timeout(LAUNCH_HANDOFF_TIMEOUT, async {
+        let (name, path) = activation_address(id)?;
+        let connection = zbus::Connection::session()
+            .await
+            .context("connect for desktop activation")?;
+        let proxy = zbus::Proxy::new(
+            &connection,
+            name.to_owned(),
+            path,
+            "org.freedesktop.Application",
+        )
+        .await?;
+        let startup = std::env::var("DESKTOP_STARTUP_ID").ok();
+        let token = std::env::var("XDG_ACTIVATION_TOKEN").ok();
+        let mut platform = std::collections::HashMap::<&str, zbus::zvariant::Value<'_>>::new();
+        if let Some(startup) = &startup {
+            platform.insert("desktop-startup-id", startup.as_str().into());
+        }
+        if let Some(token) = &token {
+            platform.insert("activation-token", token.as_str().into());
+        }
+        if let Some(action) = action {
+            proxy
+                .call::<_, _, ()>(
+                    "ActivateAction",
+                    &(action, Vec::<zbus::zvariant::Value<'_>>::new(), platform),
+                )
+                .await?;
+        } else {
+            proxy.call::<_, _, ()>("Activate", &(platform,)).await?;
+        }
+        Ok::<_, anyhow::Error>(LaunchReceipt {
+            backend: "dbus-activation".into(),
+            scope: "session-bus".into(),
+            unit: None,
+        })
+    })
+    .await
+    .context("desktop D-Bus activation timed out")?
+}
+
+fn activation_address(
+    id: &str,
+) -> anyhow::Result<(
+    zbus::names::WellKnownName<'_>,
+    zbus::zvariant::OwnedObjectPath,
+)> {
+    let name = id
+        .strip_suffix(".desktop")
+        .context("D-Bus desktop ID must end in .desktop")?;
+    let destination =
+        zbus::names::WellKnownName::try_from(name).context("invalid D-Bus application name")?;
+    let path = format!("/{}", name.replace('.', "/").replace('-', "_"));
+    Ok((
+        destination,
+        zbus::zvariant::OwnedObjectPath::try_from(path)?,
+    ))
+}
+
 pub async fn launch_desktop(id: &str) -> anyhow::Result<LaunchReceipt> {
     let backend = LaunchBackend::detect();
     ensure_safe_backend(backend)?;

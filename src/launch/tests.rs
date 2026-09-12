@@ -30,6 +30,22 @@ fn fallback_launches_use_independent_scope_or_exec_service() {
     assert!(!service_cgroup("/session-1.scope"));
 }
 
+#[test]
+fn derives_validated_dbus_application_address() -> anyhow::Result<()> {
+    let (name, path) = activation_address("org.example.My-App.desktop")?;
+    assert_eq!(name.as_str(), "org.example.My-App");
+    assert_eq!(path.as_str(), "/org/example/My_App");
+    for id in [
+        "missing-suffix",
+        "single.desktop",
+        "bad/name.desktop",
+        "org.bad:Name.desktop",
+    ] {
+        assert!(activation_address(id).is_err(), "{id}");
+    }
+    Ok(())
+}
+
 fn shell(script: &str) -> Command {
     let mut command = Command::new("sh");
     command.args(["-c", script]);

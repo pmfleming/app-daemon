@@ -30,6 +30,10 @@ impl CatalogEntry {
         self.entry.parse_exec().map_err(anyhow::Error::from)
     }
 
+    pub fn dbus_activatable(&self) -> bool {
+        self.entry.dbus_activatable()
+    }
+
     pub fn requires_terminal(&self) -> bool {
         self.entry.terminal()
     }
@@ -182,7 +186,7 @@ fn launchable(entry: &DesktopEntry) -> bool {
     entry.type_() == Some("Application")
         && !entry.hidden()
         && !entry.no_display()
-        && entry.exec().is_some_and(|value| !value.is_empty())
+        && (entry.dbus_activatable() || entry.exec().is_some_and(|value| !value.is_empty()))
         && entry.try_exec().is_none_or(command_available)
 }
 
