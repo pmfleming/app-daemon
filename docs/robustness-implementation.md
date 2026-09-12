@@ -23,3 +23,9 @@ Validation: catalog regression tests and formatting.
 Maintain sorted, unique resource and energy buckets, merge restarted partial buckets with duration-weighted metrics and preserved peaks/counts, and normalize older malformed ordering on load. Cursor v2 persists per-target epochs: normal appends/restarts preserve polling; rewrites/backfills explicitly invalidate old cursors instead of skipping data. Empty polls retain the cursor. Pruning is also applied on history queries.
 
 Validation: six history tests including restart persistence, duplicate repair, clock rollback, cursor resync, and pruning; strict Clippy and formatting.
+
+## 4. Independent cgroup capabilities
+
+CPU, memory and I/O counters now use independent optional values. Missing/malformed controllers preserve available procfs metrics, readable idle I/O remains supported zero, and controller recovery establishes an independent baseline. Memory gauges remain available on the initial sample.
+
+Validation: 16 resource tests, including fixture-filesystem controller reads and sampler fallback/recovery assertions; strict Clippy and formatting.

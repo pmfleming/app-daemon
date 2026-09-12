@@ -63,22 +63,24 @@ struct PreviousProcess {
 
 #[derive(Debug, Clone, Copy, Default)]
 struct CgroupCounters {
-    cpu_usage_usec: u64,
+    cpu_usage_usec: Option<u64>,
+    io: Option<CgroupIo>,
+    memory_bytes: Option<u64>,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct CgroupIo {
     read_bytes: u64,
     write_bytes: u64,
     read_operations: u64,
     write_operations: u64,
-    memory_bytes: u64,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
 struct CgroupUsage {
-    cpu_percent: f64,
-    read_bytes: u64,
-    write_bytes: u64,
-    read_operations: u64,
-    write_operations: u64,
-    memory_bytes: u64,
+    cpu_percent: Option<f64>,
+    io: Option<CgroupIo>,
+    memory_bytes: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -361,21 +363,39 @@ impl ResourceSnapshot {
     }
 
     fn apply_cgroup_usage(&self, usage: &mut ResourceUsage, paths: &HashSet<String>) {
-        let mut cgroup = CgroupUsage::default();
-        for current in paths.iter().filter_map(|path| self.cgroup_usage.get(path)) {
-            cgroup.cpu_percent += current.cpu_percent;
-            add_counter(&mut cgroup.read_bytes, current.read_bytes);
-            add_counter(&mut cgroup.write_bytes, current.write_bytes);
-            add_counter(&mut cgroup.read_operations, current.read_operations);
-            add_counter(&mut cgroup.write_operations, current.write_operations);
-            add_counter(&mut cgroup.memory_bytes, current.memory_bytes);
+        let groups = paths
+            .iter()
+            .filter_map(|path| self.cgroup_usage.get(path))
+            .collect::<Vec<_>>();
+        if let Some(cpu) = groups
+            .iter()
+            .map(|group| group.cpu_percent)
+            .sum::<Option<f64>>()
+        {
+            usage.compute.cpu_percent = cpu;
         }
-        usage.compute.cpu_percent = cgroup.cpu_percent;
-        usage.compute.memory_cgroup_bytes = cgroup.memory_bytes;
-        usage.storage.disk_read_bytes = cgroup.read_bytes;
-        usage.storage.disk_write_bytes = cgroup.write_bytes;
-        usage.storage.read_operations = cgroup.read_operations;
-        usage.storage.write_operations = cgroup.write_operations;
+        if let Some(memory) = groups.iter().try_fold(0_u64, |total, group| {
+            Some(total.saturating_add(group.memory_bytes?))
+        }) {
+            usage.compute.memory_cgroup_bytes = memory;
+        }
+        // A missing controller must not replace valid procfs counters with zero.
+        if let Some(io) = groups
+            .iter()
+            .try_fold(CgroupIo::default(), |mut total, group| {
+                let current = group.io?;
+                add_counter(&mut total.read_bytes, current.read_bytes);
+                add_counter(&mut total.write_bytes, current.write_bytes);
+                add_counter(&mut total.read_operations, current.read_operations);
+                add_counter(&mut total.write_operations, current.write_operations);
+                Some(total)
+            })
+        {
+            usage.storage.disk_read_bytes = io.read_bytes;
+            usage.storage.disk_write_bytes = io.write_bytes;
+            usage.storage.read_operations = io.read_operations;
+            usage.storage.write_operations = io.write_operations;
+        }
     }
 
     fn apply_file_storage(aggregate: &mut ProcessAggregation) {
@@ -409,7 +429,13 @@ impl ResourceSnapshot {
         measurement.coverage = coverage;
         measurement.memory_source = memory_source;
         measurement.gpu_available = aggregate.gpu_processes > 0;
-        measurement.storage_available = complete_cgroup || aggregate.storage_processes > 0;
+        measurement.storage_available = aggregate.storage_processes > 0
+            || (complete_cgroup
+                && attribution.cgroup_paths.iter().all(|path| {
+                    self.cgroup_usage
+                        .get(path)
+                        .is_some_and(|usage| usage.io.is_some())
+                }));
         measurement.referenced_files_available = aggregate.file_processes > 0;
         measurement.network_available = aggregate.network_processes > 0;
         measurement.network_bytes_available = network_bytes_available;
@@ -958,28 +984,33 @@ impl ResourceSampler {
         current
             .iter()
             .map(|(path, counters)| {
-                let usage =
-                    self.previous_cgroups
-                        .get(path)
-                        .map_or_else(CgroupUsage::default, |previous| CgroupUsage {
-                            cpu_percent: rate(
-                                counters
-                                    .cpu_usage_usec
-                                    .saturating_sub(previous.cpu_usage_usec)
-                                    as f64,
-                                seconds * 10_000.0,
-                                1,
-                            ),
-                            read_bytes: counters.read_bytes.saturating_sub(previous.read_bytes),
-                            write_bytes: counters.write_bytes.saturating_sub(previous.write_bytes),
-                            read_operations: counters
-                                .read_operations
-                                .saturating_sub(previous.read_operations),
-                            write_operations: counters
-                                .write_operations
-                                .saturating_sub(previous.write_operations),
-                            memory_bytes: counters.memory_bytes,
-                        });
+                let previous = self.previous_cgroups.get(path);
+                let usage = CgroupUsage {
+                    cpu_percent: counters.cpu_usage_usec.map(|current| {
+                        let elapsed = previous
+                            .and_then(|value| value.cpu_usage_usec)
+                            .map_or(0, |value| current.saturating_sub(value));
+                        rate(elapsed as f64, seconds * 10_000.0, 1)
+                    }),
+                    io: counters.io.map(|current| {
+                        previous.and_then(|value| value.io).map_or_else(
+                            CgroupIo::default,
+                            |previous| CgroupIo {
+                                read_bytes: current.read_bytes.saturating_sub(previous.read_bytes),
+                                write_bytes: current
+                                    .write_bytes
+                                    .saturating_sub(previous.write_bytes),
+                                read_operations: current
+                                    .read_operations
+                                    .saturating_sub(previous.read_operations),
+                                write_operations: current
+                                    .write_operations
+                                    .saturating_sub(previous.write_operations),
+                            },
+                        )
+                    }),
+                    memory_bytes: counters.memory_bytes,
+                };
                 (path.clone(), usage)
             })
             .collect()
@@ -1115,6 +1146,8 @@ impl<T> ProcessCache<T> {
 pub(crate) mod benchmarks;
 #[cfg(test)]
 mod cache_tests;
+#[cfg(test)]
+mod cgroup_tests;
 #[cfg(test)]
 mod gpu_usage_tests;
 #[cfg(test)]

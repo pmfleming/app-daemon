@@ -6,8 +6,8 @@ use std::{
 };
 
 use super::{
-    CgroupCounters, DiskBreakdown, DiskFile, DiskFileId, MemoryUsage, ProcessFiles, ProcessIo,
-    ProcessStat, ResourceProvider,
+    CgroupCounters, CgroupIo, DiskBreakdown, DiskFile, DiskFileId, MemoryUsage, ProcessFiles,
+    ProcessIo, ProcessStat, ResourceProvider,
 };
 
 pub(super) fn application_disk_usage(target_id: &str) -> Option<DiskBreakdown> {
@@ -252,28 +252,40 @@ pub(super) fn specific_application_cgroup(path: &str) -> bool {
 
 pub(super) fn read_cgroup_counters(path: &str) -> Option<CgroupCounters> {
     let root = Path::new("/sys/fs/cgroup").join(path.trim_start_matches('/'));
-    let cpu = fs::read_to_string(root.join("cpu.stat")).ok()?;
-    let cpu = whitespace_key_values(&cpu);
-    let mut counters = CgroupCounters {
-        cpu_usage_usec: cpu.get("usage_usec").copied().unwrap_or(0),
-        memory_bytes: read_number(&root.join("memory.current")),
-        ..CgroupCounters::default()
-    };
-    if let Ok(io) = fs::read_to_string(root.join("io.stat")) {
-        for values in io.lines().map(equals_key_values) {
-            counters.read_bytes = counters
-                .read_bytes
-                .saturating_add(values.get("rbytes").copied().unwrap_or(0));
-            counters.write_bytes = counters
-                .write_bytes
-                .saturating_add(values.get("wbytes").copied().unwrap_or(0));
-            counters.read_operations = counters
-                .read_operations
-                .saturating_add(values.get("rios").copied().unwrap_or(0));
-            counters.write_operations = counters
-                .write_operations
-                .saturating_add(values.get("wios").copied().unwrap_or(0));
-        }
+    read_cgroup_counters_at(&root)
+}
+
+fn read_cgroup_counters_at(root: &Path) -> Option<CgroupCounters> {
+    let cpu_usage_usec = fs::read_to_string(root.join("cpu.stat"))
+        .ok()
+        .and_then(|cpu| whitespace_key_values(&cpu).get("usage_usec").copied());
+    let memory_bytes = fs::read_to_string(root.join("memory.current"))
+        .ok()
+        .and_then(|value| value.trim().parse().ok());
+    let io = fs::read_to_string(root.join("io.stat"))
+        .ok()
+        .and_then(|io| parse_cgroup_io(&io));
+    (cpu_usage_usec.is_some() || memory_bytes.is_some() || io.is_some()).then_some(CgroupCounters {
+        cpu_usage_usec,
+        memory_bytes,
+        io,
+    })
+}
+
+fn parse_cgroup_io(value: &str) -> Option<CgroupIo> {
+    let mut counters = CgroupIo::default();
+    // A readable empty io.stat is supported idle accounting; malformed records
+    // are unavailable, not fabricated zeros.
+    for line in value.lines().filter(|line| !line.trim().is_empty()) {
+        let values = equals_key_values(line);
+        counters.read_bytes = counters.read_bytes.saturating_add(*values.get("rbytes")?);
+        counters.write_bytes = counters.write_bytes.saturating_add(*values.get("wbytes")?);
+        counters.read_operations = counters
+            .read_operations
+            .saturating_add(*values.get("rios")?);
+        counters.write_operations = counters
+            .write_operations
+            .saturating_add(*values.get("wios")?);
     }
     Some(counters)
 }
@@ -292,13 +304,6 @@ pub(super) fn equals_key_values(value: &str) -> HashMap<&str, u64> {
         .filter_map(|field| field.split_once('='))
         .filter_map(|(key, value)| Some((key, value.parse().ok()?)))
         .collect()
-}
-
-pub(super) fn read_number(path: &Path) -> u64 {
-    fs::read_to_string(path)
-        .ok()
-        .and_then(|value| value.trim().parse().ok())
-        .unwrap_or(0)
 }
 
 pub(super) fn read_cgroup_members(path: &str) -> HashSet<u32> {
@@ -526,6 +531,8 @@ pub(super) fn read_process_memory(pid: u32) -> MemoryUsage {
     }
 }
 
+#[cfg(test)]
+mod cgroup_tests;
 #[cfg(test)]
 mod disk_tests;
 

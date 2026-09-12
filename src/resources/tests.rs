@@ -103,10 +103,12 @@ fn totals_resources_without_double_counting_roots_in_either_attribution_mode() {
     snapshot.cgroup_usage.insert(
         path,
         CgroupUsage {
-            cpu_percent: 80.0,
-            read_bytes: 4096,
-            memory_bytes: 8192,
-            ..Default::default()
+            cpu_percent: Some(80.0),
+            io: Some(super::CgroupIo {
+                read_bytes: 4096,
+                ..Default::default()
+            }),
+            memory_bytes: Some(8192),
         },
     );
     let usage = snapshot.usage_for_roots([10]);
@@ -137,7 +139,7 @@ fn includes_descendants_that_move_out_of_an_application_cgroup() {
         cgroup_usage: HashMap::from([(
             path,
             super::CgroupUsage {
-                cpu_percent: 2.0,
+                cpu_percent: Some(2.0),
                 ..super::CgroupUsage::default()
             },
         )]),
