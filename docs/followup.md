@@ -24,10 +24,12 @@ is a separate step below.
 ## 3. Integration failure modes
 
 > Historical results: these four integration tests and their private D-Bus
-> helper have since been removed because their session configuration was
-> unavailable in the Nix build sandbox. The unit tests remain enabled;
-> the integration command and 29-test coverage baseline below describe the
-> earlier revision, not the current suite.
+> helper were removed because their host session configuration was unavailable
+> in the Nix build sandbox. The robustness implementation has now restored and
+> expanded integration coverage using an in-tree private bus configuration;
+> see [robustness-implementation.md](robustness-implementation.md) and README.md.
+> The 29-test coverage baseline below still describes the earlier revision,
+> not the current suite.
 
 Added four private-session integration scenarios (25 unit + 4 integration tests):
 D-Bus validation/subscription ownership; UWSM launch and desktop-action handoff,

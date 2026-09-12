@@ -26,6 +26,18 @@ Application queries rank exact names, desktop IDs, prefixes, substrings, metadat
 
 Per-application category preferences are persisted in `$XDG_CONFIG_HOME/app-daemon/application-settings-v1.json` (or `~/.config/...`) through `applications.settings.update`. Categories map directly to default workspaces: Shell→1, Browser→2, Code→3, Media→4, and Text→5. The selected workspace overrides launch context. Same-application operations are serialized and use a fresh pre-launch snapshot. The daemon moves/focuses only an unambiguous new window belonging to the exact launch unit, leaving existing instances in place. Singleton handoffs, ambiguous multi-window launches, and unprovable ownership leave windows untouched and report placement as unavailable in the operation message.
 
+## Validation
+
+`cargo test --locked --all-features` includes private D-Bus/compositor integration tests. They create their own bus configuration, isolated HOME/XDG roots, command fixtures, and Unix sockets; no host desktop service is activated. Coverage includes metadata refresh, D-Bus-only activation/actions, operation recovery/ownership, launch failures, the real ten-second handoff timeout, cancellation, shutdown persistence, and compositor recovery.
+
+Two opt-in tests use the real user systemd manager to verify that service-mode executables and scope-mode GTK handoffs survive stopping their host service. They create only uniquely named temporary fixture units/processes and clean them up:
+
+```sh
+cargo test --locked --test systemd_lifetime -- --ignored isolated_
+```
+
+These tests are excluded from sandbox builds; the private-bus tests run normally in the Nix check phase. Neither suite launches a real graphical application.
+
 ## Resource metrics
 
 The daemon samples applications independently of API queries: every two seconds during recent UI demand, and every ten seconds in the background. It discovers the current user's identifiable systemd/UWSM/Flatpak application cgroups even when no window exists. Window PIDs and observed descendants provide the fallback; their PID/start-time identities remain tracked after windows or parent processes exit, until the processes exit or their PIDs are reused. Processes explicitly owned by a different application scope are excluded from the parent's accounting. Launch-only entries never claim scopes.
