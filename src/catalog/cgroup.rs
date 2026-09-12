@@ -4,9 +4,16 @@ impl Catalog {
     /// Resolve only explicitly application-named units, including nested cgroups.
     /// Prefer the most specific desktop ID; never guess from a generic service.
     pub(crate) fn target_for_cgroup(&self, path: &str) -> Option<String> {
-        path.split('/')
-            .rev()
-            .find_map(|unit| self.target_for_unit(unit))
+        self.application_cgroup(path).map(|(target, _)| target)
+    }
+
+    pub(crate) fn application_cgroup<'a>(&self, mut path: &'a str) -> Option<(String, &'a str)> {
+        loop {
+            if let Some(target) = self.target_for_unit(path.rsplit('/').next()?) {
+                return Some((target, path));
+            }
+            path = path.rsplit_once('/')?.0;
+        }
     }
 
     fn target_for_unit(&self, unit: &str) -> Option<String> {
@@ -26,7 +33,19 @@ impl Catalog {
             return None;
         };
         if !base.starts_with("app-") {
-            return None;
+            // D-Bus activatable applications may install a stable user service
+            // named after their bus ID instead of a generated app-* unit.
+            return self
+                .entries
+                .iter()
+                .find(|entry| {
+                    !entry.launch_only
+                        && entry.dbus_activatable()
+                        && (base == entry.id.trim_end_matches(".desktop")
+                            || base.strip_prefix("dbus-")
+                                == Some(entry.id.trim_end_matches(".desktop")))
+                })
+                .map(|entry| entry.id.clone());
         }
         self.entries
             .iter()

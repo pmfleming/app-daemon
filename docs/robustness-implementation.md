@@ -77,3 +77,9 @@ Validation: 56 tests and strict Clippy pass using the vendored libraries. An iso
 Restore eight executable/private-bus integration scenarios with an in-tree D-Bus configuration, isolated environment, bounded fixture process cleanup, and mock command/event sockets. Cover validation/ownership, UWSM receipts and ten-second timeout, owned cancellation, late operation lookup, systemd fallback rejection/lifetime, metadata-only refresh/terminal working directory, D-Bus-only activation/actions, shutdown and compositor recovery. Add two opt-in real-systemd lifetime scenarios exercising production launcher code from a temporary host service, for both application services and GTK scopes.
 
 Validation: 56 unit + 8 private-session integration tests pass, as do strict all-target/all-feature Clippy and formatting. Both opt-in real-systemd lifetime tests pass on this host. The network-enabled `nix build --no-link --max-jobs 2` succeeds; its sandbox check phase passes all 64 default tests (real-systemd tests are intentionally ignored there). No real graphical applications are launched by these tests.
+
+## 13. Final accounting identity cross-check
+
+Require an exact catalog/unit identity match before borrowing cgroup members or counters for a known process root. An application's PID inside an unrelated launcher service must not charge sibling processes to that application. Also recognize stable bus-ID user services for DBusActivatable entries, including nested cgroups, without accepting arbitrary generic services.
+
+Validation: 57 unit tests and strict Clippy pass, including a regression combining unrelated launcher siblings with stable D-Bus service discovery.

@@ -167,6 +167,57 @@ fn known_processes_survive_window_and_parent_exit_but_not_pid_reuse() -> anyhow:
 }
 
 #[test]
+fn unrelated_launcher_groups_are_not_borrowed_and_stable_dbus_units_are_discovered()
+-> anyhow::Result<()> {
+    let (dir, catalog) = catalog()?;
+    let provider = Arc::new(TestProvider::default());
+    {
+        let mut state = provider.state.lock().unwrap();
+        state.processes = HashMap::from([(42, process(1, 100)), (43, process(1, 101))]);
+        state.cgroups = HashMap::from([
+            (42, "/app-launcher.service".into()),
+            (43, "/app-launcher.service".into()),
+        ]);
+    }
+    let mut sampler = ResourceSampler {
+        provider: provider.clone(),
+        ..Default::default()
+    };
+    let windows = HashMap::from([("org.example.App.desktop".into(), vec![42])]);
+    let snapshot = sampler.sample_for_applications(&windows, &catalog);
+    let usage = snapshot.usage_for_application("org.example.App.desktop", []);
+    assert_eq!(
+        usage.compute.process_count, 1,
+        "do not charge unrelated siblings in the launcher service"
+    );
+    assert_eq!(usage.measurement.attribution_method, "process-tree");
+    std::fs::write(
+        dir.path().join("org.example.Bus.desktop"),
+        "[Desktop Entry]\nType=Application\nName=Bus\nDBusActivatable=true\n",
+    )?;
+    let catalog = Catalog::from_paths(vec![dir.path().into()]);
+    provider
+        .state
+        .lock()
+        .unwrap()
+        .cgroups
+        .insert(43, "/org.example.Bus.service/worker".into());
+    let snapshot = sampler.sample_for_applications(&HashMap::new(), &catalog);
+    assert_eq!(
+        snapshot
+            .usage_for_application("org.example.Bus.desktop", [])
+            .compute
+            .process_count,
+        1
+    );
+    assert_eq!(
+        snapshot.cgroup_path_by_root[&43],
+        "/org.example.Bus.service"
+    );
+    Ok(())
+}
+
+#[test]
 fn separately_owned_child_applications_are_not_charged_to_the_parent() -> anyhow::Result<()> {
     let (_dir, catalog) = catalog()?;
     let provider = Arc::new(TestProvider::default());

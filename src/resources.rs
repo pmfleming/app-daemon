@@ -823,7 +823,7 @@ impl ResourceSampler {
             },
         };
         let (sample, mut snapshot) =
-            ProcessSample::discover(provider.as_ref(), &targets.roots, processes);
+            ProcessSample::discover(provider.as_ref(), &targets.roots, processes, catalog);
         snapshot.target_roots = targets.roots;
         snapshot.target_owners = targets.owners;
         snapshot
@@ -1179,6 +1179,7 @@ impl ProcessSample {
         provider: &dyn ResourceProvider,
         targets: &HashMap<String, Vec<u32>>,
         processes: HashMap<u32, ProcessStat>,
+        catalog: Option<&crate::catalog::Catalog>,
     ) -> (Self, ResourceSnapshot) {
         let children = process_children(&processes);
         let roots = targets
@@ -1187,7 +1188,22 @@ impl ProcessSample {
             .copied()
             .filter(|pid| *pid > 0)
             .collect();
-        let cgroup_path_by_root = cgroup_paths_for_roots(provider, &roots);
+        let cgroup_path_by_root = match catalog {
+            None => cgroup_paths_for_roots(provider, &roots),
+            Some(catalog) => roots
+                .iter()
+                .filter_map(|&root| {
+                    let path = provider.process_cgroup(root)?;
+                    let (target, path) = catalog.application_cgroup(&path)?;
+                    // A PID match does not authorize charging its launcher's entire
+                    // cgroup. Scope counters require the scope's own catalog identity.
+                    targets
+                        .get(&target)
+                        .is_some_and(|roots| roots.contains(&root))
+                        .then(|| (root, path.to_owned()))
+                })
+                .collect(),
+        };
         let cgroup_members_by_root = cgroup_members_for_paths(provider, &cgroup_path_by_root);
         let mut active = descendants(roots, &children);
         active.extend(cgroup_members_by_root.values().flatten());
