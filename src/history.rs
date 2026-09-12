@@ -19,6 +19,7 @@ mod aggregate;
 use aggregate::PendingPoint;
 
 const FILE_VERSION: u8 = 1;
+const CURSOR_VERSION: u8 = 2;
 const BUCKET_MILLISECONDS: u64 = 15_000;
 const RETENTION_MILLISECONDS: u64 = 24 * 60 * 60 * 1000;
 const ENERGY_BUCKET_MILLISECONDS: u64 = 60_000;
@@ -30,6 +31,8 @@ struct HistoryFile {
     version: u8,
     applications: HashMap<String, VecDeque<ResourceHistoryPoint>>,
     energy_applications: HashMap<String, VecDeque<EnergyHistoryPoint>>,
+    /// Rewrites/backfills invalidate timestamp cursors rather than silently hiding data.
+    cursor_epochs: HashMap<String, String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -62,6 +65,7 @@ struct HistoryCursor {
     version: u8,
     target_id: String,
     after_timestamp_ms: u64,
+    epoch: String,
 }
 
 #[derive(Debug)]
@@ -83,6 +87,7 @@ pub struct HistoryStore {
     pending: HashMap<String, PendingPoint>,
     energy_points: HashMap<String, VecDeque<EnergyHistoryPoint>>,
     pending_energy: HashMap<String, PendingEnergy>,
+    cursor_epochs: HashMap<String, String>,
 }
 
 impl HistoryStore {
@@ -91,20 +96,31 @@ impl HistoryStore {
     }
 
     fn load(path: Option<PathBuf>) -> Self {
-        let points = path
+        let file = path
             .as_ref()
             .and_then(|path| fs::read(path).ok())
             .and_then(|bytes| serde_json::from_slice::<HistoryFile>(&bytes).ok())
             .filter(|file| file.version == FILE_VERSION)
-            .map(|file| (file.applications, file.energy_applications))
             .unwrap_or_default();
         let mut store = Self {
             path,
-            points: points.0,
+            points: HashMap::new(),
             pending: HashMap::new(),
-            energy_points: points.1,
+            energy_points: HashMap::new(),
             pending_energy: HashMap::new(),
+            cursor_epochs: file.cursor_epochs,
         };
+        // Repair old files with duplicate or out-of-order buckets too.
+        for (id, points) in file.applications {
+            for point in points {
+                store.insert_point(id.clone(), point);
+            }
+        }
+        for (id, points) in file.energy_applications {
+            for point in points {
+                store.insert_energy_point(id.clone(), point);
+            }
+        }
         store.prune(now_milliseconds());
         store
     }
@@ -145,8 +161,10 @@ impl HistoryStore {
         limit: usize,
     ) -> anyhow::Result<HistoryPage> {
         self.flush_expired(now_milliseconds());
+        self.prune(now_milliseconds());
+        let epoch = self.cursor_epochs.get(target_id).map_or("", String::as_str);
         let after = cursor
-            .map(|value| decode_cursor(value, target_id))
+            .map(|value| decode_cursor(value, target_id, epoch))
             .transpose()?
             .map(|cursor| cursor.after_timestamp_ms);
         let limit = limit.clamp(1, 10_000);
@@ -161,8 +179,9 @@ impl HistoryStore {
         let has_more = matching.next().is_some();
         let next_cursor = points
             .last()
-            .map(|point| encode_cursor(target_id, point.timestamp_ms))
-            .transpose()?;
+            .map(|point| encode_cursor(target_id, point.timestamp_ms, epoch))
+            .transpose()?
+            .or_else(|| cursor.map(str::to_owned));
         Ok(HistoryPage {
             points,
             has_more,
@@ -200,6 +219,7 @@ impl HistoryStore {
                 version: FILE_VERSION,
                 applications: self.points.clone(),
                 energy_applications: self.energy_points.clone(),
+                cursor_epochs: self.cursor_epochs.clone(),
             },
         }
     }
@@ -257,15 +277,45 @@ impl HistoryStore {
     }
 
     fn finish_pending_energy(&mut self, id: String, pending: PendingEnergy) {
-        self.energy_points
-            .entry(id)
-            .or_default()
-            .push_back(pending.finish());
+        self.insert_energy_point(id, pending.finish());
+    }
+
+    fn insert_energy_point(&mut self, id: String, point: EnergyHistoryPoint) {
+        let points = self.energy_points.entry(id).or_default();
+        match points.binary_search_by_key(&point.timestamp_ms, |point| point.timestamp_ms) {
+            Ok(index) => {
+                let previous = &mut points[index];
+                previous.energy_mwh += point.energy_mwh;
+                merge_label(&mut previous.energy_source, &point.energy_source);
+                merge_label(&mut previous.energy_confidence, &point.energy_confidence);
+            }
+            Err(index) => points.insert(index, point),
+        }
     }
 
     fn finish_pending(&mut self, id: String, pending: PendingPoint) {
         if let Some(point) = pending.finish() {
-            self.points.entry(id).or_default().push_back(point);
+            self.insert_point(id, point);
+        }
+    }
+
+    fn insert_point(&mut self, id: String, point: ResourceHistoryPoint) {
+        let points = self.points.entry(id.clone()).or_default();
+        let epoch = self
+            .cursor_epochs
+            .entry(id)
+            .or_insert_with(new_cursor_epoch);
+        if points
+            .back()
+            .is_some_and(|last| point.timestamp_ms <= last.timestamp_ms)
+        {
+            // A previously returned bucket changed, or the wall clock went back.
+            // Existing callers must resync; `timestamp > cursor` would lose data.
+            *epoch = new_cursor_epoch();
+        }
+        match points.binary_search_by_key(&point.timestamp_ms, |point| point.timestamp_ms) {
+            Ok(index) => points[index] = PendingPoint::merge_finished(&points[index], &point),
+            Err(index) => points.insert(index, point),
         }
     }
 
@@ -281,6 +331,8 @@ impl HistoryStore {
             !points.is_empty()
         });
         let energy_cutoff = timestamp_ms.saturating_sub(ENERGY_RETENTION_MILLISECONDS);
+        self.cursor_epochs
+            .retain(|id, _| self.points.contains_key(id) || self.pending.contains_key(id));
         self.energy_points.retain(|_, points| {
             while points
                 .front()
@@ -354,28 +406,37 @@ impl PendingEnergy {
     }
 }
 
-fn encode_cursor(target_id: &str, timestamp_ms: u64) -> anyhow::Result<String> {
+fn new_cursor_epoch() -> String {
+    uuid::Uuid::new_v4().to_string()
+}
+
+fn encode_cursor(target_id: &str, timestamp_ms: u64, epoch: &str) -> anyhow::Result<String> {
     let cursor = HistoryCursor {
-        version: FILE_VERSION,
+        version: CURSOR_VERSION,
         target_id: target_id.to_owned(),
         after_timestamp_ms: timestamp_ms,
+        epoch: epoch.to_owned(),
     };
     Ok(URL_SAFE_NO_PAD.encode(serde_json::to_vec(&cursor)?))
 }
 
-fn decode_cursor(value: &str, target_id: &str) -> anyhow::Result<HistoryCursor> {
+fn decode_cursor(value: &str, target_id: &str, epoch: &str) -> anyhow::Result<HistoryCursor> {
     let bytes = URL_SAFE_NO_PAD
         .decode(value)
         .context("history cursor is not valid base64url")?;
     let cursor: HistoryCursor =
         serde_json::from_slice(&bytes).context("history cursor is not valid JSON")?;
     anyhow::ensure!(
-        cursor.version == FILE_VERSION,
+        cursor.version == CURSOR_VERSION,
         "history cursor version is unsupported"
     );
     anyhow::ensure!(
         cursor.target_id == target_id,
         "history cursor belongs to another target"
+    );
+    anyhow::ensure!(
+        cursor.epoch == epoch,
+        "history changed or expired; restart pagination without a cursor"
     );
     Ok(cursor)
 }
@@ -422,5 +483,7 @@ pub fn persist_snapshot(snapshot: HistorySnapshot) -> std::io::Result<()> {
 
 #[cfg(test)]
 mod availability_tests;
+#[cfg(test)]
+mod recovery_tests;
 #[cfg(test)]
 mod tests;

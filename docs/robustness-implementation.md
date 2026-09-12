@@ -17,3 +17,9 @@ Validation: 35 tests, strict all-target/all-feature Clippy, formatting.
 Hash complete ordered desktop-entry groups and the source path, not only presentation fields. Tests independently change Exec, Terminal, Path, DBusActivatable, and action Exec while preserving presentation, and verify stable hashes for unchanged entries.
 
 Validation: catalog regression tests and formatting.
+
+## 3. History restart/clock recovery
+
+Maintain sorted, unique resource and energy buckets, merge restarted partial buckets with duration-weighted metrics and preserved peaks/counts, and normalize older malformed ordering on load. Cursor v2 persists per-target epochs: normal appends/restarts preserve polling; rewrites/backfills explicitly invalidate old cursors instead of skipping data. Empty polls retain the cursor. Pruning is also applied on history queries.
+
+Validation: six history tests including restart persistence, duplicate repair, clock rollback, cursor resync, and pruning; strict Clippy and formatting.

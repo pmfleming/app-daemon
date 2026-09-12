@@ -73,6 +73,40 @@ struct WeightedNetwork {
 }
 
 impl PendingPoint {
+    pub(super) fn merge_finished(
+        first: &ResourceHistoryPoint,
+        second: &ResourceHistoryPoint,
+    ) -> ResourceHistoryPoint {
+        let mut merged = Self {
+            timestamp_ms: first.timestamp_ms.saturating_sub(BUCKET_MILLISECONDS),
+            availability: first.resources.availability.clone(),
+            ..Self::default()
+        };
+        match (&mut merged.availability, &second.resources.availability) {
+            (Some(previous), Some(next)) => previous.intersect(next),
+            _ => merged.availability = None,
+        }
+        for point in [first, second] {
+            let resource = &point.resources;
+            let duration = point.duration_ms;
+            let weight = duration as f64;
+            merged.duration_ms = merged.duration_ms.saturating_add(duration);
+            merged.compute.add(duration, &resource.compute);
+            merged.storage.add(duration, &resource.storage);
+            merged.network.add(duration, &resource.network);
+            merged.energy_mwh += resource.energy_mwh;
+            merged.battery_percent += resource.battery_percent;
+            merged.system_power += resource.system_power_watts * weight;
+            merged.attributed_fraction += resource.attributed_fraction * weight;
+            merged.coverage += resource.coverage * weight;
+            merged.sample_count = merged.sample_count.saturating_add(resource.sample_count);
+            merge_label(&mut merged.energy_source, &resource.energy_source);
+            merge_label(&mut merged.energy_confidence, &resource.energy_confidence);
+            merged.peaks.merge(&resource.peaks);
+        }
+        merged.finish().unwrap_or_else(|| second.clone())
+    }
+
     pub(super) fn add(&mut self, duration_ms: u64, usage: &ResourceUsage) {
         let available = ResourceAvailability::for_usage(usage);
         if let Some(previous) = &mut self.availability {
@@ -143,6 +177,27 @@ impl PendingPoint {
                 peaks: self.peaks,
             },
         })
+    }
+}
+
+impl ResourcePeaks {
+    fn merge(&mut self, other: &Self) {
+        self.cpu_percent = self.cpu_percent.max(other.cpu_percent);
+        self.cpu_percent_of_machine = self
+            .cpu_percent_of_machine
+            .max(other.cpu_percent_of_machine);
+        self.memory_bytes = self.memory_bytes.max(other.memory_bytes);
+        self.gpu_percent = self.gpu_percent.max(other.gpu_percent);
+        self.gpu_busy_percent = self.gpu_busy_percent.max(other.gpu_busy_percent);
+        self.disk_read_bytes_per_second = self
+            .disk_read_bytes_per_second
+            .max(other.disk_read_bytes_per_second);
+        self.disk_write_bytes_per_second = self
+            .disk_write_bytes_per_second
+            .max(other.disk_write_bytes_per_second);
+        self.estimated_app_power_watts = self
+            .estimated_app_power_watts
+            .max(other.estimated_app_power_watts);
     }
 }
 

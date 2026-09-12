@@ -64,4 +64,4 @@ History is returned oldest-first. The response includes an opaque `next_cursor`;
 
 For a sorted energy summary across applications, call `applications.energyOverview` with `{"since_ms":0,"limit":20}`. The response contains attributed mWh, relative shares, desktop names/icons, and source/confidence metadata. It includes only energy the sampler can attribute (currently RAPL CPU-time share).
 
-Cursors are versioned and bound to their target application. Invalid, stale-format, or cross-target cursors produce a validation error.
+Cursors are versioned and bound to their target application. Invalid, stale-format, cross-target, or expired cursors produce a validation error. Finalized buckets are sorted and unique, including after restart or a backward wall-clock adjustment. If a restart merges new samples into a previously returned partial bucket, or clock rollback backfills older buckets, existing cursors explicitly become stale: restart pagination without a cursor to obtain the corrected history. Normal appends and restarts without rewrites preserve cursor validity.
