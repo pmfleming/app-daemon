@@ -211,7 +211,7 @@ pub(super) fn cgroup_paths_for_roots(
         .filter_map(|&root| {
             provider
                 .process_cgroup(root)
-                .filter(|path| specific_application_cgroup(path))
+                .and_then(|path| application_cgroup_path(&path).map(str::to_owned))
                 .map(|path| (root, path))
         })
         .collect()
@@ -234,6 +234,32 @@ pub(super) fn cgroup_members_for_paths(
         .collect()
 }
 
+pub(super) fn owned_process_cgroups(processes: &HashMap<u32, ProcessStat>) -> HashMap<u32, String> {
+    let Ok(current) = fs::metadata("/proc/self") else {
+        return HashMap::new();
+    };
+    let uid = current.uid();
+    processes
+        .keys()
+        .filter_map(|&pid| {
+            let metadata = fs::metadata(format!("/proc/{pid}")).ok()?;
+            (metadata.uid() == uid)
+                .then(|| process_cgroup(pid))
+                .flatten()
+                .map(|path| (pid, path))
+        })
+        .collect()
+}
+
+fn application_cgroup_path(mut path: &str) -> Option<&str> {
+    loop {
+        if specific_application_cgroup(path) {
+            return Some(path);
+        }
+        path = path.rsplit_once('/')?.0;
+    }
+}
+
 pub(crate) fn process_cgroup(pid: u32) -> Option<String> {
     fs::read_to_string(format!("/proc/{pid}/cgroup"))
         .ok()?
@@ -246,7 +272,8 @@ pub(super) fn specific_application_cgroup(path: &str) -> bool {
         .file_name()
         .and_then(|value| value.to_str())
         .unwrap_or("");
-    (name.ends_with(".scope") || name.ends_with(".service"))
+    name != "app-daemon.service"
+        && (name.ends_with(".scope") || name.ends_with(".service"))
         && (name.starts_with("app-") || name.contains("flatpak") || name.contains("snap."))
 }
 

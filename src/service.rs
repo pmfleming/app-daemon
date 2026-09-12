@@ -34,7 +34,7 @@ use catalog_watch::CatalogEvent;
 pub(crate) mod benchmarks;
 mod identity;
 mod operations;
-mod query;
+pub(crate) mod query;
 mod watcher;
 use operations::{ActiveOperation, OperationRegistry};
 
@@ -49,6 +49,7 @@ pub struct StateRevision {
     pub catalog: u64,
     pub windows: u64,
     pub settings: u64,
+    pub runtime: u64,
 }
 
 pub struct ApplicationService {
@@ -168,6 +169,7 @@ impl ApplicationService {
             catalog: self.catalog.read().await.revision,
             windows: self.windows.read().await.revision,
             settings: self.settings.read().await.revision,
+            runtime: self.resources.read().await.runtime_revision(),
         }
     }
 
@@ -175,7 +177,12 @@ impl ApplicationService {
         let catalog = self.catalog.read().await;
         let windows = self.windows.read().await;
         let settings = self.settings.read().await;
-        combined_revision(&catalog, &windows, settings.revision)
+        combined_revision(
+            &catalog,
+            &windows,
+            settings.revision,
+            self.resources.read().await.runtime_revision(),
+        )
     }
 
     pub fn subscribe_state(&self) -> broadcast::Receiver<StateRevision> {
@@ -388,7 +395,13 @@ impl ApplicationService {
         let settings = self.settings.read().await;
         if let Some(expected) = params.expected_revision {
             anyhow::ensure!(
-                expected == combined_revision(&catalog, &windows, settings.revision),
+                expected
+                    == combined_revision(
+                        &catalog,
+                        &windows,
+                        settings.revision,
+                        self.resources.read().await.runtime_revision()
+                    ),
                 "application state changed; refresh and retry"
             );
         }
@@ -748,33 +761,39 @@ async fn sample_resources(service: &ApplicationService, sampler: &mut ResourceSa
     let started = Instant::now();
     let mut owned_sampler = std::mem::take(sampler);
     let sampled = tokio::task::spawn_blocking(move || {
-        let snapshot = owned_sampler.sample_for_targets(&roots);
-        (owned_sampler, roots, snapshot)
+        let snapshot = owned_sampler.sample_for_applications(&roots, &catalog);
+        (owned_sampler, snapshot)
     })
     .await;
-    let Ok((next_sampler, roots, snapshot)) = sampled else {
+    let Ok((next_sampler, snapshot)) = sampled else {
         tracing::warn!("application resource sampler task failed");
         return;
     };
     *sampler = next_sampler;
     let sample_milliseconds = started.elapsed().as_millis();
     tracing::debug!(
-        active_applications = roots.len(),
+        active_applications = snapshot.target_roots().len(),
         sample_milliseconds,
         "application resources sampled"
     );
     let mut history = service.history.lock().await;
-    for (target_id, pids) in roots {
-        let usage = snapshot.usage_for_target(&target_id, pids);
+    for (target_id, pids) in snapshot.target_roots() {
+        let usage = snapshot.usage_for_target(target_id, pids.iter().copied());
         history.record(
-            &target_id,
+            target_id,
             now_milliseconds(),
             snapshot.interval_seconds(),
             &usage,
         );
     }
     drop(history);
-    *service.resources.write().await = snapshot;
+    let mut resources = service.resources.write().await;
+    let changed = resources.runtime_revision() != snapshot.runtime_revision();
+    *resources = snapshot;
+    drop(resources);
+    if changed {
+        service.publish_state().await;
+    }
 }
 
 #[derive(Debug, Deserialize)]

@@ -59,3 +59,9 @@ Validation: 50 tests, including delayed sampling/older-write shutdown ordering, 
 Accept DBusActivatable entries without Exec. Launch and desktop actions use validated org.freedesktop.Application addresses, forward activation platform data, and bound activation calls. Exec fallback is used only when available; unsupported activation fails explicitly. D-Bus singleton placement remains conservative.
 
 Validation: 52 tests including D-Bus-only catalog/action visibility and address validation; strict Clippy and formatting. Actual private-bus activation is covered by the integration step.
+
+## 10. Window-independent application accounting
+
+Move named-unit identity resolution into the catalog and independently discover the current user's application cgroups during sampling. Retain observed process/descendant identities across window closure and reparenting, prune on exit/PID reuse, exclude separately owned application children, and never attribute launch-only/generic daemon scopes. Publish background running state, topology revisions, history and energy without requiring windows. Per-window views remain distinct from application totals.
+
+Validation: regression tests exercise windowless cgroups through sampling/query/history, orphaned helpers, PID reuse, separate child ownership and named-unit formats; strict Clippy and formatting. Unidentified, never-observed unmanaged processes remain explicitly outside attributable application accounting.

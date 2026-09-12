@@ -10,6 +10,8 @@ use walkdir::WalkDir;
 
 use crate::{model::DesktopActionSummary, platform::command_available};
 
+mod cgroup;
+
 #[derive(Debug)]
 pub struct CatalogEntry {
     pub id: String,

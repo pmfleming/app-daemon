@@ -172,7 +172,8 @@ async fn forward_events(
                 json!({
                     "catalog_revision": previous.catalog,
                     "window_revision": previous.windows,
-                    "settings_revision": previous.settings
+                    "settings_revision": previous.settings,
+                    "runtime_revision": previous.runtime
                 }),
             )
             .await;
@@ -230,9 +231,11 @@ fn revision_changes(
     [
         (
             selected.0
-                && (current.catalog != previous.catalog || current.settings != previous.settings),
+                && (current.catalog != previous.catalog
+                    || current.settings != previous.settings
+                    || current.runtime != previous.runtime),
             protocol::stream::APPLICATIONS,
-            current.catalog ^ current.settings,
+            current.catalog ^ current.settings ^ current.runtime,
         ),
         (
             selected.1 && current.windows != previous.windows,

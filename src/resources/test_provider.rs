@@ -31,6 +31,7 @@ pub(super) struct TestState {
     pub sockets: HashMap<u32, HashSet<u64>>,
     pub network: Option<HashMap<u64, NetworkCounters>>,
     pub disk_usage: Option<DiskBreakdown>,
+    pub cgroups: HashMap<u32, String>,
 }
 
 impl EnergyProvider for TestProvider {
@@ -89,14 +90,31 @@ impl ResourceProvider for TestProvider {
     fn gpu_processes(&self, _: &HashSet<u32>) -> HashMap<u32, GpuProcessStat> {
         HashMap::new()
     }
-    fn process_cgroup(&self, _: u32) -> Option<String> {
-        None
+    fn process_cgroup(&self, pid: u32) -> Option<String> {
+        self.state.lock().unwrap().cgroups.get(&pid).cloned()
+    }
+    fn owned_process_cgroups(&self, processes: &HashMap<u32, ProcessStat>) -> HashMap<u32, String> {
+        self.state
+            .lock()
+            .unwrap()
+            .cgroups
+            .iter()
+            .filter(|(pid, _)| processes.contains_key(pid))
+            .map(|(&pid, path)| (pid, path.clone()))
+            .collect()
     }
     fn cgroup_counters(&self, _: &str) -> Option<CgroupCounters> {
         None
     }
-    fn cgroup_members(&self, _: &str) -> HashSet<u32> {
-        HashSet::new()
+    fn cgroup_members(&self, path: &str) -> HashSet<u32> {
+        self.state
+            .lock()
+            .unwrap()
+            .cgroups
+            .iter()
+            .filter(|(_, group)| group.as_str() == path)
+            .map(|(&pid, _)| pid)
+            .collect()
     }
     fn application_disk_usage(&self, target: &str) -> Option<DiskBreakdown> {
         self.disk_reads.fetch_add(1, Ordering::Relaxed);

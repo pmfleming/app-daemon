@@ -34,15 +34,19 @@ pub(super) fn combined_revision(
     catalog: &Catalog,
     windows: &Snapshot,
     settings_revision: u64,
+    runtime_revision: u64,
 ) -> u64 {
     // Revisions cross JSON into QML's JavaScript runtime. Keep this opaque hash
     // exactly representable as a Number so an unchanged revision can be sent
     // back in expected_revision without being rounded.
-    (catalog.revision.rotate_left(17) ^ windows.revision ^ settings_revision.rotate_left(31))
+    (catalog.revision.rotate_left(17)
+        ^ windows.revision
+        ^ settings_revision.rotate_left(31)
+        ^ runtime_revision.rotate_left(7))
         & JSON_SAFE_INTEGER_MASK
 }
 
-pub(super) fn page(
+pub(crate) fn page(
     catalog: &Catalog,
     windows: &Snapshot,
     resources: &ResourceSnapshot,
@@ -50,9 +54,19 @@ pub(super) fn page(
     params: &QueryParams,
     mut grouped: HashMap<String, Vec<&Client>>,
 ) -> ApplicationPage {
-    let revision = combined_revision(catalog, windows, settings.revision);
+    let revision = combined_revision(
+        catalog,
+        windows,
+        settings.revision,
+        resources.runtime_revision(),
+    );
     let available = windows.available;
 
+    for target in resources.target_roots().keys() {
+        if catalog.by_id(target).is_none() {
+            grouped.entry(target.clone()).or_default();
+        }
+    }
     let mut applications: Vec<ApplicationSummary> = catalog
         .entries
         .iter()
@@ -130,7 +144,8 @@ fn summary(
     resources: &ResourceSnapshot,
     revision: u64,
 ) -> ApplicationSummary {
-    let usage = resources.usage_for_target(&identity.id, clients.iter().map(|window| window.pid));
+    let usage =
+        resources.usage_for_application(&identity.id, clients.iter().map(|window| window.pid));
     let instances = instances(&identity.id, &clients, resources);
     let focused = instances.iter().any(|window| window.focused);
     let best_rank = instances
@@ -143,7 +158,7 @@ fn summary(
         identity,
         revision,
         runtime: ApplicationRuntime {
-            running: !instances.is_empty(),
+            running: !instances.is_empty() || usage.compute.process_count > 0,
             focused,
             running_count: instances.len(),
             resources: usage,
@@ -199,7 +214,10 @@ fn summary_for_unmatched(
     let name = clients
         .first()
         .filter(|window| !window.class.is_empty())
-        .map_or("Untitled", |window| &window.class)
+        .map_or_else(
+            || id.strip_prefix("window-group:").unwrap_or(&id),
+            |window| &window.class,
+        )
         .to_owned();
     let keywords = clients
         .iter()

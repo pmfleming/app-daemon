@@ -11,6 +11,7 @@ use crate::{
     model::{ComputeUsage, EnergyUsage, NetworkUsage, ResourceUsage, StorageUsage},
 };
 
+mod discovery;
 mod disk;
 mod energy;
 mod gpu;
@@ -135,6 +136,7 @@ trait ResourceProvider: Debug + EnergyProvider + Send + Sync {
     fn network_counters(&self, inodes: &HashSet<u64>) -> Option<HashMap<u64, NetworkCounters>>;
     fn gpu_processes(&self, pids: &HashSet<u32>) -> HashMap<u32, GpuProcessStat>;
     fn process_cgroup(&self, pid: u32) -> Option<String>;
+    fn owned_process_cgroups(&self, processes: &HashMap<u32, ProcessStat>) -> HashMap<u32, String>;
     fn cgroup_counters(&self, path: &str) -> Option<CgroupCounters>;
     fn cgroup_members(&self, path: &str) -> HashSet<u32>;
     fn application_disk_usage(&self, target_id: &str) -> Option<DiskBreakdown>;
@@ -190,6 +192,10 @@ impl ResourceProvider for LinuxResourceProvider {
         process_cgroup(pid)
     }
 
+    fn owned_process_cgroups(&self, processes: &HashMap<u32, ProcessStat>) -> HashMap<u32, String> {
+        system::owned_process_cgroups(processes)
+    }
+
     fn cgroup_counters(&self, path: &str) -> Option<CgroupCounters> {
         read_cgroup_counters(path)
     }
@@ -205,6 +211,8 @@ impl ResourceProvider for LinuxResourceProvider {
 
 #[derive(Debug, Clone, Default)]
 pub struct ResourceSnapshot {
+    target_roots: HashMap<String, Vec<u32>>,
+    target_owners: HashMap<u32, String>,
     processes: HashMap<u32, ProcessUsage>,
     children: HashMap<u32, Vec<u32>>,
     cgroup_members_by_root: HashMap<u32, HashSet<u32>>,
@@ -253,12 +261,42 @@ struct ProcessAggregation {
 }
 
 impl ResourceSnapshot {
+    pub(crate) fn runtime_revision(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut targets = self.target_roots.keys().collect::<Vec<_>>();
+        targets.sort_unstable();
+        let mut hash = std::collections::hash_map::DefaultHasher::new();
+        targets.hash(&mut hash);
+        hash.finish()
+    }
+
+    pub(crate) fn target_roots(&self) -> &HashMap<String, Vec<u32>> {
+        &self.target_roots
+    }
+
+    pub(crate) fn usage_for_application(
+        &self,
+        target_id: &str,
+        windows: impl IntoIterator<Item = u32>,
+    ) -> ResourceUsage {
+        self.usage_for_target(
+            target_id,
+            windows.into_iter().chain(
+                self.target_roots
+                    .get(target_id)
+                    .into_iter()
+                    .flatten()
+                    .copied(),
+            ),
+        )
+    }
+
     pub fn usage_for_target(
         &self,
         target_id: &str,
         roots: impl IntoIterator<Item = u32>,
     ) -> ResourceUsage {
-        let mut usage = self.usage_for_roots(roots);
+        let mut usage = self.usage_for_roots_filtered(roots, Some(target_id));
         if let Some(disk) = self.app_disk_by_target.get(target_id) {
             usage.storage.disk_space_total_bytes = disk.total_bytes;
             usage.storage.disk_space_temporary_bytes = disk.temporary_bytes;
@@ -271,7 +309,26 @@ impl ResourceSnapshot {
     }
 
     pub fn usage_for_roots(&self, roots: impl IntoIterator<Item = u32>) -> ResourceUsage {
-        let attribution = self.resource_attribution(roots);
+        self.usage_for_roots_filtered(roots, None)
+    }
+
+    fn usage_for_roots_filtered(
+        &self,
+        roots: impl IntoIterator<Item = u32>,
+        target: Option<&str>,
+    ) -> ResourceUsage {
+        let mut attribution = self.resource_attribution(roots);
+        if let Some(target) = target {
+            let before = attribution.pids.len();
+            attribution.pids.retain(|pid| {
+                self.target_owners
+                    .get(pid)
+                    .is_none_or(|owner| owner == target)
+            });
+            // Cgroup totals include nested subgroups: when another application's
+            // members were excluded, use process counters rather than double charge.
+            attribution.cgroups_cover_process_trees &= attribution.pids.len() == before;
+        }
         let mut aggregate = self.aggregate_processes(&attribution.pids);
         let process_cpu_percent = aggregate.usage.compute.cpu_percent;
         let complete_cgroup = self.has_complete_cgroup_attribution(&attribution);
@@ -641,6 +698,7 @@ impl crate::model::NetworkUsage {
 
 #[derive(Debug)]
 pub struct ResourceSampler {
+    known_roots: discovery::KnownRoots,
     provider: Arc<dyn ResourceProvider>,
     previous_processes: HashMap<u32, PreviousProcess>,
     previous_gpu_engines: HashMap<(u32, u64, String), u64>,
@@ -660,6 +718,7 @@ pub struct ResourceSampler {
 impl Default for ResourceSampler {
     fn default() -> Self {
         Self {
+            known_roots: discovery::KnownRoots::default(),
             provider: Arc::new(LinuxResourceProvider),
             previous_processes: HashMap::new(),
             previous_gpu_engines: HashMap::new(),
@@ -721,6 +780,22 @@ impl ResourceSampler {
         &mut self,
         active_targets: &HashMap<String, Vec<u32>>,
     ) -> ResourceSnapshot {
+        self.sample_with_catalog(active_targets, None)
+    }
+
+    pub(crate) fn sample_for_applications(
+        &mut self,
+        windows: &HashMap<String, Vec<u32>>,
+        catalog: &crate::catalog::Catalog,
+    ) -> ResourceSnapshot {
+        self.sample_with_catalog(windows, Some(catalog))
+    }
+
+    fn sample_with_catalog(
+        &mut self,
+        active_targets: &HashMap<String, Vec<u32>>,
+        catalog: Option<&crate::catalog::Catalog>,
+    ) -> ResourceSnapshot {
         if self.resume_clock.resumed() {
             self.reset_after_resume();
         }
@@ -736,7 +811,24 @@ impl ResourceSampler {
             .previous_system_ticks
             .map(|previous| system_ticks.saturating_sub(previous))
             .filter(|delta| *delta > 0);
-        let (sample, mut snapshot) = ProcessSample::discover(provider.as_ref(), active_targets);
+        let processes = provider.processes();
+        let targets = match catalog {
+            Some(catalog) => {
+                self.known_roots
+                    .discover(provider.as_ref(), active_targets, &processes, catalog)
+            }
+            None => discovery::Targets {
+                roots: active_targets.clone(),
+                owners: HashMap::new(),
+            },
+        };
+        let (sample, mut snapshot) =
+            ProcessSample::discover(provider.as_ref(), &targets.roots, processes);
+        snapshot.target_roots = targets.roots;
+        snapshot.target_owners = targets.owners;
+        snapshot
+            .shared_pids
+            .retain(|pid| !snapshot.target_owners.contains_key(pid));
         snapshot.logical_cpus = logical_cpus;
         snapshot.interval_seconds = interval_seconds;
         let current_cgroups = snapshot
@@ -752,7 +844,9 @@ impl ResourceSampler {
         snapshot.system_energy_mwh = finite_nonnegative(energy.energy_mwh);
         snapshot.battery_full_mwh = finite_nonnegative(energy.battery_full_mwh);
         snapshot.energy_source = energy.source;
-        snapshot.app_disk_by_target = self.app_disk.read(&provider, active_targets.keys(), now);
+        snapshot.app_disk_by_target =
+            self.app_disk
+                .read(&provider, snapshot.target_roots.keys(), now);
         self.previous_cgroups = current_cgroups;
         self.previous_system_ticks = Some(system_ticks);
         self.previous_sample = Some(now);
@@ -1084,8 +1178,8 @@ impl ProcessSample {
     fn discover(
         provider: &dyn ResourceProvider,
         targets: &HashMap<String, Vec<u32>>,
+        processes: HashMap<u32, ProcessStat>,
     ) -> (Self, ResourceSnapshot) {
-        let processes = provider.processes();
         let children = process_children(&processes);
         let roots = targets
             .values()
@@ -1142,6 +1236,8 @@ impl<T> ProcessCache<T> {
     }
 }
 
+#[cfg(test)]
+mod background_tests;
 #[cfg(feature = "benchmarks")]
 pub(crate) mod benchmarks;
 #[cfg(test)]
