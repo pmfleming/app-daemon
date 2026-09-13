@@ -1,4 +1,4 @@
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use anyhow::{Context, Result};
 use serde_json::Value;
@@ -7,8 +7,8 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 
 use shelllist_daemon_core::{
-    event_message, protocol_error_message, response_error_message, response_message,
-    shutdown_message, transport_error_message,
+    ClientRoute, addressed_message, event_message, protocol_error_message, response_error_message,
+    response_message, shutdown_message, transport_error_message,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -60,7 +60,13 @@ pub(crate) enum OutputCommand {
         id: String,
         result: std::result::Result<Value, String>,
         cancelled_request_id: Option<String>,
+        route: Option<ClientRoute>,
     },
+    OwnedIds {
+        route: ClientRoute,
+        reply: oneshot::Sender<Vec<String>>,
+    },
+    Cancelled(String),
     Event {
         stream: String,
         event: Value,
@@ -91,6 +97,18 @@ impl OutputHandle {
             .context("send daemon output command")
     }
 
+    pub(crate) async fn owned_ids(&self, route: ClientRoute) -> Vec<String> {
+        let (reply, response) = oneshot::channel();
+        if self
+            .send(OutputCommand::OwnedIds { route, reply })
+            .await
+            .is_err()
+        {
+            return Vec::new();
+        }
+        response.await.unwrap_or_default()
+    }
+
     pub(crate) async fn active_ids(&self) -> Vec<String> {
         let (reply, response) = oneshot::channel();
         if self.send(OutputCommand::ActiveIds(reply)).await.is_err() {
@@ -109,6 +127,9 @@ enum EventDisposition {
 struct OutputState<P> {
     policy: P,
     active_ids: HashSet<String>,
+    // Only live subscriptions consume routing storage. Ordinary request
+    // addresses travel with their task/response, not a long-lived dictionary.
+    subscription_routes: HashMap<String, ClientRoute>,
     pending_events: VecDeque<(String, String, Value)>,
     suppressed_ids: HashSet<String>,
     suppressed_order: VecDeque<String>,
@@ -120,6 +141,7 @@ impl<P: CorrelationPolicy> OutputState<P> {
         Self {
             policy,
             active_ids: HashSet::new(),
+            subscription_routes: HashMap::new(),
             pending_events: VecDeque::new(),
             suppressed_ids: HashSet::new(),
             suppressed_order: VecDeque::new(),
@@ -127,12 +149,18 @@ impl<P: CorrelationPolicy> OutputState<P> {
         }
     }
 
-    fn activate(&mut self, response: &Value) -> Vec<(String, Value)> {
+    fn activate(&mut self, response: &Value, route: Option<&ClientRoute>) -> Vec<(String, Value)> {
         let Some(tracked) = self.policy.response_id(response) else {
             return Vec::new();
         };
         if self.suppressed_ids.contains(&tracked.id) {
             return Vec::new();
+        }
+        if tracked.kind == TrackedKind::Subscription
+            && let Some(route) = route
+        {
+            self.subscription_routes
+                .insert(tracked.id.clone(), route.clone());
         }
         let pending = self.take_pending(&tracked.id);
         self.active_ids.insert(tracked.id);
@@ -187,6 +215,7 @@ impl<P: CorrelationPolicy> OutputState<P> {
 
     fn cancelled(&mut self, id: &str) {
         self.active_ids.remove(id);
+        self.subscription_routes.remove(id);
         self.take_pending(id);
         self.suppress(id.to_owned());
     }
@@ -196,6 +225,7 @@ impl<P: CorrelationPolicy> OutputState<P> {
             && let Some(id) = self.policy.event_id(stream, event)
         {
             self.active_ids.remove(&id);
+            self.subscription_routes.remove(&id);
             self.take_pending(&id);
             self.suppress(id);
         }
@@ -207,8 +237,28 @@ impl<P: CorrelationPolicy> OutputState<P> {
         ids
     }
 
+    fn owned_ids(&self, owner: &ClientRoute) -> Vec<String> {
+        self.subscription_routes
+            .iter()
+            .filter(|(_, route)| {
+                route.consumer_id == owner.consumer_id && route.generation == owner.generation
+            })
+            .map(|(id, _)| id.clone())
+            .collect()
+    }
+
+    fn event_message(&self, stream: &str, event: &Value) -> Value {
+        // Subscription ownership is independent of domain operation correlation.
+        let route = event
+            .get("subscription_id")
+            .and_then(Value::as_str)
+            .and_then(|id| self.subscription_routes.get(id));
+        addressed_message(event_message(stream, event.clone()), route)
+    }
+
     fn reset_correlation(&mut self) {
         self.active_ids.clear();
+        self.subscription_routes.clear();
         self.pending_events.clear();
         self.suppressed_ids.clear();
         self.suppressed_order.clear();
@@ -288,7 +338,26 @@ where
             id,
             result,
             cancelled_request_id,
-        } => emit_response(writer, state, id, result, cancelled_request_id).await,
+            route,
+        } => {
+            emit_response(
+                writer,
+                state,
+                id,
+                result,
+                cancelled_request_id,
+                route.as_ref(),
+            )
+            .await
+        }
+        OutputCommand::OwnedIds { route, reply } => {
+            let _ = reply.send(state.owned_ids(&route));
+            Ok(())
+        }
+        OutputCommand::Cancelled(id) => {
+            state.cancelled(&id);
+            Ok(())
+        }
         OutputCommand::Event { stream, event } => emit_event(writer, state, stream, event).await,
         OutputCommand::ProtocolError(error) => {
             emit_line(writer, &protocol_error_message(error)).await
@@ -314,6 +383,7 @@ async fn emit_response<P, W>(
     id: String,
     result: std::result::Result<Value, String>,
     cancelled_request_id: Option<String>,
+    route: Option<&ClientRoute>,
 ) -> Result<()>
 where
     P: CorrelationPolicy,
@@ -324,15 +394,16 @@ where
     }
     let (line, pending) = match result {
         Ok(response) => {
-            let pending = state.activate(&response);
+            let pending = state.activate(&response, route);
             (response_message(&id, response), pending)
         }
         Err(error) => (response_error_message(&id, error), Vec::new()),
     };
-    emit_line(writer, &line).await?;
+    emit_line(writer, &addressed_message(line, route)).await?;
     for (stream, event) in pending {
+        let message = state.event_message(&stream, &event);
         state.emitted(&stream, &event);
-        emit_line(writer, &event_message(&stream, event)).await?;
+        emit_line(writer, &message).await?;
     }
     Ok(())
 }
@@ -349,8 +420,9 @@ where
 {
     match state.event_disposition(&stream, &event) {
         EventDisposition::Emit => {
+            let message = state.event_message(&stream, &event);
             state.emitted(&stream, &event);
-            emit_line(writer, &event_message(&stream, event)).await
+            emit_line(writer, &message).await
         }
         EventDisposition::Buffer(id) => {
             state.buffer(id, stream, event);
@@ -369,6 +441,10 @@ async fn emit_line<W: AsyncWrite + Unpin>(writer: &mut W, value: &Value) -> Resu
         .context("write daemon JSON line")?;
     writer.flush().await.context("flush daemon JSON line")
 }
+
+#[cfg(test)]
+#[path = "routing_tests.rs"]
+mod routing_tests;
 
 #[cfg(test)]
 mod tests {
@@ -410,6 +486,7 @@ mod tests {
                 id: "subscribe".into(),
                 result: Ok(json!({ "data": { "subscription": { "id": "sub-1" } } })),
                 cancelled_request_id: None,
+                route: None,
             },
         ])
         .await?;
@@ -435,6 +512,7 @@ mod tests {
                 id: "status".into(),
                 result: Ok(json!({ "ok": true })),
                 cancelled_request_id: None,
+                route: None,
             })
             .await?;
         drop(priority_sender);
@@ -467,11 +545,13 @@ mod tests {
                 id: "subscribe".into(),
                 result: Ok(json!({ "data": { "subscription": { "id": "sub-1" } } })),
                 cancelled_request_id: None,
+                route: None,
             },
             OutputCommand::Response {
                 id: "cancel".into(),
                 result: Ok(json!({ "cancelled": "sub-1" })),
                 cancelled_request_id: Some("sub-1".into()),
+                route: None,
             },
             OutputCommand::Event {
                 stream: "things.changed".into(),

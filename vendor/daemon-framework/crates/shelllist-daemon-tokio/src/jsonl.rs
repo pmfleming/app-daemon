@@ -3,8 +3,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use serde_json::Value;
-use shelllist_daemon_core::{ClientRequest, DaemonEndpoint};
+use serde_json::{Value, json};
+use shelllist_daemon_core::{ClientMessage, ClientRequest, ClientRoute, DaemonEndpoint};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::{Mutex, Semaphore, watch};
 use tokio::task::{JoinHandle, JoinSet};
@@ -17,6 +17,33 @@ const INITIAL_RECONNECT_DELAY: Duration = Duration::from_millis(250);
 const MAX_RECONNECT_DELAY: Duration = Duration::from_secs(5);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const CONTROL_TIMEOUT: Duration = Duration::from_secs(5);
+const CONTROL_CAPACITY: usize = 16;
+
+#[derive(Clone)]
+struct RequestSlots {
+    calls: Arc<Semaphore>,
+    controls: Arc<Semaphore>,
+}
+
+impl RequestSlots {
+    fn new(maximum_calls: usize) -> Self {
+        Self {
+            calls: Arc::new(Semaphore::new(maximum_calls)),
+            controls: Arc::new(Semaphore::new(CONTROL_CAPACITY)),
+        }
+    }
+
+    fn acquire(
+        &self,
+        request: &ClientRequest,
+    ) -> Result<tokio::sync::OwnedSemaphorePermit, tokio::sync::TryAcquireError> {
+        let slots = match request {
+            ClientRequest::Call { .. } | ClientRequest::Subscribe { .. } => &self.calls,
+            _ => &self.controls,
+        };
+        Arc::clone(slots).try_acquire_owned()
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CancelMode {
@@ -97,7 +124,7 @@ pub async fn run_jsonl_client<P: CorrelationPolicy>(config: JsonlClientConfig<P>
     let owner_task = spawn_owner_watcher(dbus.clone(), output.clone());
 
     let mut calls = JoinSet::new();
-    let request_slots = Arc::new(Semaphore::new(config.max_in_flight_requests.max(1)));
+    let request_slots = RequestSlots::new(config.max_in_flight_requests.max(1));
     let shutdown_id = request_loop(
         &dbus,
         &output,
@@ -128,14 +155,14 @@ async fn request_loop(
     calls: &mut JoinSet<()>,
     cancel_mode: CancelMode,
     call_failure: CallFailureMapper,
-    request_slots: Arc<Semaphore>,
+    request_slots: RequestSlots,
 ) -> Result<Option<String>> {
     let mut lines = BufReader::new(tokio::io::stdin()).lines();
     while let Some(line) = lines.next_line().await.context("read JSONL request")? {
         let Some(request) = parse_request(&line, output).await? else {
             continue;
         };
-        if let ClientRequest::Shutdown { id } = request {
+        if let ClientRequest::Shutdown { id } = request.request {
             return Ok(Some(id));
         }
         spawn_request(
@@ -145,19 +172,28 @@ async fn request_loop(
             request,
             cancel_mode,
             call_failure,
-            Arc::clone(&request_slots),
-        );
+            request_slots.clone(),
+        )
+        .await;
         reap_finished(calls);
     }
     Ok(None)
 }
 
-async fn parse_request(line: &str, output: &OutputHandle) -> Result<Option<ClientRequest>> {
+async fn parse_request(line: &str, output: &OutputHandle) -> Result<Option<ClientMessage>> {
     if line.trim().is_empty() {
         return Ok(None);
     }
-    match serde_json::from_str(line) {
-        Ok(request) => Ok(Some(request)),
+    match serde_json::from_str::<ClientMessage>(line) {
+        Ok(request) => {
+            if let Err(error) = request.validate() {
+                output
+                    .send(OutputCommand::ProtocolError(error.into()))
+                    .await?;
+                return Ok(None);
+            }
+            Ok(Some(request))
+        }
         Err(error) => {
             output
                 .send(OutputCommand::ProtocolError(error.to_string()))
@@ -167,25 +203,41 @@ async fn parse_request(line: &str, output: &OutputHandle) -> Result<Option<Clien
     }
 }
 
-fn spawn_request(
+async fn spawn_request(
     calls: &mut JoinSet<()>,
     dbus: ReconnectingClient,
     output: OutputHandle,
-    request: ClientRequest,
+    message: ClientMessage,
     cancel_mode: CancelMode,
     call_failure: CallFailureMapper,
-    request_slots: Arc<Semaphore>,
+    request_slots: RequestSlots,
 ) {
+    // Acquire before spawning: a semaphore inside the task still permits an
+    // unbounded backlog of waiting tasks. Reject overload without replaying it.
+    let permit = match request_slots.acquire(&message.request) {
+        Ok(permit) => permit,
+        Err(_) => {
+            let id = match &message.request {
+                ClientRequest::Call { id, .. }
+                | ClientRequest::Subscribe { id, .. }
+                | ClientRequest::Cancel { id, .. }
+                | ClientRequest::Release { id }
+                | ClientRequest::Shutdown { id } => id,
+            };
+            let _ = output
+                .send(response_command(
+                    id.clone(),
+                    Err("bridge request capacity exceeded; request was not sent".into()),
+                    None,
+                    message.route,
+                ))
+                .await;
+            return;
+        }
+    };
     calls.spawn(async move {
-        // Cancellation is control-plane traffic: it must not wait behind calls it
-        // is intended to cancel. Ordinary calls and subscriptions remain bounded.
-        let _permit = match &request {
-            ClientRequest::Call { .. } | ClientRequest::Subscribe { .. } => {
-                request_slots.acquire_owned().await.ok()
-            }
-            ClientRequest::Cancel { .. } | ClientRequest::Shutdown { .. } => None,
-        };
-        let command = execute_request(dbus, &output, request, cancel_mode, call_failure).await;
+        let _permit = permit;
+        let command = execute_request(dbus, &output, message, cancel_mode, call_failure).await;
         let _ = output.send(command).await;
     });
 }
@@ -193,10 +245,11 @@ fn spawn_request(
 async fn execute_request(
     dbus: ReconnectingClient,
     output: &OutputHandle,
-    request: ClientRequest,
+    message: ClientMessage,
     cancel_mode: CancelMode,
     call_failure: CallFailureMapper,
 ) -> OutputCommand {
+    let ClientMessage { request, route } = message;
     match request {
         ClientRequest::Call { id, method, params } => {
             let result = with_transport_timeout(output, REQUEST_TIMEOUT, async {
@@ -208,7 +261,7 @@ async fn execute_request(
                 CallFailure::Api(response) => Ok(response),
                 CallFailure::Transport(error) => Err(error),
             });
-            response_command(id, result, None)
+            response_command(id, result, None, route)
         }
         ClientRequest::Subscribe { id, streams } => {
             let result = with_transport_timeout(output, REQUEST_TIMEOUT, async {
@@ -217,7 +270,7 @@ async fn execute_request(
             })
             .await
             .map_err(|error| error.to_string());
-            response_command(id, result, None)
+            response_command(id, result, None, route)
         }
         ClientRequest::Cancel { id, request_id } => {
             let result = with_transport_timeout(output, CONTROL_TIMEOUT, async {
@@ -226,11 +279,45 @@ async fn execute_request(
             })
             .await
             .map_err(|error| error.to_string());
-            let cancelled = result.as_ref().ok().map(|_| request_id);
-            response_command(id, result, cancelled)
+            let cancelled = result
+                .as_ref()
+                .ok()
+                .filter(|response| cancellation_succeeded(response))
+                .map(|_| request_id);
+            response_command(id, result, cancelled, route)
+        }
+        ClientRequest::Release { id } => {
+            let result = release_consumer(&dbus, output, route.as_ref(), cancel_mode)
+                .await
+                .map_err(|error| error.to_string());
+            response_command(id, result, None, route)
         }
         ClientRequest::Shutdown { id } => OutputCommand::Shutdown(id),
     }
+}
+
+async fn release_consumer(
+    dbus: &ReconnectingClient,
+    output: &OutputHandle,
+    route: Option<&ClientRoute>,
+    mode: CancelMode,
+) -> Result<Value> {
+    let route = route.context("release requires a consumer route")?;
+    let ids = output.owned_ids(route.clone()).await;
+    with_transport_timeout(output, CONTROL_TIMEOUT, async {
+        let mut released = 0;
+        for id in ids {
+            let response = cancel(&dbus.get().await?, &id, mode).await?;
+            anyhow::ensure!(
+                cancellation_succeeded(&response),
+                "daemon rejected cancellation of {id}"
+            );
+            output.send(OutputCommand::Cancelled(id)).await?;
+            released += 1;
+        }
+        Ok(json!({ "released": released }))
+    })
+    .await
 }
 
 async fn with_transport_timeout<T>(
@@ -258,12 +345,18 @@ fn response_command(
     id: String,
     result: std::result::Result<Value, String>,
     cancelled_request_id: Option<String>,
+    route: Option<ClientRoute>,
 ) -> OutputCommand {
     OutputCommand::Response {
         id,
         result,
         cancelled_request_id,
+        route,
     }
+}
+
+fn cancellation_succeeded(response: &Value) -> bool {
+    response.get("ok").and_then(Value::as_bool) != Some(false)
 }
 
 async fn cancel(dbus: &JsonDbusClient, request_id: &str, mode: CancelMode) -> Result<Value> {
@@ -400,8 +493,82 @@ mod tests {
     use serde_json::{Value, json};
     use tokio::io::{AsyncBufReadExt, BufReader, duplex};
 
-    use super::{response_command, with_transport_timeout};
+    use super::{
+        CancelMode, ReconnectingClient, RequestSlots, response_command, spawn_request,
+        with_transport_timeout,
+    };
+    use shelllist_daemon_core::{ClientMessage, ClientRequest, DaemonEndpoint};
+    use tokio::task::JoinSet;
+
+    #[tokio::test]
+    async fn overload_is_addressed_and_never_spawns_or_sends_the_request() -> Result<()> {
+        let (writer, reader) = duplex(4096);
+        let (output, task) = spawn_output_actor_with_writer(BasicCorrelation, 8, 8, writer);
+        let mut lines = BufReader::new(reader).lines();
+        let slots = RequestSlots::new(0);
+        let message: ClientMessage = serde_json::from_value(json!({
+            "op": "call", "id": "view::mutation", "method": "must.not.execute",
+            "route": { "consumerId": "view", "localId": "mutation", "generation": 2, "kind": "call" }
+        }))?;
+        let expected_route = serde_json::to_value(message.route.as_ref().unwrap())?;
+        let mut calls = JoinSet::new();
+        // No D-Bus connection exists; overload must be rejected before execution.
+        let dbus = ReconnectingClient::new(DaemonEndpoint::new(
+            "test",
+            "org.test.Daemon",
+            "/test",
+            "org.test.Daemon",
+        ));
+        spawn_request(
+            &mut calls,
+            dbus,
+            output.clone(),
+            message,
+            CancelMode::Json,
+            |_, _| panic!("overloaded request was executed"),
+            slots.clone(),
+        )
+        .await;
+        assert!(calls.is_empty());
+        let response: Value = serde_json::from_str(&lines.next_line().await?.unwrap())?;
+        assert_eq!(response["ok"], false);
+        assert_eq!(response["route"], expected_route);
+        assert!(response["error"].as_str().unwrap().contains("not sent"));
+        // A separate, bounded control lane remains usable under call saturation.
+        let permits = (0..super::CONTROL_CAPACITY)
+            .map(|_| {
+                slots
+                    .acquire(&ClientRequest::Release {
+                        id: "release".into(),
+                    })
+                    .unwrap()
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            slots
+                .acquire(&ClientRequest::Release {
+                    id: "overflow".into()
+                })
+                .is_err()
+        );
+        drop(permits);
+        drop(output);
+        task.await??;
+        Ok(())
+    }
+
     use crate::output_actor::{BasicCorrelation, OutputCommand, spawn_output_actor_with_writer};
+
+    #[test]
+    fn domain_cancellation_errors_do_not_retire_subscription_ownership() {
+        assert!(!super::cancellation_succeeded(
+            &json!({ "ok": false, "error": {} })
+        ));
+        assert!(super::cancellation_succeeded(&json!({ "ok": true })));
+        assert!(super::cancellation_succeeded(
+            &json!({ "cancelled": "subscription-1" })
+        ));
+    }
 
     #[tokio::test]
     async fn timeout_reports_recovery_before_the_correlated_response() -> Result<()> {
@@ -419,6 +586,7 @@ mod tests {
             .send(response_command(
                 "slow-call".into(),
                 Ok(json!({ "ok": false, "error": { "code": "daemon-unavailable" } })),
+                None,
                 None,
             ))
             .await?;
