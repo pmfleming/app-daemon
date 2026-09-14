@@ -1,3 +1,7 @@
+pub mod work_area;
+#[cfg(test)]
+mod work_area_tests;
+
 use std::{env, os::unix::fs::MetadataExt, path::PathBuf, time::Duration};
 
 use anyhow::{Context, Result, bail};
@@ -57,6 +61,13 @@ impl Client {
         time::timeout(IPC_TIMEOUT, request_socket(&socket, command))
             .await
             .context("Hyprland command timed out")?
+    }
+
+    pub async fn work_areas(
+        &self,
+    ) -> Result<std::collections::BTreeMap<String, work_area::Insets>> {
+        let reply = self.request("[[BATCH]]j/monitors;j/workspaces;j/workspacerules;j/clients;j/getoption general:gaps_out").await?;
+        work_area::parse_work_areas(&reply)
     }
 
     pub async fn event_socket(&self) -> Result<UnixStream> {
@@ -162,7 +173,15 @@ async fn request_socket(path: &std::path::Path, command: &str) -> Result<String>
     stream.write_all(command.as_bytes()).await?;
     stream.shutdown().await?;
     let mut response = String::new();
-    stream.read_to_string(&mut response).await?;
+    const MAX_REPLY_BYTES: u64 = 16 * 1024 * 1024;
+    stream
+        .take(MAX_REPLY_BYTES + 1)
+        .read_to_string(&mut response)
+        .await?;
+    anyhow::ensure!(
+        response.len() as u64 <= MAX_REPLY_BYTES,
+        "Hyprland reply is too large"
+    );
     Ok(response)
 }
 

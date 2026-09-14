@@ -7,7 +7,7 @@ the root `Cargo.lock`; Nixpkgs remains pinned by `flake.lock`.
 | Directory | Upstream | Source commit | License |
 | --- | --- | --- | --- |
 | `daemon-framework` | https://github.com/pmfleming/daemon-framework | `cd261278a587a38efa44d41f4f7291acbafb8b80` | MIT; upstream LICENSE included |
-| `shelllist-hyprland` | Shelllist's local `shelllist-hyprland` repository (no remote configured at snapshot time) | `00044fe7517d6632d9cbd9e7aa712aa771f6577d` | MIT, as declared by upstream Cargo.toml; no separate upstream LICENSE file |
+| `shelllist-hyprland` | Shelllist's local `shelllist-hyprland` repository (no remote configured at snapshot time) | `61376dd84a0a8f5edef2da02b11b36cd0e3edbf4` | MIT, as declared by upstream Cargo.toml; no separate upstream LICENSE file |
 
 The snapshots contain upstream manifests, library source/tests, and README files;
 framework workspace metadata and LICENSE are also included. Git metadata, build
@@ -21,6 +21,8 @@ changes from the source commit above (committed locally upstream):
 - cancellation failure handling and routing/churn regression tests.
 
 The vendored source files and framework README match that upstream commit.
+The Hyprland snapshot also includes phase 4's typed work-area parser, workspace
+rule resolution, socket reply-size bound and regression tests.
 
 To update, export the same paths from an explicitly reviewed upstream commit,
 replace the corresponding directory, update this table, then run:
