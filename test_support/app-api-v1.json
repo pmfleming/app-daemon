@@ -25,6 +25,7 @@
         "params_example": {
           "target_id": "org.example.App.desktop",
           "since_ms": 0,
+          "until_ms": 15000,
           "cursor": null,
           "limit": 1000
         },
@@ -34,7 +35,11 @@
           "kind": "opaque-cursor",
           "request_field": "cursor",
           "response_field": "next_cursor",
-          "order": "oldest-first"
+          "order": "oldest-first",
+          "summary_field": "summary",
+          "summary_scope": "full-selected-window",
+          "summary_weighting": "observed-duration",
+          "summary_revision_field": "revision"
         }
       },
       {

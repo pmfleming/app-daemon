@@ -76,7 +76,18 @@ Apply the rule by rebooting or by retriggering the `powercap` subsystem after re
 
 Resource history is aligned to 15-second wall-clock buckets and retained for 24 hours in `$XDG_STATE_HOME/app-daemon/resource-history-v1.json` (or `~/.local/state/...`). Points include averages, peaks, sample count, coverage, and mixed-source metadata. Each new point also includes per-metric `availability`: a capability is true only if it was available for every observed sample in that bucket. Unsupported or mixed-availability buckets render as gaps, while supported idle measurements remain zero. Older records without this metadata have unknown optional capabilities. A compact one-minute application-energy ledger in the same file is retained for seven days and powers `applications.energyOverview` without keeping a week of full resource samples. Expired partial buckets are finalized even after an application exits.
 
-History is returned oldest-first. The response includes an opaque `next_cursor`; pass it back to retrieve the next page or poll for points recorded after the last response:
+History is returned oldest-first. The response includes an opaque `next_cursor`; pass it back to retrieve the next page or poll for points recorded after the last response.
+
+New clients should also supply `until_ms` to freeze a window during pagination.
+Every page includes a `summary` for the **entire selected window**, even an empty
+incremental page: window bounds, a revision, and per-metric availability, mean,
+peak, observed milliseconds and temporal coverage. Means are weighted by observed
+`duration_ms` (clipped at the window boundary), not by bucket count. Peaks retain
+the maximum recorded inside participating buckets; a partial bucket cannot locate
+a peak more precisely. Missing measurements yield null statistics, not zero.
+Legacy capability normalization happens in the daemon before points are returned.
+
+Example request:
 
 ```json
 {"target_id":"org.example.App.desktop","since_ms":0,"cursor":null,"limit":1000}

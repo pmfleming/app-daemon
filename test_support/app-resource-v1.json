@@ -137,7 +137,9 @@
       "gpu_busy_percent": 89,
       "disk_read_bytes_per_second": 1048576,
       "disk_write_bytes_per_second": 524288,
-      "estimated_app_power_watts": 3.75
+      "estimated_app_power_watts": 3.75,
+      "network_receive_bytes_per_second": 0,
+      "network_transmit_bytes_per_second": 0
     }
   }
 }

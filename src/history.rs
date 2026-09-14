@@ -16,6 +16,7 @@ use crate::{
 };
 
 mod aggregate;
+pub mod summary;
 use aggregate::PendingPoint;
 
 const FILE_VERSION: u8 = 1;
@@ -71,6 +72,7 @@ struct HistoryCursor {
 #[derive(Debug)]
 pub struct HistoryPage {
     pub points: Vec<ResourceHistoryPoint>,
+    pub summary: summary::HistorySummary,
     pub has_more: bool,
     pub next_cursor: Option<String>,
 }
@@ -160,6 +162,23 @@ impl HistoryStore {
         cursor: Option<&str>,
         limit: usize,
     ) -> anyhow::Result<HistoryPage> {
+        self.query_window(target_id, since_ms, None, cursor, limit)
+    }
+
+    pub fn query_window(
+        &mut self,
+        target_id: &str,
+        since_ms: Option<u64>,
+        until_ms: Option<u64>,
+        cursor: Option<&str>,
+        limit: usize,
+    ) -> anyhow::Result<HistoryPage> {
+        anyhow::ensure!(
+            since_ms
+                .zip(until_ms)
+                .is_none_or(|(start, end)| start <= end),
+            "history window start exceeds its end"
+        );
         self.flush_expired(now_milliseconds());
         self.prune(now_milliseconds());
         let epoch = self.cursor_epochs.get(target_id).map_or("", String::as_str);
@@ -168,14 +187,31 @@ impl HistoryStore {
             .transpose()?
             .map(|cursor| cursor.after_timestamp_ms);
         let limit = limit.clamp(1, 10_000);
-        let mut matching = self
+        let window: Vec<_> = self
             .points
             .get(target_id)
             .into_iter()
             .flatten()
             .filter(|point| since_ms.is_none_or(|since| point.timestamp_ms >= since))
+            .filter(|point| until_ms.is_none_or(|until| point.timestamp_ms <= until))
+            .collect();
+        let end = until_ms
+            .unwrap_or_else(|| now_milliseconds().max(window.last().map_or(0, |p| p.timestamp_ms)));
+        let start = since_ms.unwrap_or_else(|| {
+            window
+                .first()
+                .map_or(end, |p| p.timestamp_ms.saturating_sub(p.duration_ms))
+        });
+        let summary = summary::summarize(&window, start, end, epoch);
+        let mut matching = window
+            .into_iter()
             .filter(|point| after.is_none_or(|timestamp| point.timestamp_ms > timestamp));
-        let points = matching.by_ref().take(limit).cloned().collect::<Vec<_>>();
+        let points = matching
+            .by_ref()
+            .take(limit)
+            .cloned()
+            .map(summary::normalize)
+            .collect::<Vec<_>>();
         let has_more = matching.next().is_some();
         let next_cursor = points
             .last()
@@ -184,6 +220,7 @@ impl HistoryStore {
             .or_else(|| cursor.map(str::to_owned));
         Ok(HistoryPage {
             points,
+            summary,
             has_more,
             next_cursor,
         })

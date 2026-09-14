@@ -262,14 +262,16 @@ impl ApplicationService {
         params: ResourceHistoryParams,
     ) -> anyhow::Result<ApplicationResourceHistory> {
         self.mark_resource_demand();
-        let page = self.history.lock().await.query(
+        let page = self.history.lock().await.query_window(
             &params.target_id,
             params.since_ms,
+            params.until_ms,
             params.cursor.as_deref(),
             params.limit,
         )?;
         Ok(ApplicationResourceHistory {
             target_id: params.target_id,
+            summary: page.summary,
             points: page.points,
             has_more: page.has_more,
             next_cursor: page.next_cursor,
@@ -807,6 +809,9 @@ pub struct ResourceHistoryParams {
     pub target_id: String,
     #[serde(default)]
     pub since_ms: Option<u64>,
+    /// Freeze the selected window across pages and its statistical summary.
+    #[serde(default)]
+    pub until_ms: Option<u64>,
     /// Opaque cursor returned as `next_cursor` by the previous page.
     #[serde(default)]
     pub cursor: Option<String>,

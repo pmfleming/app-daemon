@@ -146,6 +146,14 @@ impl PendingPoint {
             .peaks
             .disk_write_bytes_per_second
             .max(usage.storage.disk_write_bytes_per_second);
+        self.peaks.network_receive_bytes_per_second = self
+            .peaks
+            .network_receive_bytes_per_second
+            .max(usage.network.network_receive_bytes_per_second);
+        self.peaks.network_transmit_bytes_per_second = self
+            .peaks
+            .network_transmit_bytes_per_second
+            .max(usage.network.network_transmit_bytes_per_second);
         self.peaks.estimated_app_power_watts = self
             .peaks
             .estimated_app_power_watts
@@ -195,6 +203,12 @@ impl ResourcePeaks {
         self.disk_write_bytes_per_second = self
             .disk_write_bytes_per_second
             .max(other.disk_write_bytes_per_second);
+        self.network_receive_bytes_per_second = self
+            .network_receive_bytes_per_second
+            .max(other.network_receive_bytes_per_second);
+        self.network_transmit_bytes_per_second = self
+            .network_transmit_bytes_per_second
+            .max(other.network_transmit_bytes_per_second);
         self.estimated_app_power_watts = self
             .estimated_app_power_watts
             .max(other.estimated_app_power_watts);

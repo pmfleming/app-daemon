@@ -195,6 +195,8 @@ pub struct ResourcePeaks {
     pub disk_read_bytes_per_second: f64,
     pub disk_write_bytes_per_second: f64,
     pub estimated_app_power_watts: f64,
+    pub network_receive_bytes_per_second: f64,
+    pub network_transmit_bytes_per_second: f64,
 }
 
 // A capability is true only when available throughout the observed bucket.
@@ -245,6 +247,7 @@ pub struct ResourceHistoryPoint {
 #[derive(Debug, PartialEq, Serialize, Deserialize)]
 pub struct ApplicationResourceHistory {
     pub target_id: String,
+    pub summary: crate::history::summary::HistorySummary,
     /// Chronological page ordered from oldest to newest.
     pub points: Vec<ResourceHistoryPoint>,
     pub has_more: bool,
