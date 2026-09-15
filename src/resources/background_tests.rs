@@ -223,10 +223,17 @@ fn separately_owned_child_applications_are_not_charged_to_the_parent() -> anyhow
     let provider = Arc::new(TestProvider::default());
     {
         let mut state = provider.state.lock().unwrap();
-        state.processes = HashMap::from([(42, process(1, 100)), (43, process(42, 101))]);
+        state.processes = HashMap::from([
+            (42, process(1, 100)),
+            (43, process(42, 101)),
+            (44, process(43, 102)),
+            (45, process(44, 103)),
+            (46, process(45, 104)),
+        ]);
         state.cgroups = HashMap::from([
             (42, "/app-org.example.App.service".into()),
             (43, "/app-org.example.Other.service".into()),
+            (45, "/app-org.example.App.service/reclaimed".into()),
         ]);
     }
     let mut sampler = ResourceSampler {
@@ -234,9 +241,12 @@ fn separately_owned_child_applications_are_not_charged_to_the_parent() -> anyhow
         ..Default::default()
     };
     let snapshot = sampler.sample_for_applications(&HashMap::new(), &catalog);
-    for id in ["org.example.App.desktop", "org.example.Other.desktop"] {
+    for (id, count) in [
+        ("org.example.App.desktop", 3),
+        ("org.example.Other.desktop", 2),
+    ] {
         let usage = snapshot.usage_for_application(id, []);
-        assert_eq!(usage.compute.process_count, 1, "{id}");
+        assert_eq!(usage.compute.process_count, count, "{id}");
         assert!(!usage.measurement.resources_shared);
     }
     Ok(())

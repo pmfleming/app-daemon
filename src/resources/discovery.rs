@@ -1,6 +1,6 @@
 use super::{ProcessStat, ResourceProvider};
 use crate::catalog::Catalog;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, hash_map::Entry};
 
 #[derive(Debug, Default)]
 pub(super) struct KnownRoots {
@@ -63,6 +63,7 @@ impl KnownRoots {
             );
         }
         let children = super::system::process_children(processes);
+        inherit_owners(&mut owners, &children);
         // Remember observed children as PID/start-time identities too, so a helper
         // does not disappear from accounting merely because its parent/window exits.
         for (id, pids) in &mut members {
@@ -102,5 +103,22 @@ impl KnownRoots {
             })
             .collect();
         Targets { roots, owners }
+    }
+}
+
+/// Propagate definite cgroup ownership to helpers lacking their own observation.
+/// Seed all explicit owners first, so nested application boundaries always win.
+fn inherit_owners(owners: &mut HashMap<u32, String>, children: &HashMap<u32, Vec<u32>>) {
+    let mut pending = owners.keys().copied().collect::<Vec<_>>();
+    while let Some(pid) = pending.pop() {
+        let Some(owner) = owners.get(&pid).cloned() else {
+            continue;
+        };
+        for &child in children.get(&pid).into_iter().flatten() {
+            if let Entry::Vacant(entry) = owners.entry(child) {
+                entry.insert(owner.clone());
+                pending.push(child);
+            }
+        }
     }
 }
