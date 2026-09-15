@@ -354,13 +354,20 @@ pub(super) fn descendants(
     roots: impl IntoIterator<Item = u32>,
     children: &HashMap<u32, Vec<u32>>,
 ) -> HashSet<u32> {
-    let mut pending = roots.into_iter().filter(|pid| *pid > 0).collect::<Vec<_>>();
+    descendants_where(roots.into_iter().filter(|pid| *pid > 0), children, |_| true)
+}
+
+/// Traverse accepted processes only: rejecting a parent also prunes its children.
+pub(super) fn descendants_where(
+    roots: impl IntoIterator<Item = u32>,
+    children: &HashMap<u32, Vec<u32>>,
+    accept: impl Fn(u32) -> bool,
+) -> HashSet<u32> {
+    let mut pending = roots.into_iter().collect::<Vec<_>>();
     let mut included = HashSet::new();
     while let Some(pid) = pending.pop() {
-        if included.insert(pid)
-            && let Some(process_children) = children.get(&pid)
-        {
-            pending.extend(process_children);
+        if accept(pid) && included.insert(pid) {
+            pending.extend(children.get(&pid).into_iter().flatten());
         }
     }
     included

@@ -9,6 +9,19 @@ use std::{
 };
 
 #[test]
+fn descendant_traversal_prunes_rejected_branches_and_terminates_cycles() {
+    let children = HashMap::from([(1, vec![2, 3]), (2, vec![4]), (3, vec![1])]);
+    assert_eq!(
+        super::system::descendants([0, 1], &children),
+        HashSet::from([1, 2, 3, 4])
+    );
+    assert_eq!(
+        super::system::descendants_where([1, 1], &children, |pid| pid != 2),
+        HashSet::from([1, 3]),
+    );
+}
+
+#[test]
 fn parses_proc_stat_with_spaces_in_command() -> anyhow::Result<()> {
     let stat = "42 (application helper) S 7 0 0 0 0 0 0 0 0 0 120 30 0 0 0 0 0 0 99 0 0";
     let process = parse_process_stat(stat).context("valid stat")?;

@@ -29,10 +29,8 @@ impl KnownRoots {
         let mut members = HashMap::<String, HashSet<u32>>::new();
         for (path, pids) in groups {
             if let Some(id) = catalog.target_for_cgroup(&path) {
-                for pid in pids {
-                    owners.insert(pid, id.clone());
-                    members.entry(id.clone()).or_default().insert(pid);
-                }
+                owners.extend(pids.iter().map(|&pid| (pid, id.clone())));
+                members.entry(id).or_default().extend(pids);
             }
         }
         for (id, pids) in &self.identities {
@@ -68,15 +66,9 @@ impl KnownRoots {
         // Remember observed children as PID/start-time identities too, so a helper
         // does not disappear from accounting merely because its parent/window exits.
         for (id, pids) in &mut members {
-            let mut pending = pids.drain().collect::<Vec<_>>();
-            while let Some(pid) = pending.pop() {
-                if owners.get(&pid).is_some_and(|owner| owner != id) {
-                    continue;
-                }
-                if pids.insert(pid) {
-                    pending.extend(children.get(&pid).into_iter().flatten().copied());
-                }
-            }
+            *pids = super::system::descendants_where(pids.drain(), &children, |pid| {
+                owners.get(&pid).is_none_or(|owner| owner == id)
+            });
         }
         members.retain(|_, pids| !pids.is_empty());
         self.identities = members
