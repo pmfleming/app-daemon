@@ -149,6 +149,11 @@ impl Session {
         ] {
             command.env(variable, root.path().join(dir));
         }
+        // Keep instrumented children in cargo-llvm-cov's collection directory
+        // without exposing the rest of the host environment to the fixture.
+        if let Some(profile) = std::env::var_os("LLVM_PROFILE_FILE") {
+            command.env("LLVM_PROFILE_FILE", profile);
+        }
         let daemon = command.spawn()?;
         let session = Self {
             root,
