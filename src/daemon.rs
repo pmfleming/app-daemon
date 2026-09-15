@@ -2,8 +2,8 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use serde_json::{Value, json};
-use shelllist_daemon_tokio::{OwnedTaskRegistry, directed_emitter, wait_for_owner_loss};
-use tokio::sync::{broadcast, oneshot};
+use shelllist_daemon_tokio::{OwnedTaskRegistry, directed_emitter};
+use tokio::sync::broadcast;
 use zbus::{connection, message::Header, object_server::SignalEmitter};
 
 use crate::{
@@ -66,35 +66,22 @@ impl AppDaemon {
         let changes = self.applications.subscribe_state();
         let operations = self.applications.subscribe_operations();
         let applications = Arc::clone(&self.applications);
-        let subscriptions = Arc::clone(&self.subscriptions);
-        let task_id = id.clone();
-        let task_owner = owner.clone();
-        let (start, ready) = oneshot::channel();
-        let task = tokio::spawn(async move {
-            if ready.await.is_err() {
-                return;
-            }
-            let events = forward_events(
-                applications,
-                changes,
-                operations,
-                destination,
-                task_id.clone(),
-                selected,
-            );
-            match task_owner {
-                Some(owner) => tokio::select! {
-                    () = events => {}
-                    _ = wait_for_owner_loss(&connection, owner) => {}
-                },
-                None => events.await,
-            }
-            subscriptions.remove(&task_id).await;
-        });
-        self.subscriptions
-            .insert(id.clone(), owner.as_ref().map(ToString::to_string), task)
-            .await;
-        let _ = start.send(());
+        let events = forward_events(
+            applications,
+            changes,
+            operations,
+            destination,
+            id.clone(),
+            selected,
+        );
+        if let Err(error) = self.subscriptions.spawn_for_owner(
+            id.clone(),
+            owner.as_ref().map(ToString::to_string),
+            &connection,
+            events,
+        ) {
+            return api::error("subscription-unavailable", error.to_string()).to_string();
+        }
         api::success(json!({ "subscription": { "id": id } })).to_string()
     }
 
@@ -254,14 +241,17 @@ async fn emit_event(
     subscription_id: &str,
     fields: Value,
 ) {
-    let value = shelllist_daemon_core::event_envelope(
+    let result = shelllist_daemon_tokio::emit_json_event(
+        emitter,
+        api::INTERFACE,
         shelllist_daemon_core::ApiIdentity::new(api::PROTOCOL, api::VERSION as u32),
         stream,
         event,
         shelllist_daemon_core::Correlation::Subscription(subscription_id),
         fields,
-    );
-    if let Err(error) = AppDaemon::event(emitter, stream, &value.to_string()).await {
+    )
+    .await;
+    if let Err(error) = result {
         tracing::warn!(%stream, %error, "app-api event could not be emitted");
     }
 }
@@ -269,10 +259,11 @@ async fn emit_event(
 pub async fn run() -> Result<()> {
     let applications = ApplicationService::new();
     let shutdown_applications = Arc::clone(&applications);
+    let subscriptions = Arc::new(OwnedTaskRegistry::default());
     let daemon = AppDaemon {
         api: ApiService::new(Arc::clone(&applications)),
         applications,
-        subscriptions: Arc::new(OwnedTaskRegistry::default()),
+        subscriptions: Arc::clone(&subscriptions),
     };
     let _connection = connection::Builder::session()
         .context("connect to session D-Bus")?
@@ -289,6 +280,7 @@ pub async fn run() -> Result<()> {
         "app-daemon started"
     );
     let result = shelllist_daemon_tokio::wait_for_shutdown().await;
+    subscriptions.shutdown().await;
     shutdown_applications.shutdown().await;
     result
 }

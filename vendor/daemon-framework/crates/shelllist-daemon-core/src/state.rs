@@ -1,13 +1,14 @@
 use std::env;
 use std::fmt;
-use std::fs::{self, File, OpenOptions};
+use std::fs;
 use std::io;
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Component, Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+#[cfg(test)]
+use std::sync::atomic::AtomicU64;
 
 use serde::{Serialize, de::DeserializeOwned};
 
+#[cfg(test)]
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -130,52 +131,27 @@ pub fn read_json<T: DeserializeOwned>(path: &Path) -> Result<Option<T>, StateErr
     }
 }
 
-pub fn write_json_atomic<T: Serialize>(
+pub fn write_json_atomic<T: Serialize + ?Sized>(
     path: &Path,
     value: &T,
     policy: AtomicWritePolicy,
 ) -> Result<(), StateError> {
-    let parent = path.parent().ok_or(StateError::InvalidPath)?;
-    let file_name = path.file_name().ok_or(StateError::InvalidPath)?;
-    fs::create_dir_all(parent)?;
-    fs::set_permissions(parent, fs::Permissions::from_mode(policy.directory_mode))?;
-
-    let sequence = TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
-    let temporary = parent.join(format!(
-        ".{}.{}.{}.tmp",
-        file_name.to_string_lossy(),
-        std::process::id(),
-        sequence
-    ));
-    let result = write_and_replace(&temporary, path, value, policy);
-    if result.is_err() {
-        let _ = fs::remove_file(&temporary);
-    }
-    result
-}
-
-fn write_and_replace<T: Serialize>(
-    temporary: &Path,
-    destination: &Path,
-    value: &T,
-    policy: AtomicWritePolicy,
-) -> Result<(), StateError> {
-    let mut output = OpenOptions::new()
-        .create_new(true)
-        .write(true)
-        .mode(policy.file_mode)
-        .open(temporary)?;
-    if policy.pretty {
-        serde_json::to_writer_pretty(&mut output, value)?;
+    let bytes = if policy.pretty {
+        serde_json::to_vec_pretty(value)?
     } else {
-        serde_json::to_writer(&mut output, value)?;
-    }
-    output.sync_all()?;
-    fs::set_permissions(temporary, fs::Permissions::from_mode(policy.file_mode))?;
-    fs::rename(temporary, destination)?;
-    if policy.sync_parent {
-        File::open(destination.parent().ok_or(StateError::InvalidPath)?)?.sync_all()?;
-    }
+        serde_json::to_vec(value)?
+    };
+    crate::write_bytes_atomic(
+        path,
+        &bytes,
+        crate::AtomicFilePolicy {
+            directory_mode: Some(policy.directory_mode),
+            file_mode: Some(policy.file_mode),
+            sync_parent: policy.sync_parent,
+            sync_new_ancestors: policy.sync_parent,
+            ..crate::AtomicFilePolicy::PRIVATE
+        },
+    )?;
     Ok(())
 }
 

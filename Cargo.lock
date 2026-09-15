@@ -958,6 +958,7 @@ dependencies = [
 name = "shelllist-daemon-core"
 version = "0.1.0"
 dependencies = [
+ "rustix",
  "serde",
  "serde_json",
 ]
@@ -968,6 +969,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "futures",
+ "rustix",
  "serde_json",
  "shelllist-daemon-core",
  "tokio",

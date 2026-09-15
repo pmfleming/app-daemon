@@ -1,13 +1,6 @@
 use std::{env, os::unix::fs::PermissionsExt, path::Path};
 
-/// Abort child tasks when their owning tracker is stopped, including cancellation.
-pub(crate) struct AbortOnDrop(pub tokio::task::AbortHandle);
-
-impl Drop for AbortOnDrop {
-    fn drop(&mut self) {
-        self.0.abort();
-    }
-}
+pub(crate) use shelllist_daemon_tokio::AbortOnDrop;
 
 /// Returns whether a command can be executed directly or found on `PATH`.
 pub(crate) fn command_available(command: &str) -> bool {

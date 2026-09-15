@@ -482,7 +482,7 @@ impl ApplicationService {
                 result: accepted.clone(),
                 owner,
             },
-        );
+        )?;
         let _ = start_sender.send(());
         Ok(accepted)
     }

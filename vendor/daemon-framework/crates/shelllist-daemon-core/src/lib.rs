@@ -2,9 +2,18 @@
 
 mod endpoint;
 mod envelope;
+mod file;
 mod jsonl_wire;
+mod operation;
 mod protocol;
+pub use operation::{
+    OperationAdmissionError, OperationLimits, OwnedOperation, OwnedOperations, RecentResults,
+};
 mod state;
+pub use file::{
+    AtomicFilePolicy, StagedFile, parent_directory, read_bytes_bounded, sync_parent,
+    write_bytes_atomic,
+};
 
 pub use endpoint::{DaemonEndpoint, IdSequence};
 pub use envelope::{ApiError, ApiIdentity, Correlation, error, event_envelope, success};

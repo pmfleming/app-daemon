@@ -1,8 +1,6 @@
 use crate::model::OperationResult;
-use std::{
-    collections::{HashMap, VecDeque},
-    time::{Duration, Instant},
-};
+use shelllist_daemon_core::{OperationLimits, OwnedOperations, RecentResults};
+use std::time::Duration;
 use tokio::task::AbortHandle;
 
 const MAX_ACTIVE: usize = 128;
@@ -15,36 +13,44 @@ pub(super) struct ActiveOperation {
     pub result: OperationResult,
     pub owner: Option<String>,
 }
-
-struct FinishedOperation {
+struct OperationTask {
+    abort: AbortHandle,
     result: OperationResult,
-    owner: Option<String>,
-    finished: Instant,
 }
 
-#[derive(Default)]
 pub(super) struct OperationRegistry {
-    active: HashMap<String, ActiveOperation>,
-    recent: VecDeque<FinishedOperation>,
+    active: OwnedOperations<OperationTask>,
+    recent: RecentResults<OperationResult>,
 }
-
+impl Default for OperationRegistry {
+    fn default() -> Self {
+        Self {
+            active: OwnedOperations::new(OperationLimits {
+                total: MAX_ACTIVE,
+                per_owner: MAX_ACTIVE_PER_OWNER,
+            }),
+            recent: RecentResults::new(MAX_RECENT, Some(RETENTION)),
+        }
+    }
+}
 impl OperationRegistry {
     pub fn admit(&self, owner: Option<&str>) -> anyhow::Result<()> {
-        anyhow::ensure!(
-            self.active.len() < MAX_ACTIVE
-                && self
-                    .active
-                    .values()
-                    .filter(|active| active.owner.as_deref() == owner)
-                    .count()
-                    < MAX_ACTIVE_PER_OWNER,
-            "too many active operations; retry after an operation finishes"
-        );
-        Ok(())
+        self.active.admit(owner).map_err(Into::into)
     }
 
-    pub fn insert(&mut self, id: String, active: ActiveOperation) {
-        self.active.insert(id, active);
+    pub fn insert(&mut self, id: String, active: ActiveOperation) -> anyhow::Result<()> {
+        let abort = active.abort.clone();
+        self.active
+            .insert(
+                id,
+                active.owner,
+                OperationTask {
+                    abort: active.abort,
+                    result: active.result,
+                },
+            )
+            .inspect_err(|_| abort.abort())
+            .map_err(Into::into)
     }
 
     pub fn running(&mut self, result: OperationResult) -> bool {
@@ -56,23 +62,21 @@ impl OperationRegistry {
     }
 
     pub fn finish(&mut self, result: OperationResult) -> bool {
-        let Some(active) = self.active.remove(&result.id) else {
+        let Some(active) = self.active.claim(&result.id) else {
             return false;
         };
-        self.remember(result, active.owner);
+        self.recent.record(result.id.clone(), active.owner, result);
         true
     }
 
     pub fn cancel(&mut self, id: &str, owner: Option<&str>) -> Option<OperationResult> {
-        if self.active.get(id)?.owner.as_deref() != owner {
-            return None;
-        }
-        let active = self.active.remove(id)?;
-        active.abort.abort();
-        let mut result = active.result;
+        let active = self.active.claim_owned(id, owner)?;
+        active.value.abort.abort();
+        let mut result = active.value.result;
         result.status = "cancelled".into();
         result.message = "Operation cancelled".into();
-        self.remember(result.clone(), active.owner);
+        self.recent
+            .record(result.id.clone(), active.owner, result.clone());
         Some(result)
     }
 
@@ -89,40 +93,10 @@ impl OperationRegistry {
     }
 
     pub fn status(&mut self, id: &str, owner: Option<&str>) -> Option<OperationResult> {
-        self.prune(Instant::now());
         self.active
-            .get(id)
-            .filter(|active| active.owner.as_deref() == owner)
+            .get_owned(id, owner)
             .map(|active| active.result.clone())
-            .or_else(|| {
-                self.recent
-                    .iter()
-                    .find(|finished| finished.result.id == id && finished.owner.as_deref() == owner)
-                    .map(|finished| finished.result.clone())
-            })
-    }
-
-    fn remember(&mut self, result: OperationResult, owner: Option<String>) {
-        let now = Instant::now();
-        self.prune(now);
-        self.recent.push_back(FinishedOperation {
-            result,
-            owner,
-            finished: now,
-        });
-        while self.recent.len() > MAX_RECENT {
-            self.recent.pop_front();
-        }
-    }
-
-    fn prune(&mut self, now: Instant) {
-        while self
-            .recent
-            .front()
-            .is_some_and(|entry| now.saturating_duration_since(entry.finished) >= RETENTION)
-        {
-            self.recent.pop_front();
-        }
+            .or_else(|| self.recent.get_owned(id, owner).cloned())
     }
 }
 
@@ -130,7 +104,6 @@ impl OperationRegistry {
 mod tests {
     use super::*;
     use crate::service::{ApplicationAction, ExecuteParams, action::operation_result};
-
     fn result(id: usize, status: &str) -> OperationResult {
         operation_result(
             format!("operation-{id}"),
@@ -147,20 +120,21 @@ mod tests {
             None,
         )
     }
-
     #[tokio::test]
     async fn outcomes_are_owner_scoped_bounded_and_expire() {
         let mut registry = OperationRegistry::default();
         for id in 0..MAX_RECENT + 1 {
             let task = tokio::spawn(async {});
-            registry.insert(
-                format!("operation-{id}"),
-                ActiveOperation {
-                    abort: task.abort_handle(),
-                    result: result(id, "accepted"),
-                    owner: Some(":1.1".into()),
-                },
-            );
+            registry
+                .insert(
+                    format!("operation-{id}"),
+                    ActiveOperation {
+                        abort: task.abort_handle(),
+                        result: result(id, "accepted"),
+                        owner: Some(":1.1".into()),
+                    },
+                )
+                .unwrap();
             assert!(registry.finish(result(id, "completed")));
         }
         assert!(registry.status("operation-0", Some(":1.1")).is_none());
@@ -169,23 +143,24 @@ mod tests {
             registry.status("operation-1", Some(":1.1")).unwrap().status,
             "completed"
         );
-        registry.prune(Instant::now() + RETENTION);
+        registry.recent.prune(std::time::Instant::now() + RETENTION);
         assert!(registry.recent.is_empty());
     }
-
     #[tokio::test]
     async fn cancellation_is_terminal_and_admission_is_bounded() {
         let mut registry = OperationRegistry::default();
         for id in 0..MAX_ACTIVE_PER_OWNER {
             let task = tokio::spawn(std::future::pending::<()>());
-            registry.insert(
-                format!("operation-{id}"),
-                ActiveOperation {
-                    abort: task.abort_handle(),
-                    result: result(id, "accepted"),
-                    owner: None,
-                },
-            );
+            registry
+                .insert(
+                    format!("operation-{id}"),
+                    ActiveOperation {
+                        abort: task.abort_handle(),
+                        result: result(id, "accepted"),
+                        owner: None,
+                    },
+                )
+                .unwrap();
         }
         assert!(registry.admit(None).is_err());
         assert!(registry.admit(Some(":1.2")).is_ok());

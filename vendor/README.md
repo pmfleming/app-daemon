@@ -6,7 +6,7 @@ the root `Cargo.lock`; Nixpkgs remains pinned by `flake.lock`.
 
 | Directory | Upstream | Source commit | License |
 | --- | --- | --- | --- |
-| `daemon-framework` | https://github.com/pmfleming/daemon-framework | `cd261278a587a38efa44d41f4f7291acbafb8b80` | MIT; upstream LICENSE included |
+| `daemon-framework` | https://github.com/pmfleming/daemon-framework | `47d5a6505a8fbaebb48469d8e689e2743980e416` | MIT; upstream LICENSE included |
 | `shelllist-hyprland` | Shelllist's local `shelllist-hyprland` repository (no remote configured at snapshot time) | `61376dd84a0a8f5edef2da02b11b36cd0e3edbf4` | MIT, as declared by upstream Cargo.toml; no separate upstream LICENSE file |
 
 The snapshots contain upstream manifests, library source/tests, and README files;
@@ -20,7 +20,13 @@ changes from the source commit above (committed locally upstream):
 - bounded request admission with a reserved control lane;
 - cancellation failure handling and routing/churn regression tests.
 
-The vendored source files and framework README match that upstream commit.
+The snapshot also includes the coordinated server-infrastructure extraction in
+upstream commit `47d5a6505a8fbaebb48469d8e689e2743980e416`: managed subscriptions,
+connection-scoped owner monitoring, task groups, resume detection, atomic/staged
+files and bounded reads, blocking lanes, operation bookkeeping and event forwarding.
+The source, manifests, framework README and server-infrastructure documentation
+match that reviewed commit. See
+[`daemon-framework/docs/server-infrastructure.md`](daemon-framework/docs/server-infrastructure.md).
 The Hyprland snapshot also includes phase 4's typed work-area parser, workspace
 rule resolution, socket reply-size bound and regression tests.
 

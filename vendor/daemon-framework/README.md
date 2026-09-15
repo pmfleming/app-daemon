@@ -4,13 +4,18 @@ Shared Rust infrastructure for the Shelllist daemon family.
 
 ## Workspace crates
 
-- `shelllist-daemon-core` — runtime-independent protocol, envelope, JSONL wire, fixture, and secure state helpers.
-- `shelllist-daemon-tokio` — Tokio and session D-Bus transport, ordered output, ownership, subscription, and shutdown helpers.
+- `shelllist-daemon-core` — protocol/envelopes, JSONL wire, fixtures, atomic/staged files, bounded reads, and owner-scoped operation bookkeeping.
+- `shelllist-daemon-tokio` — D-Bus/JSONL transport, managed subscriptions, connection-scoped owner monitoring, task groups, bounded blocking lanes, resume detection, event forwarding, and async file helpers.
 - `shelllist-protocol-js` — build tool that generates frontend constants from daemon-owned protocol registries.
 
 The Shelllist-owned fuzzy ranking process lives with the frontend. Domain policy and frontend ranking do not belong in this infrastructure workspace.
 
 Domain policy remains in `app-daemon`, `bar-daemon`, `bt-daemon`, `clip-daemon`, and `nm-daemon`. This workspace contains only reusable process infrastructure and services.
+
+## Server infrastructure
+
+See [server infrastructure](docs/server-infrastructure.md) for lifecycle guarantees,
+policy boundaries, migration guidance, and cross-repository deployment steps.
 
 ## Routed JSONL clients
 
