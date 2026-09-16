@@ -3,12 +3,12 @@
 Rust application catalog, Hyprland window identity, process-tree CPU and resident-memory accounting, and activation policy for the Shelllist launcher.
 
 ```sh
-nix develop
+python3 ../daemon-framework/tools/local-build.py develop .
 cargo test --locked
-nix build
+python3 ../daemon-framework/tools/local-build.py build .
 ```
 
-A single checkout is sufficient: the small Shelllist libraries are pinned source snapshots under `vendor/` (provenance and update instructions in `vendor/README.md`). Cargo and Nix do not require neighboring repositories or local Git URLs. Without Nix, install a current stable Rust toolchain plus `sh`, `sleep`, and `dbus-daemon` for tests, then run `cargo test --locked` and `cargo build --release --locked`. Runtime launching needs UWSM, or a user systemd manager plus `systemd-run`, `gtk-launch`, and `xdg-terminal-exec` as appropriate. Registry dependencies/Nixpkgs require downloading on a cold build; this is a standalone-source guarantee, not a completely offline distribution.
+Keep `daemon-framework` beside this checkout. All five daemons use that same current framework, including tracked uncommitted edits; do not vendor or revision-pin it. `local-build.py` snapshots the local graph once for Nix builds/checks without writing deployment pins. Cargo uses the sibling directly. Add new files to Git first. Only the Hyprland library remains vendored (see `vendor/README.md`). Registry dependencies and nixpkgs remain locked. Without Nix, install stable Rust plus `sh`, `sleep`, and `dbus-daemon`, then use `cargo test --locked`. Runtime launching needs UWSM or a user systemd manager plus the configured launch helpers.
 
 `app-daemon daemon` exports `org.laufan.AppDaemon`; `app-daemon client` bridges JSONL requests to the session service using `app-api` v1. Resource collection is isolated behind an injectable Linux provider so procfs, cgroup, and energy edge cases can be tested without relying on the host.
 

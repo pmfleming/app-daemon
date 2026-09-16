@@ -21,8 +21,10 @@ notify = "8"
 rustix = { version = "1", features = ["net"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-shelllist-daemon-core = { path = "vendor/daemon-framework/crates/shelllist-daemon-core" }
-shelllist-daemon-tokio = { path = "vendor/daemon-framework/crates/shelllist-daemon-tokio" }
+# Co-development invariant: use the same live sibling framework as every daemon.
+# Never vendor or revision-pin these crates; test changes across all consumers.
+shelllist-daemon-core = { path = "../daemon-framework/crates/shelllist-daemon-core" }
+shelllist-daemon-tokio = { path = "../daemon-framework/crates/shelllist-daemon-tokio" }
 shelllist-hyprland = { path = "vendor/shelllist-hyprland" }
 tokio = { version = "1", features = ["io-std", "io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
 tracing = "0.1"
