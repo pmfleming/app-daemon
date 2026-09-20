@@ -57,6 +57,8 @@ pub struct ApplicationService {
     windows: RwLock<Arc<Snapshot>>,
     resources: RwLock<ResourceSnapshot>,
     history: Mutex<HistoryStore>,
+    // When both are needed, acquire settings before resources. Tokio's fair
+    // RwLocks can deadlock even readers when writers queue between acquisitions.
     settings: RwLock<SettingsStore>,
     settings_updates: Mutex<()>,
     state_changes: broadcast::Sender<StateRevision>,
@@ -228,8 +230,8 @@ impl ApplicationService {
         let windows = Arc::clone(&*self.windows.read().await);
         let catalog = Arc::clone(&*self.catalog.read().await);
         let grouped = group_windows(&catalog, &windows);
-        let resources = self.resources.read().await;
         let settings = self.settings.read().await;
+        let resources = self.resources.read().await;
         page(&catalog, &windows, &resources, &settings, &params, grouped)
     }
 
