@@ -193,7 +193,14 @@ impl HistoryStore {
             .into_iter()
             .flatten()
             .filter(|point| since_ms.is_none_or(|since| point.timestamp_ms >= since))
-            .filter(|point| until_ms.is_none_or(|until| point.timestamp_ms <= until))
+            // Summaries also need observations whose interval overlaps the
+            // right boundary, even when their bucket endpoint is outside it.
+            .filter(|point| {
+                until_ms.is_none_or(|until| {
+                    point.timestamp_ms <= until
+                        || point.timestamp_ms.saturating_sub(point.duration_ms) < until
+                })
+            })
             .collect();
         let end = until_ms
             .unwrap_or_else(|| now_milliseconds().max(window.last().map_or(0, |p| p.timestamp_ms)));
@@ -205,6 +212,9 @@ impl HistoryStore {
         let summary = summary::summarize(&window, start, end, epoch);
         let mut matching = window
             .into_iter()
+            // Keep endpoint-based pagination: a summary-only overlapping
+            // bucket must not advance the cursor past the selected window.
+            .filter(|point| until_ms.is_none_or(|until| point.timestamp_ms <= until))
             .filter(|point| after.is_none_or(|timestamp| point.timestamp_ms > timestamp));
         let points = matching
             .by_ref()

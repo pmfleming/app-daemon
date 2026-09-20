@@ -234,6 +234,87 @@ mod tests {
     }
 
     #[test]
+    fn window_ending_inside_first_bucket_still_has_observed_statistics() {
+        let base = super::super::now_milliseconds() - 60_000;
+        let mut store = super::super::HistoryStore::load(None);
+        store.insert_point("app".into(), point(base + 15_000, 15_000, 10.0));
+        for since in [Some(base), None] {
+            let page = store
+                .query_window("app", since, Some(base + 7_500), None, 1)
+                .unwrap();
+            let cpu = &page.summary.metrics["cpu_percent_of_machine"];
+            assert_eq!(page.summary.window_start_ms, base);
+            assert_eq!(cpu.observed_ms, 7_500);
+            assert_eq!(cpu.mean, Some(10.0));
+            assert_eq!(cpu.peak, Some(20.0));
+            assert_eq!(cpu.coverage, 1.0);
+            assert!(
+                page.points.is_empty(),
+                "no bucket endpoint is in the window"
+            );
+            assert!(!page.has_more);
+            assert!(page.next_cursor.is_none());
+        }
+    }
+
+    #[test]
+    fn clips_both_boundaries_without_advancing_cursor_over_summary_only_bucket() {
+        let base = super::super::now_milliseconds() - 60_000;
+        let mut store = super::super::HistoryStore::load(None);
+        store.insert_point("app".into(), point(base + 15_000, 15_000, 10.0));
+        store.insert_point("app".into(), point(base + 30_000, 15_000, 30.0));
+        // This point starts exactly at the selected end and contributes nothing.
+        store.insert_point("app".into(), point(base + 40_000, 17_500, 90.0));
+        let first = store
+            .query_window("app", Some(base + 7_500), Some(base + 22_500), None, 1)
+            .unwrap();
+        let cpu = &first.summary.metrics["cpu_percent_of_machine"];
+        assert_eq!(cpu.observed_ms, 15_000);
+        assert_eq!(cpu.mean, Some(20.0));
+        assert_eq!(cpu.peak, Some(40.0));
+        assert_eq!(cpu.coverage, 1.0);
+        assert_eq!(first.points.len(), 1);
+        assert_eq!(first.points[0].timestamp_ms, base + 15_000);
+        assert!(!first.has_more);
+        let cursor = first.next_cursor.as_deref().unwrap();
+        let empty = store
+            .query_window(
+                "app",
+                Some(base + 7_500),
+                Some(base + 22_500),
+                Some(cursor),
+                1,
+            )
+            .unwrap();
+        assert!(empty.points.is_empty());
+        assert_eq!(empty.next_cursor, first.next_cursor);
+        assert_eq!(empty.summary, first.summary);
+        let extended = store
+            .query_window(
+                "app",
+                Some(base + 7_500),
+                Some(base + 30_000),
+                Some(cursor),
+                1,
+            )
+            .unwrap();
+        assert_eq!(extended.points.len(), 1);
+        assert_eq!(extended.points[0].timestamp_ms, base + 30_000);
+
+        let zero_width = store
+            .query_window("app", Some(base + 7_500), Some(base + 7_500), None, 1)
+            .unwrap();
+        assert_eq!(
+            zero_width.summary.metrics["cpu_percent_of_machine"].mean,
+            None
+        );
+        assert_eq!(
+            zero_width.summary.metrics["cpu_percent_of_machine"].observed_ms,
+            0
+        );
+    }
+
+    #[test]
     fn measured_zero_legacy_normalization_and_invalid_values() {
         let mut zero = point(1000, 1000, 0.0);
         zero.resources.peaks.cpu_percent_of_machine = 0.0;

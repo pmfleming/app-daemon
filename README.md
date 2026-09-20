@@ -84,7 +84,10 @@ incremental page: window bounds, a revision, and per-metric availability, mean,
 peak, observed milliseconds and temporal coverage. Means are weighted by observed
 `duration_ms` (clipped at the window boundary), not by bucket count. Peaks retain
 the maximum recorded inside participating buckets; a partial bucket cannot locate
-a peak more precisely. Missing measurements yield null statistics, not zero.
+a peak more precisely. Summaries include observations overlapping either window
+boundary, even when a bucket ends after `until_ms`. Returned points and cursors
+remain filtered by bucket-end timestamps; a summary-only overlapping bucket does
+not advance the cursor. Missing measurements yield null statistics, not zero.
 Legacy capability normalization happens in the daemon before points are returned.
 
 Example request:
