@@ -1,4 +1,7 @@
-use super::*;
+use super::{
+    ApplicationService, Arc, Duration, HistoryStore, Ordering, now_milliseconds, oneshot,
+    persist_snapshot, time, wait_for_stop,
+};
 use crate::model::ResourceUsage;
 
 #[tokio::test]
@@ -49,7 +52,7 @@ async fn shutdown_drains_sampling_and_serializes_final_save_after_older_writers(
     assert!(service.request_permit().await.is_err());
     assert!(
         service
-            .execute(super::tests::close_missing(None))
+            .execute_owned(super::tests::close_missing(None), None)
             .await
             .is_err()
     );
@@ -63,7 +66,9 @@ async fn shutdown_stops_trackers_and_cancels_active_operations() -> anyhow::Resu
     *service.history.lock().await = HistoryStore::load(None);
     let lock = service.launch_lock("missing-window-group");
     let _held = lock.lock().await;
-    let accepted = service.execute(super::tests::close_missing(None)).await?;
+    let accepted = service
+        .execute_owned(super::tests::close_missing(None), None)
+        .await?;
     let mut stop = service.stop.subscribe();
     let tracker = tokio::spawn(async move {
         wait_for_stop(&mut stop).await;
@@ -80,7 +85,7 @@ async fn shutdown_stops_trackers_and_cancels_active_operations() -> anyhow::Resu
     );
     let api = crate::api::ApiService::new(service);
     assert_eq!(
-        api.dispatch("applications.query", serde_json::json!({}))
+        api.dispatch_owned("applications.query", serde_json::json!({}), None)
             .await["error"]["code"],
         "daemon-unavailable"
     );

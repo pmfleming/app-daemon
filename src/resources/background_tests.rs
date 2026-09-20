@@ -167,6 +167,25 @@ fn known_processes_survive_window_and_parent_exit_but_not_pid_reuse() -> anyhow:
 }
 
 #[test]
+fn a_new_window_identity_replaces_the_remembered_owner() -> anyhow::Result<()> {
+    let (_dir, catalog) = catalog()?;
+    let provider = TestProvider::default();
+    let processes = HashMap::from([(42, process(1, 100))]);
+    let mut known = discovery::KnownRoots::default();
+    for id in ["org.example.App.desktop", "org.example.Other.desktop"] {
+        let windows = HashMap::from([(id.into(), vec![42])]);
+        let discovered = known.discover(&provider, &windows, &processes, &catalog);
+        assert_eq!(discovered.roots, windows);
+    }
+    let background = known.discover(&provider, &HashMap::new(), &processes, &catalog);
+    assert_eq!(
+        background.roots,
+        HashMap::from([("org.example.Other.desktop".into(), vec![42])])
+    );
+    Ok(())
+}
+
+#[test]
 fn unrelated_launcher_groups_are_not_borrowed_and_stable_dbus_units_are_discovered()
 -> anyhow::Result<()> {
     let (dir, catalog) = catalog()?;

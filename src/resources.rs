@@ -1198,7 +1198,7 @@ impl ProcessSample {
                     // A PID match does not authorize charging its launcher's entire
                     // cgroup. Scope counters require the scope's own catalog identity.
                     targets
-                        .get(&target)
+                        .get(target)
                         .is_some_and(|roots| roots.contains(&root))
                         .then(|| (root, path.to_owned()))
                 })

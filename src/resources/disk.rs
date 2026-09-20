@@ -109,6 +109,13 @@ impl AppDiskCache {
     ) -> HashMap<String, DiskBreakdown> {
         let targets = targets.into_iter().collect::<HashSet<_>>();
         self.samples.retain(|target, _| targets.contains(target));
+        if !targets.is_empty() && self.workers.is_none() {
+            self.workers = DiskWorkers::start(provider)
+                .inspect_err(
+                    |error| tracing::warn!(%error, "application disk workers could not start"),
+                )
+                .ok();
+        }
         if let Some(workers) = &self.workers {
             for result in workers.results.try_iter() {
                 self.in_flight.remove(&result.target);
@@ -124,14 +131,6 @@ impl AppDiskCache {
                 cached.usage = result.usage.or(cached.usage);
                 cached.next_refresh = now + APP_DISK_REFRESH_INTERVAL;
             }
-        }
-        if !targets.is_empty() && self.workers.is_none() {
-            match DiskWorkers::start(provider) {
-                Ok(workers) => self.workers = Some(workers),
-                Err(error) => tracing::warn!(%error, "application disk workers could not start"),
-            }
-        }
-        if let Some(workers) = &self.workers {
             workers.request_due(&targets, &self.samples, &mut self.in_flight, now);
         }
         self.samples

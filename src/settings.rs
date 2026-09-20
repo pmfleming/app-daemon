@@ -8,7 +8,6 @@ use std::{
 use serde::{Deserialize, Serialize};
 use shelllist_daemon_core::{AtomicWritePolicy, XdgRoot, resolve_xdg_path, write_json_atomic};
 
-pub const CATEGORIES: &[&str] = &["shell", "browser", "code", "media", "text"];
 const CATEGORY_WORKSPACES: &[(&str, &str)] = &[
     ("shell", "1"),
     ("browser", "2"),
@@ -57,10 +56,10 @@ impl SettingsStore {
             .filter(|file| file.version == 1)
             .map(|file| file.applications)
             .unwrap_or_default();
-        applications.retain(|_, settings| CATEGORIES.contains(&settings.category.as_str()));
-        for settings in applications.values_mut() {
+        applications.retain(|_, settings| {
             settings.workspace_id = workspace_for_category(&settings.category).map(str::to_owned);
-        }
+            settings.workspace_id.is_some()
+        });
         let revision = settings_revision(&applications);
         Self {
             path,

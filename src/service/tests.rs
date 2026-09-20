@@ -2,7 +2,7 @@ use super::{ApplicationAction, ApplicationService, ExecuteParams};
 
 #[test]
 fn healthy_streams_reduce_polling_and_reconnects_force_refresh() {
-    use super::*;
+    use super::{Duration, observe_window_event, reconciliation_intervals};
     use shelllist_hyprland::Event;
     assert_eq!(
         reconciliation_intervals(true, true),
@@ -68,7 +68,7 @@ async fn rejects_stale_actions_and_reports_accepted_operation_outcomes() -> anyh
     let mut events = service.subscribe_operations();
     assert!(
         service
-            .execute(close_missing(Some(u64::MAX)))
+            .execute_owned(close_missing(Some(u64::MAX)), None)
             .await
             .is_err()
     );
@@ -76,7 +76,7 @@ async fn rejects_stale_actions_and_reports_accepted_operation_outcomes() -> anyh
         events.try_recv(),
         Err(tokio::sync::broadcast::error::TryRecvError::Empty)
     ));
-    let accepted = service.execute(close_missing(None)).await?;
+    let accepted = service.execute_owned(close_missing(None), None).await?;
     assert_eq!(accepted.status, "accepted");
     let running = events.recv().await?;
     let failed = events.recv().await?;

@@ -1,4 +1,4 @@
-use super::*;
+use super::{Client, Snapshot, correlated_window, launch};
 
 fn windows() -> Snapshot {
     Snapshot {
@@ -21,27 +21,18 @@ fn windows() -> Snapshot {
 }
 
 #[test]
-fn placement_requires_new_address_and_exact_launch_unit() {
+fn placement_requires_one_new_owned_window() {
     let windows = windows();
     let previous = vec!["0x1".into()];
-    let unit = "app-example@12345678.service";
-    let cgroup = |window: &Client| {
-        Some(if window.pid == 3 {
-            "/app-unrelated.service".into()
-        } else {
-            format!("/user.slice/{unit}/child")
-        })
-    };
     assert_eq!(
-        correlated_window(&windows, &previous, unit, cgroup).as_deref(),
+        correlated_window(&windows, &previous, |window| window.pid != 3).as_deref(),
         Some("0x2")
     );
-    assert!(correlated_window(&windows, &previous, unit, |_| None).is_none());
+    assert!(correlated_window(&windows, &previous, |_| false).is_none());
     assert!(
-        correlated_window(&windows, &previous, unit, |_| Some(format!("/{unit}"))).is_none(),
+        correlated_window(&windows, &previous, |_| true).is_none(),
         "ambiguous launch must not move any window"
     );
-    assert!(correlated_window(&windows, &previous, "app-other@12345678.service", cgroup).is_none());
 }
 
 #[test]

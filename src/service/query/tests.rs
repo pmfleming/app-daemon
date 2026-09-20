@@ -111,14 +111,14 @@ fn resolves_uwsm_cgroup_before_terminal_window_class() -> anyhow::Result<()> {
         focus_rank: 0,
         mapped: true,
     };
-    assert_eq!(
+    assert!(matches!(
         resolve_target_with_cgroup(
             &catalog,
             &window,
             Some("/app.slice/app-Hyprland-btop-a1b2c3d4.scope"),
         ),
-        "btop.desktop"
-    );
+        std::borrow::Cow::Borrowed("btop.desktop")
+    ));
     assert_eq!(
         resolve_target_with_cgroup(
             &catalog,
@@ -156,7 +156,9 @@ fn launch_only_entries_remain_shortcuts_without_claiming_windows() -> anyhow::Re
         focus_rank: 0,
         mapped: true,
     };
-    assert_eq!(resolve_target(&catalog, &window), "window-group:browser");
+    assert!(
+        matches!(resolve_target(&catalog, &window), std::borrow::Cow::Owned(id) if id == "window-group:browser")
+    );
     let windows = Snapshot {
         available: true,
         clients: vec![window],

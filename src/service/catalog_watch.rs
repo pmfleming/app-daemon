@@ -16,13 +16,13 @@ pub(super) fn create(sender: mpsc::Sender<CatalogEvent>) -> notify::Result<Recom
     let plan = watch_plan(&roots);
     let mut watcher = notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
         let event = match event {
+            Ok(event)
+                if event.kind.is_access()
+                    || !event.paths.iter().any(|path| relevant(path, &roots)) =>
+            {
+                return;
+            }
             Ok(event) => {
-                if event.kind.is_access() {
-                    return;
-                }
-                if !event.paths.iter().any(|path| relevant(path, &roots)) {
-                    return;
-                }
                 if event
                     .paths
                     .iter()
@@ -81,7 +81,7 @@ fn watch_plan(roots: &[PathBuf]) -> HashMap<PathBuf, RecursiveMode> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{RecursiveMode, relevant, watch_plan};
     #[test]
     fn watches_missing_roots_and_profile_symlinks_without_watching_all_home_events() {
         let dir = tempfile::tempdir().unwrap();

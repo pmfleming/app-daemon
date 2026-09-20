@@ -30,22 +30,6 @@ impl LaunchBackend {
             Self::Direct
         }
     }
-
-    const fn description(self) -> (&'static str, &'static str) {
-        match self {
-            Self::Uwsm => ("uwsm-app", "app-graphical.slice"),
-            Self::Systemd => ("systemd-run", "app-graphical.slice"),
-            Self::Direct => ("direct", "inherited"),
-        }
-    }
-
-    pub const fn name(self) -> &'static str {
-        self.description().0
-    }
-
-    pub const fn scope(self) -> &'static str {
-        self.description().1
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -57,11 +41,28 @@ pub struct LaunchReceipt {
     pub(crate) unit: Option<String>,
 }
 
+impl LaunchReceipt {
+    pub(crate) fn owns_process(&self, pid: u32) -> bool {
+        crate::resources::process_cgroup(pid).is_some_and(|path| self.owns_cgroup(&path))
+    }
+
+    fn owns_cgroup(&self, path: &str) -> bool {
+        self.unit
+            .as_deref()
+            .is_some_and(|unit| path.split('/').any(|part| part == unit))
+    }
+}
+
 impl From<LaunchBackend> for LaunchReceipt {
     fn from(backend: LaunchBackend) -> Self {
+        let (backend, scope) = match backend {
+            LaunchBackend::Uwsm => ("uwsm-app", "app-graphical.slice"),
+            LaunchBackend::Systemd => ("systemd-run", "app-graphical.slice"),
+            LaunchBackend::Direct => ("direct", "inherited"),
+        };
         Self {
-            backend: backend.name().into(),
-            scope: backend.scope().into(),
+            backend: backend.into(),
+            scope: scope.into(),
             unit: None,
         }
     }

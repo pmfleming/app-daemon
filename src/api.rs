@@ -28,10 +28,6 @@ impl ApiService {
         Self { applications }
     }
 
-    pub async fn dispatch(&self, method: &str, params: Value) -> Value {
-        self.dispatch_owned(method, params, None).await
-    }
-
     pub async fn dispatch_owned(
         &self,
         method: &str,

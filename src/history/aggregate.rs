@@ -127,37 +127,18 @@ impl PendingPoint {
         self.sample_count = self.sample_count.saturating_add(1);
         merge_label(&mut self.energy_source, &usage.energy.energy_source);
         merge_label(&mut self.energy_confidence, &usage.energy.energy_confidence);
-        self.peaks.cpu_percent = self.peaks.cpu_percent.max(usage.compute.cpu_percent);
-        self.peaks.cpu_percent_of_machine = self
-            .peaks
-            .cpu_percent_of_machine
-            .max(usage.compute.cpu_percent_of_machine);
-        self.peaks.memory_bytes = self.peaks.memory_bytes.max(usage.compute.memory_bytes);
-        self.peaks.gpu_percent = self.peaks.gpu_percent.max(usage.compute.gpu_percent);
-        self.peaks.gpu_busy_percent = self
-            .peaks
-            .gpu_busy_percent
-            .max(usage.compute.gpu_busy_percent);
-        self.peaks.disk_read_bytes_per_second = self
-            .peaks
-            .disk_read_bytes_per_second
-            .max(usage.storage.disk_read_bytes_per_second);
-        self.peaks.disk_write_bytes_per_second = self
-            .peaks
-            .disk_write_bytes_per_second
-            .max(usage.storage.disk_write_bytes_per_second);
-        self.peaks.network_receive_bytes_per_second = self
-            .peaks
-            .network_receive_bytes_per_second
-            .max(usage.network.network_receive_bytes_per_second);
-        self.peaks.network_transmit_bytes_per_second = self
-            .peaks
-            .network_transmit_bytes_per_second
-            .max(usage.network.network_transmit_bytes_per_second);
-        self.peaks.estimated_app_power_watts = self
-            .peaks
-            .estimated_app_power_watts
-            .max(usage.energy.estimated_app_power_watts);
+        self.peaks.merge(&ResourcePeaks {
+            cpu_percent: usage.compute.cpu_percent,
+            cpu_percent_of_machine: usage.compute.cpu_percent_of_machine,
+            memory_bytes: usage.compute.memory_bytes,
+            gpu_percent: usage.compute.gpu_percent,
+            gpu_busy_percent: usage.compute.gpu_busy_percent,
+            disk_read_bytes_per_second: usage.storage.disk_read_bytes_per_second,
+            disk_write_bytes_per_second: usage.storage.disk_write_bytes_per_second,
+            network_receive_bytes_per_second: usage.network.network_receive_bytes_per_second,
+            network_transmit_bytes_per_second: usage.network.network_transmit_bytes_per_second,
+            estimated_app_power_watts: usage.energy.estimated_app_power_watts,
+        });
     }
 
     pub(super) fn finish(self) -> Option<ResourceHistoryPoint> {

@@ -70,14 +70,17 @@ pub(super) fn operation_result(
     message: String,
     launch: Option<LaunchReceipt>,
 ) -> OperationResult {
+    let (launch_backend, launch_scope) = launch
+        .map(|receipt| (Some(receipt.backend), Some(receipt.scope)))
+        .unwrap_or_default();
     OperationResult {
         id,
         action: params.action.as_str().into(),
         target_id: params.target_id.clone(),
         status: status.into(),
         message,
-        launch_backend: launch.as_ref().map(|receipt| receipt.backend.clone()),
-        launch_scope: launch.map(|receipt| receipt.scope),
+        launch_backend,
+        launch_scope,
     }
 }
 
@@ -111,13 +114,13 @@ impl ApplicationAction {
         match self {
             Self::Activate => activate(catalog, windows, params).await,
             Self::Launch => launch_on_workspace(catalog, windows, params).await,
-            Self::FocusWindow => focus_window(catalog, windows, params)
+            Self::FocusWindow => hyprland::focus(target_address(catalog, windows, params)?)
                 .await
                 .map(|()| ActionOutcome::new(catalog, target_id, "Focused", None)),
             Self::Close => close_application(catalog, windows, target_id)
                 .await
                 .map(|()| ActionOutcome::new(catalog, target_id, "Closed", None)),
-            Self::CloseWindow => close_window(catalog, windows, params)
+            Self::CloseWindow => hyprland::close(target_address(catalog, windows, params)?)
                 .await
                 .map(|()| ActionOutcome::new(catalog, target_id, "Closed", None)),
             Self::MoveToWorkspace => move_to_workspace(catalog, windows, params)
@@ -192,11 +195,11 @@ async fn place_launched_window(
     launch: &LaunchReceipt,
     focus: bool,
 ) -> anyhow::Result<bool> {
-    let Some(unit) = launch.unit.as_deref().filter(|_| previous.available) else {
+    if launch.unit.is_none() || !previous.available {
         // Direct/D-Bus singleton launches may not expose a provable process or
         // unit relationship. Do not move an unrelated instance as a fallback.
         return Ok(false);
-    };
+    }
     if catalog
         .by_id(&params.target_id)
         .is_some_and(|entry| entry.launch_only)
@@ -209,7 +212,7 @@ async fn place_launched_window(
         .map(|window| window.address.clone())
         .collect::<Vec<_>>();
     let Some(address) =
-        wait_for_new_window(catalog, &params.target_id, &previous_addresses, unit).await
+        wait_for_new_window(catalog, &params.target_id, &previous_addresses, launch).await
     else {
         return Ok(false);
     };
@@ -226,7 +229,7 @@ async fn wait_for_new_window(
     catalog: &Catalog,
     target_id: &str,
     previous_addresses: &[String],
-    unit: &str,
+    launch: &LaunchReceipt,
 ) -> Option<String> {
     const WINDOW_TIMEOUT: Duration = Duration::from_secs(8);
     const WINDOW_RETRY_INTERVAL: Duration = Duration::from_millis(100);
@@ -234,10 +237,8 @@ async fn wait_for_new_window(
     let deadline = Instant::now() + WINDOW_TIMEOUT;
     loop {
         let windows = Snapshot::load().await;
-        if let Some(address) = correlated_window(&windows, previous_addresses, unit, |window| {
-            (resolve_target(catalog, window) == target_id)
-                .then(|| crate::resources::process_cgroup(window.pid))
-                .flatten()
+        if let Some(address) = correlated_window(&windows, previous_addresses, |window| {
+            resolve_target(catalog, window) == target_id && launch.owns_process(window.pid)
         }) {
             return Some(address);
         }
@@ -251,34 +252,15 @@ async fn wait_for_new_window(
 fn correlated_window(
     windows: &Snapshot,
     previous_addresses: &[String],
-    unit: &str,
-    cgroup: impl Fn(&Client) -> Option<String>,
+    belongs: impl Fn(&Client) -> bool,
 ) -> Option<String> {
-    let mut matches = windows.clients.iter().filter(|window| {
-        !previous_addresses.contains(&window.address)
-            && cgroup(window).is_some_and(|path| path.split('/').any(|part| part == unit))
-    });
+    let mut matches = windows
+        .clients
+        .iter()
+        .filter(|window| !previous_addresses.contains(&window.address) && belongs(window));
     let window = matches.next()?;
     // A multi-window launch is ambiguous too; leave all windows untouched.
     matches.next().is_none().then(|| window.address.clone())
-}
-
-async fn focus_window(
-    catalog: &Catalog,
-    windows: &Snapshot,
-    params: &ExecuteParams,
-) -> anyhow::Result<()> {
-    let address = target_address(catalog, windows, params)?;
-    hyprland::focus(address).await
-}
-
-async fn close_window(
-    catalog: &Catalog,
-    windows: &Snapshot,
-    params: &ExecuteParams,
-) -> anyhow::Result<()> {
-    let address = target_address(catalog, windows, params)?;
-    hyprland::close(address).await
 }
 
 async fn move_to_workspace(
@@ -292,14 +274,6 @@ async fn move_to_workspace(
         .as_deref()
         .context("workspace_id is required")?;
     hyprland::move_to_workspace(address, workspace).await
-}
-
-fn target_address<'a>(
-    catalog: &Catalog,
-    windows: &'a Snapshot,
-    params: &ExecuteParams,
-) -> anyhow::Result<&'a str> {
-    Ok(&target_instance(catalog, windows, params)?.address)
 }
 
 async fn close_application(
@@ -328,11 +302,11 @@ pub(super) fn application_window_addresses(
         .collect()
 }
 
-fn target_instance<'a>(
+fn target_address<'a>(
     catalog: &Catalog,
     windows: &'a Snapshot,
     params: &ExecuteParams,
-) -> anyhow::Result<&'a Client> {
+) -> anyhow::Result<&'a str> {
     let id = params
         .window_id
         .as_deref()
@@ -344,7 +318,7 @@ fn target_instance<'a>(
         resolve_target(catalog, window) == params.target_id,
         "window no longer belongs to the selected application"
     );
-    Ok(window)
+    Ok(&window.address)
 }
 
 fn display_name(catalog: &Catalog, target_id: &str) -> String {

@@ -1,4 +1,8 @@
-use super::*;
+use super::{
+    Command, Duration, LaunchBackend, LaunchReceipt, activation_address, capture_diagnostic,
+    checked_handoff, checked_handoff_with_timeout, desktop_command, service_cgroup,
+    systemd_command,
+};
 
 #[test]
 fn fallback_launches_use_independent_scope_or_exec_service() {
@@ -28,6 +32,16 @@ fn fallback_launches_use_independent_scope_or_exec_service() {
     assert!(service_cgroup("/user.slice/app-daemon.service"));
     assert!(service_cgroup("/app-daemon.service/child"));
     assert!(!service_cgroup("/session-1.scope"));
+}
+
+#[test]
+fn receipt_requires_exact_unit_ownership() {
+    let mut receipt = LaunchReceipt::from(LaunchBackend::Systemd);
+    assert!(!receipt.owns_cgroup("/app-example@123.service"));
+    receipt.unit = Some("app-example@123.service".into());
+    assert!(receipt.owns_cgroup("/user.slice/app-example@123.service/child"));
+    assert!(!receipt.owns_cgroup("/app-other@123.service"));
+    assert!(!receipt.owns_cgroup("/app-example@123.service-extra"));
 }
 
 #[test]

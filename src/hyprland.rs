@@ -88,10 +88,6 @@ pub fn window_id(address: &str) -> String {
     )
 }
 
-pub async fn watch_events(sender: mpsc::Sender<()>) {
-    shelllist_hyprland::watch_events(sender).await;
-}
-
 pub(crate) async fn watch_window_events(sender: mpsc::Sender<shelllist_hyprland::Event>) {
     shelllist_hyprland::watch_events_detailed(sender).await;
 }

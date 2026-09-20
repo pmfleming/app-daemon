@@ -1,5 +1,5 @@
 //! Canonical statistics over a selected window, independent of response pagination.
-use crate::model::{ResourceAvailability, ResourceHistoryPoint};
+use crate::model::{HistoricalResourceUsage, ResourceAvailability, ResourceHistoryPoint};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -35,13 +35,86 @@ pub(super) fn normalize(mut point: ResourceHistoryPoint) -> ResourceHistoryPoint
     point.resources.availability = Some(availability(&point));
     point
 }
+// Keep response keys and their observation sources together: no duplicate
+// registration list or fallible per-sample map lookup is needed.
+type MetricReader = fn(&HistoricalResourceUsage, &ResourceAvailability) -> (bool, f64, f64);
+const METRICS: &[(&str, MetricReader)] = &[
+    ("cpu_percent_of_machine", |r, a| {
+        (
+            a.cpu,
+            r.compute.cpu_percent_of_machine,
+            r.peaks.cpu_percent_of_machine,
+        )
+    }),
+    ("memory_bytes", |r, a| {
+        (
+            a.memory,
+            r.compute.memory_bytes as f64,
+            r.peaks.memory_bytes as f64,
+        )
+    }),
+    ("gpu_busy_percent", |r, a| {
+        (a.gpu, r.compute.gpu_busy_percent, r.peaks.gpu_busy_percent)
+    }),
+    ("disk_read_bytes_per_second", |r, a| {
+        (
+            a.storage,
+            r.storage.disk_read_bytes_per_second,
+            r.peaks.disk_read_bytes_per_second,
+        )
+    }),
+    ("disk_write_bytes_per_second", |r, a| {
+        (
+            a.storage,
+            r.storage.disk_write_bytes_per_second,
+            r.peaks.disk_write_bytes_per_second,
+        )
+    }),
+    ("network_receive_bytes_per_second", |r, a| {
+        (
+            a.network_bytes,
+            r.network.network_receive_bytes_per_second,
+            r.peaks.network_receive_bytes_per_second,
+        )
+    }),
+    ("network_transmit_bytes_per_second", |r, a| {
+        (
+            a.network_bytes,
+            r.network.network_transmit_bytes_per_second,
+            r.peaks.network_transmit_bytes_per_second,
+        )
+    }),
+    ("average_power_watts", |r, a| {
+        (
+            a.energy,
+            r.average_power_watts,
+            r.peaks.estimated_app_power_watts,
+        )
+    }),
+];
+
 pub(super) fn summarize(
     points: &[&ResourceHistoryPoint],
     start: u64,
     end: u64,
     epoch: &str,
 ) -> HistorySummary {
-    let mut result = HistorySummary {
+    let mut metrics: [MetricSummary; METRICS.len()] =
+        std::array::from_fn(|_| MetricSummary::default());
+    let window_ms = end.saturating_sub(start).max(1);
+    for point in points {
+        let weight = point.timestamp_ms.min(end).saturating_sub(
+            point
+                .timestamp_ms
+                .saturating_sub(point.duration_ms)
+                .max(start),
+        );
+        let available = availability(point);
+        for ((_, read), stats) in METRICS.iter().zip(&mut metrics) {
+            stats.observe(read(&point.resources, &available), weight, window_ms);
+        }
+    }
+    HistorySummary {
         window_start_ms: start,
         window_end_ms: end,
         revision: format!(
@@ -50,109 +123,36 @@ pub(super) fn summarize(
             points.len()
         ),
         weighting: "observed-duration".into(),
-        ..Default::default()
-    };
-    for metric in [
-        "cpu_percent_of_machine",
-        "memory_bytes",
-        "gpu_busy_percent",
-        "disk_read_bytes_per_second",
-        "disk_write_bytes_per_second",
-        "network_receive_bytes_per_second",
-        "network_transmit_bytes_per_second",
-        "average_power_watts",
-    ] {
-        result
-            .metrics
-            .insert(metric.into(), MetricSummary::default());
+        metrics: METRICS
+            .iter()
+            .zip(metrics)
+            .map(|((name, _), stats)| ((*name).into(), stats))
+            .collect(),
     }
-    for point in points {
-        let weight = point.timestamp_ms.min(end).saturating_sub(
-            point
-                .timestamp_ms
-                .saturating_sub(point.duration_ms)
-                .max(start),
-        );
-        if weight == 0 {
-            continue;
+}
+
+impl MetricSummary {
+    fn observe(&mut self, (valid, value, peak): (bool, f64, f64), weight: u64, window_ms: u64) {
+        if !valid || weight == 0 || !value.is_finite() || value < 0.0 {
+            return;
         }
-        let r = &point.resources;
-        let a = availability(point);
-        for (metric, valid, value, peak) in [
-            (
-                "cpu_percent_of_machine",
-                a.cpu,
-                r.compute.cpu_percent_of_machine,
-                r.peaks.cpu_percent_of_machine,
-            ),
-            (
-                "memory_bytes",
-                a.memory,
-                r.compute.memory_bytes as f64,
-                r.peaks.memory_bytes as f64,
-            ),
-            (
-                "gpu_busy_percent",
-                a.gpu,
-                r.compute.gpu_busy_percent,
-                r.peaks.gpu_busy_percent,
-            ),
-            (
-                "disk_read_bytes_per_second",
-                a.storage,
-                r.storage.disk_read_bytes_per_second,
-                r.peaks.disk_read_bytes_per_second,
-            ),
-            (
-                "disk_write_bytes_per_second",
-                a.storage,
-                r.storage.disk_write_bytes_per_second,
-                r.peaks.disk_write_bytes_per_second,
-            ),
-            (
-                "network_receive_bytes_per_second",
-                a.network_bytes,
-                r.network.network_receive_bytes_per_second,
-                r.peaks.network_receive_bytes_per_second,
-            ),
-            (
-                "network_transmit_bytes_per_second",
-                a.network_bytes,
-                r.network.network_transmit_bytes_per_second,
-                r.peaks.network_transmit_bytes_per_second,
-            ),
-            (
-                "average_power_watts",
-                a.energy,
-                r.average_power_watts,
-                r.peaks.estimated_app_power_watts,
-            ),
-        ] {
-            if !valid || !value.is_finite() || value < 0.0 {
-                continue;
-            }
-            let stats = result.metrics.get_mut(metric).expect("registered metric");
-            let observed = stats.observed_ms.saturating_add(weight);
-            let mean = stats.mean.unwrap_or(value);
-            stats.mean = Some(mean + (value - mean) * (weight as f64 / observed as f64));
-            stats.peak = Some(stats.peak.unwrap_or(value).max(value).max(
-                if peak.is_finite() && peak >= 0.0 {
-                    peak
-                } else {
-                    value
-                },
-            ));
-            stats.observed_ms = observed;
-            stats.available = true;
-            stats.coverage = (observed as f64 / end.saturating_sub(start).max(1) as f64).min(1.0);
-        }
+        self.observed_ms = self.observed_ms.saturating_add(weight);
+        let mean = self.mean.unwrap_or(value);
+        self.mean = Some(mean + (value - mean) * (weight as f64 / self.observed_ms as f64));
+        let peak = if peak.is_finite() && peak >= 0.0 {
+            peak
+        } else {
+            value
+        };
+        self.peak = Some(self.peak.unwrap_or(value).max(value).max(peak));
+        self.available = true;
+        self.coverage = (self.observed_ms as f64 / window_ms as f64).min(1.0);
     }
-    result
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{ResourceAvailability, ResourceHistoryPoint, normalize, summarize};
     use crate::model::{HistoricalResourceUsage, ResourcePeaks};
     fn point(timestamp: u64, duration: u64, cpu: f64) -> ResourceHistoryPoint {
         let mut resources = HistoricalResourceUsage {
@@ -178,6 +178,7 @@ mod tests {
         let first = point(1000, 1000, 10.0);
         let second = point(4000, 3000, 30.0);
         let summary = summarize(&[&first, &second], 0, 5000, "epoch");
+        assert_eq!(summary.metrics.len(), 8);
         let cpu = &summary.metrics["cpu_percent_of_machine"];
         assert_eq!(cpu.mean, Some(25.0));
         assert_eq!(cpu.peak, Some(40.0));
@@ -322,6 +323,14 @@ mod tests {
             summarize(&[&zero], 0, 1000, "").metrics["cpu_percent_of_machine"].mean,
             Some(0.0)
         );
+        zero.resources.compute.cpu_percent_of_machine = 5.0;
+        for peak in [f64::NAN, f64::INFINITY, -1.0] {
+            zero.resources.peaks.cpu_percent_of_machine = peak;
+            assert_eq!(
+                summarize(&[&zero], 0, 1000, "").metrics["cpu_percent_of_machine"].peak,
+                Some(5.0)
+            );
+        }
         zero.resources.availability = None;
         zero.resources.coverage = 1.0;
         zero.resources.energy_source = "rapl".into();

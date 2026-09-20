@@ -382,13 +382,6 @@ impl ApplicationService {
         lock
     }
 
-    pub async fn execute(
-        self: &Arc<Self>,
-        params: ExecuteParams,
-    ) -> anyhow::Result<OperationResult> {
-        self.execute_owned(params, None).await
-    }
-
     pub async fn execute_owned(
         self: &Arc<Self>,
         params: ExecuteParams,
@@ -456,23 +449,11 @@ impl ApplicationService {
             }
             let lock = service.launch_lock(&params.target_id);
             let _launch = lock.lock().await;
-            let result = execute_action(&catalog, &params).await;
-            let completed = match result {
-                Ok(outcome) => operation_result(
-                    operation_id.clone(),
-                    &params,
-                    "completed",
-                    outcome.message,
-                    outcome.launch,
-                ),
-                Err(error) => operation_result(
-                    operation_id.clone(),
-                    &params,
-                    "failed",
-                    error.to_string(),
-                    None,
-                ),
+            let (status, message, launch) = match execute_action(&catalog, &params).await {
+                Ok(outcome) => ("completed", outcome.message, outcome.launch),
+                Err(error) => ("failed", error.to_string(), None),
             };
+            let completed = operation_result(operation_id, &params, status, message, launch);
             if service.operations.lock().await.finish(completed.clone()) {
                 let _ = service.operation_changes.send(completed);
             }
@@ -487,10 +468,6 @@ impl ApplicationService {
         )?;
         let _ = start_sender.send(());
         Ok(accepted)
-    }
-
-    pub async fn cancel_operation(&self, operation_id: &str) -> Option<OperationResult> {
-        self.cancel_operation_owned(operation_id, None).await
     }
 
     pub async fn cancel_operation_owned(
@@ -758,7 +735,7 @@ async fn sample_resources(service: &ApplicationService, sampler: &mut ResourceSa
     let mut roots: HashMap<String, Vec<u32>> = HashMap::new();
     for window in &windows.clients {
         roots
-            .entry(resolve_target(&catalog, window))
+            .entry(resolve_target(&catalog, window).into_owned())
             .or_default()
             .push(window.pid);
     }
