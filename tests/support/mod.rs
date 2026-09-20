@@ -95,7 +95,7 @@ impl Session {
         }
         fs::write(
             root.path()
-                .join("data/applications/org.example.BusOnly.desktop"),
+                .join("data/applications/org.example.Bus-Only.desktop"),
             "[Desktop Entry]\nType=Application\nName=Bus Only\nDBusActivatable=true\nActions=inspect;\n[Desktop Action inspect]\nName=Inspect\n",
         )?;
         let compositor = MockCompositor::start(root.path()).await?;

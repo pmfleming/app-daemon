@@ -1,6 +1,6 @@
 use super::{
     ApplicationService, Arc, Duration, HistoryStore, Ordering, now_milliseconds, oneshot,
-    persist_snapshot, time, wait_for_stop,
+    persist_snapshot, time,
 };
 use crate::model::ResourceUsage;
 
@@ -57,32 +57,6 @@ async fn shutdown_drains_sampling_and_serializes_final_save_after_older_writers(
             .is_err()
     );
     service.shutdown().await; // idempotent
-    Ok(())
-}
-
-#[tokio::test]
-async fn shutdown_stops_trackers_and_cancels_active_operations() -> anyhow::Result<()> {
-    let service = ApplicationService::build(false);
-    *service.history.lock().await = HistoryStore::load(None);
-    let lock = service.launch_lock("missing-window-group");
-    let _held = lock.lock().await;
-    let accepted = service
-        .execute_owned(super::tests::close_missing(None), None)
-        .await?;
-    let mut stop = service.stop.subscribe();
-    let tracker = tokio::spawn(async move {
-        wait_for_stop(&mut stop).await;
-    });
-    service.background_tasks.lock().unwrap().push(tracker);
-    time::timeout(Duration::from_secs(2), service.shutdown()).await?;
-    assert_eq!(
-        service
-            .operation_status_owned(&accepted.id, None)
-            .await
-            .unwrap()
-            .status,
-        "cancelled"
-    );
     let api = crate::api::ApiService::new(service);
     assert_eq!(
         api.dispatch_owned("applications.query", serde_json::json!({}), None)

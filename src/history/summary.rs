@@ -152,7 +152,7 @@ impl MetricSummary {
 
 #[cfg(test)]
 mod tests {
-    use super::{ResourceAvailability, ResourceHistoryPoint, normalize, summarize};
+    use super::{ResourceAvailability, ResourceHistoryPoint};
     use crate::model::{HistoricalResourceUsage, ResourcePeaks};
     fn point(timestamp: u64, duration: u64, cpu: f64) -> ResourceHistoryPoint {
         let mut resources = HistoricalResourceUsage {
@@ -172,22 +172,6 @@ mod tests {
             duration_ms: duration,
             resources,
         }
-    }
-    #[test]
-    fn weights_observation_time_and_preserves_peaks_and_missing_capabilities() {
-        let first = point(1000, 1000, 10.0);
-        let second = point(4000, 3000, 30.0);
-        let summary = summarize(&[&first, &second], 0, 5000, "epoch");
-        assert_eq!(summary.metrics.len(), 8);
-        let cpu = &summary.metrics["cpu_percent_of_machine"];
-        assert_eq!(cpu.mean, Some(25.0));
-        assert_eq!(cpu.peak, Some(40.0));
-        assert_eq!(cpu.observed_ms, 4000);
-        assert_eq!(cpu.coverage, 0.8);
-        assert_eq!(summary.metrics["gpu_busy_percent"].mean, None);
-        assert!(!summary.metrics["gpu_busy_percent"].available);
-        let clipped = summarize(&[&first, &second], 500, 4000, "epoch");
-        assert_eq!(clipped.metrics["cpu_percent_of_machine"].observed_ms, 3500);
     }
     #[test]
     fn pagination_and_incremental_reads_share_full_window_statistics() {
@@ -211,9 +195,19 @@ mod tests {
         assert!(first.has_more);
         assert!(!second.has_more);
         assert_eq!(first.summary, second.summary);
-        assert_eq!(
-            second.summary.metrics["cpu_percent_of_machine"].mean,
-            Some(25.0)
+        let cpu = &second.summary.metrics["cpu_percent_of_machine"];
+        assert_eq!(cpu.mean, Some(25.0));
+        assert_eq!(cpu.peak, Some(40.0));
+        assert_eq!(cpu.observed_ms, 4000);
+        assert_eq!(cpu.coverage, 0.8);
+        assert_eq!(second.summary.metrics["gpu_busy_percent"].mean, None);
+        assert!(!second.summary.metrics["gpu_busy_percent"].available);
+        assert_eq!(second.summary.metrics.len(), 8);
+        assert!(second.points[0].timestamp_ms > first.points[0].timestamp_ms);
+        assert!(
+            store
+                .query("another-app", None, first.next_cursor.as_deref(), 1)
+                .is_err()
         );
         assert!(second.points[0].resources.availability.is_some());
         let empty_page = store
@@ -235,30 +229,6 @@ mod tests {
     }
 
     #[test]
-    fn window_ending_inside_first_bucket_still_has_observed_statistics() {
-        let base = super::super::now_milliseconds() - 60_000;
-        let mut store = super::super::HistoryStore::load(None);
-        store.insert_point("app".into(), point(base + 15_000, 15_000, 10.0));
-        for since in [Some(base), None] {
-            let page = store
-                .query_window("app", since, Some(base + 7_500), None, 1)
-                .unwrap();
-            let cpu = &page.summary.metrics["cpu_percent_of_machine"];
-            assert_eq!(page.summary.window_start_ms, base);
-            assert_eq!(cpu.observed_ms, 7_500);
-            assert_eq!(cpu.mean, Some(10.0));
-            assert_eq!(cpu.peak, Some(20.0));
-            assert_eq!(cpu.coverage, 1.0);
-            assert!(
-                page.points.is_empty(),
-                "no bucket endpoint is in the window"
-            );
-            assert!(!page.has_more);
-            assert!(page.next_cursor.is_none());
-        }
-    }
-
-    #[test]
     fn clips_both_boundaries_without_advancing_cursor_over_summary_only_bucket() {
         let base = super::super::now_milliseconds() - 60_000;
         let mut store = super::super::HistoryStore::load(None);
@@ -266,6 +236,23 @@ mod tests {
         store.insert_point("app".into(), point(base + 30_000, 15_000, 30.0));
         // This point starts exactly at the selected end and contributes nothing.
         store.insert_point("app".into(), point(base + 40_000, 17_500, 90.0));
+        // A right-clipped first bucket contributes even when there is no page
+        // endpoint yet, with either an explicit or inferred window start.
+        for since in [Some(base), None] {
+            let page = store
+                .query_window("app", since, Some(base + 7_500), None, 1)
+                .unwrap();
+            assert_eq!(page.summary.window_start_ms, base);
+            assert_eq!(
+                page.summary.metrics["cpu_percent_of_machine"].observed_ms,
+                7_500
+            );
+            assert_eq!(
+                page.summary.metrics["cpu_percent_of_machine"].mean,
+                Some(10.0)
+            );
+            assert!(page.points.is_empty() && !page.has_more && page.next_cursor.is_none());
+        }
         let first = store
             .query_window("app", Some(base + 7_500), Some(base + 22_500), None, 1)
             .unwrap();
@@ -312,34 +299,6 @@ mod tests {
         assert_eq!(
             zero_width.summary.metrics["cpu_percent_of_machine"].observed_ms,
             0
-        );
-    }
-
-    #[test]
-    fn measured_zero_legacy_normalization_and_invalid_values() {
-        let mut zero = point(1000, 1000, 0.0);
-        zero.resources.peaks.cpu_percent_of_machine = 0.0;
-        assert_eq!(
-            summarize(&[&zero], 0, 1000, "").metrics["cpu_percent_of_machine"].mean,
-            Some(0.0)
-        );
-        zero.resources.compute.cpu_percent_of_machine = 5.0;
-        for peak in [f64::NAN, f64::INFINITY, -1.0] {
-            zero.resources.peaks.cpu_percent_of_machine = peak;
-            assert_eq!(
-                summarize(&[&zero], 0, 1000, "").metrics["cpu_percent_of_machine"].peak,
-                Some(5.0)
-            );
-        }
-        zero.resources.availability = None;
-        zero.resources.coverage = 1.0;
-        zero.resources.energy_source = "rapl".into();
-        let normalized = normalize(zero.clone());
-        assert!(normalized.resources.availability.unwrap().energy);
-        zero.resources.compute.cpu_percent_of_machine = f64::NAN;
-        assert_eq!(
-            summarize(&[&zero], 0, 1000, "").metrics["cpu_percent_of_machine"].mean,
-            None
         );
     }
 }

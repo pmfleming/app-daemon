@@ -31,7 +31,7 @@ fn socket(provider: &TestProvider, pid: u32, inode: u64, received_bytes: u64) {
 }
 
 #[test]
-fn accounts_for_opening_and_closing_sockets_between_samples() {
+fn socket_lifecycle_attributes_deltas_and_rebaselines_new_or_unavailable_processes() {
     let provider = Arc::new(TestProvider::default());
     let mut sampler = ResourceSampler {
         provider: provider.clone(),
@@ -62,18 +62,10 @@ fn accounts_for_opening_and_closing_sockets_between_samples() {
         closed.network_receive_bytes, 0,
         "unowned sockets must not contribute traffic"
     );
-}
 
-#[test]
-fn baselines_new_processes_and_recovers_from_unavailable_network_data() {
-    let provider = Arc::new(TestProvider::default());
-    let mut sampler = ResourceSampler {
-        provider: provider.clone(),
-        ..Default::default()
-    };
-    socket(&provider, 42, 100, 5000);
-    sample(&mut sampler, &[42]);
-    socket(&provider, 43, 101, 8000);
+    // A newly attributed process starts with a baseline, unlike a new socket
+    // belonging to an already observed process.
+    socket(&provider, 43, 104, 8000);
     assert_eq!(
         sample(&mut sampler, &[42, 43])
             .network

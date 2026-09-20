@@ -124,16 +124,26 @@ fn windowless_apps_are_discovered_published_and_added_to_history() -> anyhow::Re
 }
 
 #[test]
-fn known_processes_survive_window_and_parent_exit_but_not_pid_reuse() -> anyhow::Result<()> {
+fn ownership_follows_window_reassignment_and_survives_parent_exit_but_not_pid_reuse()
+-> anyhow::Result<()> {
     let (_dir, catalog) = catalog()?;
     let provider = Arc::new(TestProvider::default());
-    provider.state.lock().unwrap().processes =
-        HashMap::from([(42, process(1, 100)), (43, process(42, 101))]);
+    provider.state.lock().unwrap().processes = HashMap::from([(42, process(1, 100))]);
     let mut sampler = ResourceSampler {
         provider: provider.clone(),
         ..Default::default()
     };
     let windows = HashMap::from([("org.example.App.desktop".into(), vec![42])]);
+    sampler.sample_for_applications(&windows, &catalog);
+    let windows = HashMap::from([("org.example.Other.desktop".into(), vec![42])]);
+    let reassigned = sampler.sample_for_applications(&windows, &catalog);
+    assert_eq!(reassigned.target_roots(), &windows);
+    provider
+        .state
+        .lock()
+        .unwrap()
+        .processes
+        .insert(43, process(42, 101));
     sampler.sample_for_applications(&windows, &catalog);
     provider.state.lock().unwrap().processes.remove(&42);
     provider
@@ -147,7 +157,7 @@ fn known_processes_survive_window_and_parent_exit_but_not_pid_reuse() -> anyhow:
     let background = sampler.sample_for_applications(&HashMap::new(), &catalog);
     assert_eq!(
         background
-            .usage_for_application("org.example.App.desktop", [])
+            .usage_for_application("org.example.Other.desktop", [])
             .compute
             .process_count,
         1
@@ -163,25 +173,6 @@ fn known_processes_survive_window_and_parent_exit_but_not_pid_reuse() -> anyhow:
     let reused = sampler.sample_for_applications(&HashMap::new(), &catalog);
     assert!(reused.target_roots().is_empty());
     assert_ne!(background.runtime_revision(), reused.runtime_revision());
-    Ok(())
-}
-
-#[test]
-fn a_new_window_identity_replaces_the_remembered_owner() -> anyhow::Result<()> {
-    let (_dir, catalog) = catalog()?;
-    let provider = TestProvider::default();
-    let processes = HashMap::from([(42, process(1, 100))]);
-    let mut known = discovery::KnownRoots::default();
-    for id in ["org.example.App.desktop", "org.example.Other.desktop"] {
-        let windows = HashMap::from([(id.into(), vec![42])]);
-        let discovered = known.discover(&provider, &windows, &processes, &catalog);
-        assert_eq!(discovered.roots, windows);
-    }
-    let background = known.discover(&provider, &HashMap::new(), &processes, &catalog);
-    assert_eq!(
-        background.roots,
-        HashMap::from([("org.example.Other.desktop".into(), vec![42])])
-    );
     Ok(())
 }
 

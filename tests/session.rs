@@ -8,7 +8,7 @@ use serde_json::json;
 use support::{Session, call, cancel, events, operation, raw_call, running, stopped};
 
 #[tokio::test]
-async fn dbus_validation_and_subscription_cancellation_are_owner_scoped() -> Result<()> {
+async fn dbus_requests_are_validated_and_connection_owned_results_are_recoverable() -> Result<()> {
     let mut session = Session::start(true).await?;
     let proxy = session.proxy().await?;
     for (method, params, code) in [
@@ -52,6 +52,47 @@ async fn dbus_validation_and_subscription_cancellation_are_owner_scoped() -> Res
         cancel(&proxy, id).await?["error"]["code"],
         "request-not-found"
     );
+    // With the subscription gone, successful and failed operation outcomes
+    // remain recoverable only by the originating connection.
+    for (target, action, terminal) in [
+        ("ok.desktop", "launch", "completed"),
+        ("missing.desktop", "close", "failed"),
+    ] {
+        let accepted = call(
+            &proxy,
+            "applications.execute",
+            json!({"target_id":target, "action":action}),
+        )
+        .await?;
+        let id = accepted["data"]["operation"]["id"]
+            .as_str()
+            .context("accepted id")?;
+        let status = tokio::time::timeout(support::DEADLINE, async {
+            loop {
+                let status = call(
+                    &proxy,
+                    "applications.operation.status",
+                    json!({"operation_id":id}),
+                )
+                .await?;
+                if status["data"]["operation_status"]["status"] == terminal {
+                    return Result::<_>::Ok(status);
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await??;
+        assert_eq!(status["data"]["operation_status"]["id"], id);
+        assert_eq!(
+            call(
+                &stranger,
+                "applications.operation.status",
+                json!({"operation_id":id})
+            )
+            .await?["error"]["code"],
+            "request-not-found"
+        );
+    }
     drop(proxy);
     session.shutdown().await
 }
@@ -61,6 +102,7 @@ async fn uwsm_handoffs_report_receipts_failures_timeouts_and_owned_cancellation(
     let mut session = Session::start(true).await?;
     let proxy = session.proxy().await?;
     let mut stream = events(&proxy).await?;
+    let mut previous_unit = String::new();
     for (target, action, expected) in [
         ("ok.desktop", "launch", "ok.desktop"),
         ("ok.desktop", "desktop-action", "ok.desktop:inspect"),
@@ -84,6 +126,11 @@ async fn uwsm_handoffs_report_receipts_failures_timeouts_and_owned_cancellation(
         let args = args.lines().collect::<Vec<_>>();
         assert_eq!(&args[..3], ["-t", "service", "-u"]);
         assert!(args[3].starts_with("app-ok@") && args[3].ends_with(".service"));
+        assert_ne!(
+            args[3], previous_unit,
+            "separate launches must have separate units"
+        );
+        previous_unit = args[3].to_owned();
         assert_eq!(&args[4..], ["--", expected]);
     }
     for (target, message) in [

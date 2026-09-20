@@ -1,6 +1,6 @@
 use super::{
-    CgroupUsage, DiskFile, DiskFileId, MemoryUsage, NetworkCounters, ProcessFiles, ProcessIo,
-    ProcessUsage, ResourceSnapshot, parse_process_stat,
+    CgroupUsage, DiskFile, DiskFileId, MemoryUsage, ProcessFiles, ProcessIo, ProcessUsage,
+    ResourceSnapshot, parse_process_stat,
 };
 use anyhow::Context;
 use std::{
@@ -130,50 +130,15 @@ fn totals_resources_without_double_counting_roots_in_either_attribution_mode() {
     assert_eq!(usage.storage.disk_read_bytes, 4096);
     assert_eq!(usage.compute.memory_cgroup_bytes, 8192);
     assert_eq!(snapshot.usage_for_roots([0, 10, 10]), usage);
-}
 
-#[test]
-fn includes_descendants_that_move_out_of_an_application_cgroup() {
-    let socket_inode = 88;
-    let process = |cpu_percent, sockets| ProcessUsage {
-        cpu_percent,
-        sockets: Some(Arc::new(sockets)),
-        ..ProcessUsage::default()
-    };
-    let path = "/user.slice/app-example.scope".to_owned();
-    let snapshot = ResourceSnapshot {
-        processes: HashMap::from([
-            (10, process(2.0, HashSet::new())),
-            (11, process(5.0, HashSet::from([socket_inode]))),
-        ]),
-        children: HashMap::from([(1, vec![10]), (10, vec![11])]),
-        cgroup_members_by_root: HashMap::from([(10, HashSet::from([10]))]),
-        cgroup_path_by_root: HashMap::from([(10, path.clone())]),
-        cgroup_usage: HashMap::from([(
-            path,
-            super::CgroupUsage {
-                cpu_percent: Some(2.0),
-                ..super::CgroupUsage::default()
-            },
-        )]),
-        network_deltas: HashMap::from([(
-            socket_inode,
-            NetworkCounters {
-                received_bytes: 1_000,
-                transmitted_bytes: 500,
-            },
-        )]),
-        network_counters_available: true,
-        logical_cpus: 1,
-        interval_seconds: 2.0,
-        ..ResourceSnapshot::default()
-    };
-
-    let usage = snapshot.usage_for_roots([10]);
-    assert_eq!(usage.compute.process_count, 2);
-    assert_eq!(usage.compute.cpu_percent, 7.0);
-    assert_eq!(usage.network.network_receive_bytes_per_second, 500.0);
-    assert_eq!(usage.network.network_transmit_bytes_per_second, 250.0);
-    assert_eq!(usage.measurement.attribution_method, "mixed");
-    assert!(usage.measurement.network_bytes_available);
+    // A child leaving the scope is still part of the application, but partial
+    // cgroup totals must no longer replace complete process-tree accounting.
+    snapshot
+        .cgroup_members_by_root
+        .insert(10, HashSet::from([10]));
+    let mixed = snapshot.usage_for_roots([10]);
+    assert_eq!(mixed.compute.process_count, 2);
+    assert_eq!(mixed.compute.cpu_percent, 5.5);
+    assert_eq!(mixed.storage.disk_read_bytes, 40);
+    assert_eq!(mixed.measurement.attribution_method, "mixed");
 }

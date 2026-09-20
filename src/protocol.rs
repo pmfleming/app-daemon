@@ -71,16 +71,11 @@ mod tests {
     }
 
     #[test]
-    fn fixture_matches_registry() -> anyhow::Result<()> {
+    fn v1_contract_matches_registry_and_serialized_resources() -> anyhow::Result<()> {
         let fixture = contract_fixture()?;
         assert_eq!(fixture["version"], VERSION);
         assert_eq!(names(&fixture, "methods")?, METHODS);
         assert_eq!(names(&fixture, "streams")?, STREAMS);
-        Ok(())
-    }
-
-    #[test]
-    fn resource_fixture_matches_serialized_domain_shapes() -> serde_json::Result<()> {
         let fixture = resource_contract_fixture()?;
         let current = serde_json::to_value(ResourceUsage::default())?;
         let history = serde_json::to_value(ResourceHistoryPoint {

@@ -23,6 +23,9 @@ fn persists_idle_capabilities_and_marks_mixed_availability_unavailable() {
     let point = pending.finish().unwrap();
     let bytes = serde_json::to_vec(&point).unwrap();
     let restored: ResourceHistoryPoint = serde_json::from_slice(&bytes).unwrap();
+    let summary = super::summary::summarize(&[&restored], 0, restored.timestamp_ms, "");
+    assert_eq!(summary.metrics["cpu_percent_of_machine"].mean, Some(0.0));
+    assert_eq!(summary.metrics["gpu_busy_percent"].mean, Some(0.0));
     let available = restored.resources.availability.unwrap();
     assert!(available.gpu && available.storage && available.network_bytes && available.energy);
     assert_eq!(restored.resources.compute.gpu_busy_percent, 0.0);

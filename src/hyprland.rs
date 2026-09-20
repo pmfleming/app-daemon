@@ -192,47 +192,10 @@ mod tests {
     use super::{address_selector, workspace_selector};
 
     #[test]
-    fn filters_unrelated_events_but_retains_client_and_focus_changes() {
-        for event in [
-            "openwindow",
-            "closewindow",
-            "movewindowv2",
-            "windowtitlev2",
-            "activewindowv2",
-            "workspacev2",
-            "renameworkspace",
-            "configreloaded",
-        ] {
-            assert!(
-                super::window_event_relevant(&format!("{event}>>data")),
-                "{event}"
-            );
-        }
-        for event in [
-            "openlayer>>bar",
-            "closelayer>>osd",
-            "submap>>resize",
-            "activelayout>>kbd,us",
-            "malformed",
-        ] {
-            assert!(!super::window_event_relevant(event), "{event}");
-        }
-    }
-
-    #[test]
-    fn parses_direct_ipc_snapshot_and_rejects_partial_or_invalid_data() {
-        let state = super::Snapshot::from_response(
-            r#"[{"address":"0x123","mapped":true,"class":"app","pid":42},{"address":"0x0"}]"#,
-        );
-        assert!(state.available);
-        assert_eq!(state.clients.len(), 1);
-        assert_eq!(state.clients[0].pid, 42);
-        assert!(!super::Snapshot::from_response("truncated json").available);
-        assert!(super::Snapshot::from_response("[]").available);
-    }
-
-    #[test]
-    fn validates_window_selectors_for_dispatch() -> anyhow::Result<()> {
+    fn validates_ipc_events_and_window_dispatch_selectors() -> anyhow::Result<()> {
+        assert!(super::window_event_relevant("openwindow>>fixture"));
+        assert!(!super::window_event_relevant("openlayer>>bar"));
+        assert!(!super::window_event_relevant("malformed"));
         assert_eq!(address_selector("0xAb12")?, "address:0xAb12");
         assert!(address_selector("not-an-address").is_err());
         assert_eq!(

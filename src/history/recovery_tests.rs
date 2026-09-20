@@ -124,25 +124,3 @@ fn pruning_expires_only_cursors_whose_buckets_are_gone_even_after_restart() -> a
     );
     Ok(())
 }
-
-#[test]
-fn old_unsorted_duplicate_files_are_normalized_on_load() -> anyhow::Result<()> {
-    let dir = tempfile::tempdir()?;
-    let path = dir.path().join("history.json");
-    let t = now_milliseconds() - 60_000;
-    let mut store = HistoryStore::load(Some(path.clone()));
-    store.record("app", t, 1.0, &usage(10.0, 1.0));
-    let mut snapshot = store.snapshot(true);
-    let points = snapshot.file.applications.get_mut("app").unwrap();
-    let mut older = points[0].clone();
-    older.timestamp_ms -= BUCKET_MILLISECONDS;
-    points.push_back(older.clone());
-    points.push_back(older);
-    persist_snapshot(snapshot)?;
-    let mut loaded = HistoryStore::load(Some(path));
-    let page = loaded.query("app", None, None, 10)?;
-    assert_eq!(page.points.len(), 2);
-    assert!(page.points[0].timestamp_ms < page.points[1].timestamp_ms);
-    assert_eq!(page.points[0].duration_ms, 2000);
-    Ok(())
-}

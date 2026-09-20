@@ -1,7 +1,7 @@
 use super::*;
 
 #[test]
-fn missing_cgroup_io_keeps_procfs_values_and_correct_availability() {
+fn unavailable_controllers_fall_back_then_recover_without_lifetime_spikes() {
     let path = "/app-test.scope".to_owned();
     let mut snapshot = ResourceSnapshot {
         processes: HashMap::from([(
@@ -18,63 +18,56 @@ fn missing_cgroup_io_keeps_procfs_values_and_correct_availability() {
         )]),
         cgroup_members_by_root: HashMap::from([(42, HashSet::from([42]))]),
         cgroup_path_by_root: HashMap::from([(42, path.clone())]),
-        cgroup_usage: HashMap::from([(
-            path.clone(),
-            CgroupUsage {
-                cpu_percent: Some(25.0),
-                memory_bytes: Some(512),
-                io: None,
-            },
-        )]),
         ..Default::default()
     };
-    let usage = snapshot.usage_for_roots([42]);
-    assert_eq!(usage.compute.cpu_percent, 25.0);
-    assert_eq!(usage.compute.memory_cgroup_bytes, 512);
-    assert_eq!(usage.storage.disk_read_bytes, 123);
-    assert!(usage.measurement.storage_available);
-    snapshot.processes.get_mut(&42).unwrap().storage_available = false;
-    assert!(!snapshot.usage_for_roots([42]).measurement.storage_available);
-    snapshot.cgroup_usage.get_mut(&path).unwrap().io = Some(CgroupIo::default());
-    let idle = snapshot.usage_for_roots([42]);
-    assert!(idle.measurement.storage_available);
-    assert_eq!(idle.storage.disk_read_bytes, 0);
-    snapshot.cgroup_usage.get_mut(&path).unwrap().cpu_percent = None;
-    assert_eq!(snapshot.usage_for_roots([42]).compute.cpu_percent, 3.0);
-}
-
-#[test]
-fn recovered_cgroup_controllers_baseline_independently() {
-    let path = "app.scope".to_owned();
     let mut sampler = ResourceSampler::default();
-    sampler.previous_cgroups.insert(
+    let mut counters = HashMap::from([(
         path.clone(),
         CgroupCounters {
             cpu_usage_usec: Some(1_000_000),
-            ..Default::default()
-        },
-    );
-    let current = HashMap::from([(
-        path.clone(),
-        CgroupCounters {
-            cpu_usage_usec: Some(2_000_000),
             memory_bytes: Some(512),
-            io: Some(CgroupIo {
-                read_bytes: 10_000,
-                ..Default::default()
-            }),
+            io: None,
         },
     )]);
-    let usage = sampler.cgroup_usage(&current, 1.0);
-    assert_eq!(usage[&path].cpu_percent, Some(100.0));
-    assert_eq!(usage[&path].memory_bytes, Some(512));
-    assert_eq!(usage[&path].io.unwrap().read_bytes, 0);
-    sampler.previous_cgroups = current.clone();
+    sampler.previous_cgroups = counters.clone();
+    counters.get_mut(&path).unwrap().cpu_usage_usec = Some(1_250_000);
+    snapshot.cgroup_usage = sampler.cgroup_usage(&counters, 1.0);
+    let fallback = snapshot.usage_for_roots([42]);
+    assert_eq!(fallback.compute.cpu_percent, 25.0);
+    assert_eq!(fallback.compute.memory_cgroup_bytes, 512);
+    assert_eq!(fallback.storage.disk_read_bytes, 123);
+    assert!(fallback.measurement.storage_available);
+    snapshot.processes.get_mut(&42).unwrap().storage_available = false;
+    assert!(!snapshot.usage_for_roots([42]).measurement.storage_available);
+
+    sampler.previous_cgroups = counters.clone();
+    counters.get_mut(&path).unwrap().io = Some(CgroupIo {
+        read_bytes: 10_000,
+        ..Default::default()
+    });
+    snapshot.cgroup_usage = sampler.cgroup_usage(&counters, 1.0);
+    let recovered = snapshot.usage_for_roots([42]);
+    assert!(recovered.measurement.storage_available);
     assert_eq!(
-        sampler.cgroup_usage(&current, 1.0)[&path]
-            .io
-            .unwrap()
-            .read_bytes,
-        0
+        recovered.storage.disk_read_bytes, 0,
+        "recovery must establish an I/O baseline"
+    );
+    sampler.previous_cgroups = counters.clone();
+    snapshot.cgroup_usage = sampler.cgroup_usage(&counters, 1.0);
+    assert_eq!(snapshot.usage_for_roots([42]).storage.disk_read_bytes, 0);
+    counters
+        .get_mut(&path)
+        .unwrap()
+        .io
+        .as_mut()
+        .unwrap()
+        .read_bytes += 50;
+    counters.get_mut(&path).unwrap().cpu_usage_usec = None;
+    snapshot.cgroup_usage = sampler.cgroup_usage(&counters, 1.0);
+    let next = snapshot.usage_for_roots([42]);
+    assert_eq!(next.storage.disk_read_bytes, 50);
+    assert_eq!(
+        next.compute.cpu_percent, 3.0,
+        "missing CPU controller uses procfs"
     );
 }

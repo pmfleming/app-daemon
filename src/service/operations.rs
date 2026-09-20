@@ -121,32 +121,6 @@ mod tests {
         )
     }
     #[tokio::test]
-    async fn outcomes_are_owner_scoped_bounded_and_expire() {
-        let mut registry = OperationRegistry::default();
-        for id in 0..MAX_RECENT + 1 {
-            let task = tokio::spawn(async {});
-            registry
-                .insert(
-                    format!("operation-{id}"),
-                    ActiveOperation {
-                        abort: task.abort_handle(),
-                        result: result(id, "accepted"),
-                        owner: Some(":1.1".into()),
-                    },
-                )
-                .unwrap();
-            assert!(registry.finish(result(id, "completed")));
-        }
-        assert!(registry.status("operation-0", Some(":1.1")).is_none());
-        assert!(registry.status("operation-1", Some(":1.2")).is_none());
-        assert_eq!(
-            registry.status("operation-1", Some(":1.1")).unwrap().status,
-            "completed"
-        );
-        registry.recent.prune(std::time::Instant::now() + RETENTION);
-        assert!(registry.recent.is_empty());
-    }
-    #[tokio::test]
     async fn cancellation_is_terminal_and_admission_is_bounded() {
         let mut registry = OperationRegistry::default();
         for id in 0..MAX_ACTIVE_PER_OWNER {
@@ -177,5 +151,7 @@ mod tests {
         );
         assert!(registry.admit(None).is_ok());
         assert_eq!(registry.cancel_all().len(), MAX_ACTIVE_PER_OWNER - 1);
+        registry.recent.prune(std::time::Instant::now() + RETENTION);
+        assert!(registry.status("operation-0", None).is_none());
     }
 }

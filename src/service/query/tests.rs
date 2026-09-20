@@ -111,14 +111,36 @@ fn resolves_uwsm_cgroup_before_terminal_window_class() -> anyhow::Result<()> {
         focus_rank: 0,
         mapped: true,
     };
-    assert!(matches!(
-        resolve_target_with_cgroup(
-            &catalog,
-            &window,
-            Some("/app.slice/app-Hyprland-btop-a1b2c3d4.scope"),
-        ),
-        std::borrow::Cow::Borrowed("btop.desktop")
-    ));
+    for path in [
+        "/app.slice/app-Hyprland-btop-a1b2c3d4.scope",
+        "/app-btop@12345678.service/child",
+        "/app-flatpak-btop-433952237.scope",
+        "/app-dbus-btop.service",
+        "/app-btop.service",
+        r"/app-\x62top@deadbeef.service",
+    ] {
+        assert_eq!(
+            resolve_target_with_cgroup(&catalog, &window, Some(path)),
+            "btop.desktop",
+            "{path}"
+        );
+    }
+    for path in [
+        "/app-daemon.service",
+        "/user@1000.service",
+        "/btop.service",
+        "/app-unknown.service",
+        "/app-btop.scope",
+        "/app-notbtop@123.service",
+        "/app-btop@not-hex.service",
+        "/app-btop@.service",
+    ] {
+        assert_eq!(
+            resolve_target_with_cgroup(&catalog, &window, Some(path)),
+            "com.mitchellh.ghostty.desktop",
+            "{path}"
+        );
+    }
     assert_eq!(
         resolve_target_with_cgroup(
             &catalog,
@@ -156,9 +178,7 @@ fn launch_only_entries_remain_shortcuts_without_claiming_windows() -> anyhow::Re
         focus_rank: 0,
         mapped: true,
     };
-    assert!(
-        matches!(resolve_target(&catalog, &window), std::borrow::Cow::Owned(id) if id == "window-group:browser")
-    );
+    assert_eq!(resolve_target(&catalog, &window), "window-group:browser");
     let windows = Snapshot {
         available: true,
         clients: vec![window],

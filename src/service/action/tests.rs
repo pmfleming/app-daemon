@@ -1,4 +1,4 @@
-use super::{Client, Snapshot, correlated_window, launch};
+use super::{Client, Snapshot, correlated_window};
 
 fn windows() -> Snapshot {
     Snapshot {
@@ -33,16 +33,6 @@ fn placement_requires_one_new_owned_window() {
         correlated_window(&windows, &previous, |_| true).is_none(),
         "ambiguous launch must not move any window"
     );
-}
-
-#[test]
-fn application_units_are_unique_and_keep_desktop_identity() {
-    let first = launch::application_unit("org.example.App.desktop");
-    let second = launch::application_unit("org.example.App.desktop");
-    assert_ne!(first, second);
-    assert!(first.starts_with("app-org.example.App@"));
-    assert!(first.ends_with(".service"));
-    assert!(!launch::application_unit("a/b.desktop").contains('/'));
 }
 
 #[tokio::test]

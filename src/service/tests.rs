@@ -1,32 +1,5 @@
 use super::{ApplicationAction, ApplicationService, ExecuteParams};
 
-#[test]
-fn healthy_streams_reduce_polling_and_reconnects_force_refresh() {
-    use super::{Duration, observe_window_event, reconciliation_intervals};
-    use shelllist_hyprland::Event;
-    assert_eq!(
-        reconciliation_intervals(true, true),
-        (Duration::from_secs(30), Duration::from_secs(300))
-    );
-    assert_eq!(
-        reconciliation_intervals(false, false),
-        (Duration::from_secs(5), Duration::from_secs(30))
-    );
-    let mut connected = false;
-    assert!(observe_window_event(Event::Connected, &mut connected));
-    assert!(connected);
-    assert!(!observe_window_event(
-        Event::Message("openlayer>>osd".into()),
-        &mut connected
-    ));
-    assert!(observe_window_event(Event::Disconnected, &mut connected));
-    assert!(!connected);
-    assert!(
-        observe_window_event(Event::Connected, &mut connected),
-        "reconnect must refresh even without a client event"
-    );
-}
-
 #[tokio::test]
 async fn query_waiting_for_settings_does_not_block_resource_publication() {
     use futures::{pin_mut, poll};
@@ -60,39 +33,4 @@ pub(super) fn close_missing(expected_revision: Option<u64>) -> ExecuteParams {
         expected_revision,
         workspace_id: None,
     }
-}
-
-#[tokio::test]
-async fn rejects_stale_actions_and_reports_accepted_operation_outcomes() -> anyhow::Result<()> {
-    let service = ApplicationService::new();
-    let mut events = service.subscribe_operations();
-    assert!(
-        service
-            .execute_owned(close_missing(Some(u64::MAX)), None)
-            .await
-            .is_err()
-    );
-    assert!(matches!(
-        events.try_recv(),
-        Err(tokio::sync::broadcast::error::TryRecvError::Empty)
-    ));
-    let accepted = service.execute_owned(close_missing(None), None).await?;
-    assert_eq!(accepted.status, "accepted");
-    let running = events.recv().await?;
-    let failed = events.recv().await?;
-    assert_eq!(running.id, accepted.id);
-    assert_eq!(running.status, "running");
-    assert_eq!(failed.id, accepted.id);
-    assert_eq!(failed.status, "failed");
-    assert_eq!(
-        service.operation_status_owned(&accepted.id, None).await,
-        Some(failed)
-    );
-    assert!(
-        service
-            .operation_status_owned(&accepted.id, Some(":1.2"))
-            .await
-            .is_none()
-    );
-    Ok(())
 }

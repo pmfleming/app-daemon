@@ -1,5 +1,3 @@
-use anyhow::Context;
-
 use super::{HistoryStore, persist_snapshot};
 use crate::model::{ComputeUsage, EnergyUsage, ResourceUsage, StorageUsage};
 
@@ -99,37 +97,5 @@ fn persists_resource_buckets_and_retains_energy_for_seven_days() -> anyhow::Resu
             "energy retention after {days} days"
         );
     }
-    Ok(())
-}
-
-#[test]
-fn paginates_forward_with_target_bound_cursors() -> anyhow::Result<()> {
-    let mut store = HistoryStore::load(None);
-    let now = super::now_milliseconds();
-    let first_bucket = now.saturating_sub(4 * super::BUCKET_MILLISECONDS)
-        / super::BUCKET_MILLISECONDS
-        * super::BUCKET_MILLISECONDS;
-    for index in 0..3 {
-        store.record(
-            "example.desktop",
-            first_bucket + index * super::BUCKET_MILLISECONDS + 1_000,
-            1.0,
-            &ResourceUsage::default(),
-        );
-    }
-
-    let first = store.query("example.desktop", None, None, 2)?;
-    assert_eq!(first.points.len(), 2);
-    assert!(first.has_more);
-    let cursor = first.next_cursor.as_deref().context("next cursor")?;
-    let second = store.query("example.desktop", None, Some(cursor), 2)?;
-    assert_eq!(second.points.len(), 1);
-    assert!(!second.has_more);
-    assert!(second.next_cursor.is_some());
-    assert!(
-        store
-            .query("another.desktop", None, Some(cursor), 2)
-            .is_err()
-    );
     Ok(())
 }
