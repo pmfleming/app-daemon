@@ -1,5 +1,8 @@
 # RustQualityLens baseline
 
+For the newer focused hotspot/allocation refactor and its before/after metrics,
+see [refactor-review.md](refactor-review.md). It does not replace this full baseline.
+
 `baseline.json` is a compact, tracked snapshot of the step-5 measurements.
 It preserves generator/model versions, source/config/toolchain/Git fingerprints,
 all-code and production-function complexity, per-module locality **and leverage**,
