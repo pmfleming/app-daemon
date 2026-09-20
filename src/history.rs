@@ -186,6 +186,20 @@ impl HistoryStore {
             .map(|value| decode_cursor(value, target_id, epoch))
             .transpose()?
             .map(|cursor| cursor.after_timestamp_ms);
+        if let Some(after) = after {
+            // Rewrite epochs stay stable during ordinary retention pruning.
+            // Validate the cursor's anchor against all retained points (not
+            // just the requested window), so expired positions require resync
+            // without invalidating newer cursors for the same application.
+            anyhow::ensure!(
+                self.points.get(target_id).is_some_and(|points| {
+                    points
+                        .binary_search_by_key(&after, |point| point.timestamp_ms)
+                        .is_ok()
+                }),
+                "history cursor expired; restart pagination without a cursor"
+            );
+        }
         let limit = limit.clamp(1, 10_000);
         let window: Vec<_> = self
             .points
