@@ -25,7 +25,7 @@ serde_json = "1"
 # Never vendor or revision-pin these crates; test changes across all consumers.
 shelllist-daemon-core = { path = "../daemon-framework/crates/shelllist-daemon-core" }
 shelllist-daemon-tokio = { path = "../daemon-framework/crates/shelllist-daemon-tokio" }
-shelllist-hyprland = { path = "vendor/shelllist-hyprland" }
+shelllist-hyprland = { path = "../daemon-framework/crates/shelllist-hyprland" }
 tokio = { version = "1", features = ["io-std", "io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

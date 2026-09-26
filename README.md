@@ -8,7 +8,7 @@ cargo test --locked
 python3 ../daemon-framework/tools/local-build.py build .
 ```
 
-Keep `daemon-framework` beside this checkout. All five daemons use that same current framework, including tracked uncommitted edits; do not vendor or revision-pin it. `local-build.py` snapshots the local graph once for Nix builds/checks without writing deployment pins. Cargo uses the sibling directly. Add new files to Git first. Only the Hyprland library remains vendored (see `vendor/README.md`). Registry dependencies and nixpkgs remain locked. Without Nix, install stable Rust plus `sh`, `sleep`, and `dbus-daemon`, then use `cargo test --locked`. Runtime launching needs UWSM or a user systemd manager plus the configured launch helpers.
+Keep `daemon-framework` beside this checkout. All five daemons use that same current framework, including tracked uncommitted edits; do not vendor or revision-pin it. `local-build.py` snapshots the local graph once for Nix builds/checks without writing deployment pins. Cargo uses the sibling directly. Add new files to Git first. Hyprland IPC comes from the framework's `shelllist-hyprland` crate; no vendored copy or separate Hyprland checkout is needed. Registry dependencies and nixpkgs remain locked. Without Nix, install stable Rust plus `sh`, `sleep`, and `dbus-daemon`, then use `cargo test --locked`. Runtime launching needs UWSM or a user systemd manager plus the configured launch helpers.
 
 `app-daemon daemon` exports `org.laufan.AppDaemon`; `app-daemon client` bridges JSONL requests to the session service using `app-api` v1. Resource collection is isolated behind an injectable Linux provider so procfs, cgroup, and energy edge cases can be tested without relying on the host.
 
