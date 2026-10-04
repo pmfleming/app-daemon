@@ -1,5 +1,5 @@
 use crate::model::OperationResult;
-use shelllist_daemon_core::{OperationLimits, OwnedOperations, RecentResults};
+use shelllist_daemon_core::{OperationLimits, OwnedOperation, OwnedOperations, RecentResults};
 use std::time::Duration;
 use tokio::task::AbortHandle;
 
@@ -71,24 +71,13 @@ impl OperationRegistry {
 
     pub fn cancel(&mut self, id: &str, owner: Option<&str>) -> Option<OperationResult> {
         let active = self.active.claim_owned(id, owner)?;
-        active.value.abort.abort();
-        let mut result = active.value.result;
-        result.status = "cancelled".into();
-        result.message = "Operation cancelled".into();
-        self.recent
-            .record(result.id.clone(), active.owner, result.clone());
-        Some(result)
+        Some(record_cancelled(&mut self.recent, active))
     }
 
     pub fn cancel_all(&mut self) -> Vec<OperationResult> {
-        let active = self
-            .active
-            .iter()
-            .map(|(id, active)| (id.clone(), active.owner.clone()))
-            .collect::<Vec<_>>();
-        active
-            .into_iter()
-            .filter_map(|(id, owner)| self.cancel(&id, owner.as_deref()))
+        self.active
+            .drain()
+            .map(|active| record_cancelled(&mut self.recent, active))
             .collect()
     }
 
@@ -100,9 +89,23 @@ impl OperationRegistry {
     }
 }
 
+fn record_cancelled(
+    recent: &mut RecentResults<OperationResult>,
+    active: OwnedOperation<OperationTask>,
+) -> OperationResult {
+    active.value.abort.abort();
+    let mut result = active.value.result;
+    result.status = "cancelled".into();
+    result.message = "Operation cancelled".into();
+    recent.record(result.id.clone(), active.owner, result.clone());
+    result
+}
+
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{
+        ActiveOperation, MAX_ACTIVE_PER_OWNER, OperationRegistry, OperationResult, RETENTION,
+    };
     use crate::service::{ApplicationAction, ExecuteParams, action::operation_result};
     fn result(id: usize, status: &str) -> OperationResult {
         operation_result(

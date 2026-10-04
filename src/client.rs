@@ -2,8 +2,7 @@ use anyhow::Result;
 use serde_json::Value;
 use shelllist_daemon_core::DaemonEndpoint;
 use shelllist_daemon_tokio::{
-    CallFailure, CancelMode, CorrelationPolicy, JsonlClientConfig, TrackedId, TrackedKind,
-    run_jsonl_client,
+    CallFailure, CancelMode, CorrelationPolicy, JsonlClientConfig, run_jsonl_client,
 };
 
 use crate::{
@@ -18,22 +17,16 @@ const ENDPOINT: DaemonEndpoint =
 struct AppCorrelation;
 
 impl CorrelationPolicy for AppCorrelation {
-    fn response_id(&self, response: &Value) -> Option<TrackedId> {
-        tracked(
-            response.pointer("/data/operation/id").filter(|_| {
+    fn operation_id<'a>(&self, response: &'a Value) -> Option<&'a str> {
+        response
+            .pointer("/data/operation/id")?
+            .as_str()
+            .filter(|_| {
                 response
                     .pointer("/data/operation/status")
                     .and_then(Value::as_str)
                     == Some("accepted")
-            }),
-            TrackedKind::Operation,
-        )
-        .or_else(|| {
-            tracked(
-                response.pointer("/data/subscription/id"),
-                TrackedKind::Subscription,
-            )
-        })
+            })
     }
 
     fn event_id(&self, stream: &str, event: &Value) -> Option<String> {
@@ -55,13 +48,6 @@ impl CorrelationPolicy for AppCorrelation {
                 Some("completed" | "failed" | "cancelled")
             )
     }
-}
-
-fn tracked(value: Option<&Value>, kind: TrackedKind) -> Option<TrackedId> {
-    value.and_then(Value::as_str).map(|id| TrackedId {
-        id: id.to_owned(),
-        kind,
-    })
 }
 
 fn call_failure(_method: &str, _error: &anyhow::Error) -> CallFailure {
@@ -128,6 +114,10 @@ mod tests {
             .response_id(&json!({ "data": { "subscription": { "id": "sub-1" } } }))
             .context("subscription correlation")?;
         assert_eq!(subscription.kind, TrackedKind::Subscription);
+        for status in ["running", "completed", "failed", "cancelled"] {
+            let response = json!({"data": {"operation": {"id": "op", "status": status}}});
+            assert!(policy.response_id(&response).is_none(), "{status}");
+        }
         Ok(())
     }
 }
