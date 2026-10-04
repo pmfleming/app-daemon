@@ -8,11 +8,6 @@ const MAX_ACTIVE_PER_OWNER: usize = 32;
 const MAX_RECENT: usize = 256;
 const RETENTION: Duration = Duration::from_secs(15 * 60);
 
-pub(super) struct ActiveOperation {
-    pub abort: AbortHandle,
-    pub result: OperationResult,
-    pub owner: Option<String>,
-}
 struct OperationTask {
     abort: AbortHandle,
     result: OperationResult,
@@ -38,17 +33,18 @@ impl OperationRegistry {
         self.active.admit(owner).map_err(Into::into)
     }
 
-    pub fn insert(&mut self, id: String, active: ActiveOperation) -> anyhow::Result<()> {
-        let abort = active.abort.clone();
+    pub fn insert(
+        &mut self,
+        owner: Option<String>,
+        abort: AbortHandle,
+        result: OperationResult,
+    ) -> anyhow::Result<()> {
+        let task = OperationTask {
+            abort: abort.clone(),
+            result,
+        };
         self.active
-            .insert(
-                id,
-                active.owner,
-                OperationTask {
-                    abort: active.abort,
-                    result: active.result,
-                },
-            )
+            .insert(task.result.id.clone(), owner, task)
             .inspect_err(|_| abort.abort())
             .map_err(Into::into)
     }
@@ -103,9 +99,7 @@ fn record_cancelled(
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        ActiveOperation, MAX_ACTIVE_PER_OWNER, OperationRegistry, OperationResult, RETENTION,
-    };
+    use super::{MAX_ACTIVE_PER_OWNER, OperationRegistry, OperationResult, RETENTION};
     use crate::service::{ApplicationAction, ExecuteParams, action::operation_result};
     fn result(id: usize, status: &str) -> OperationResult {
         operation_result(
@@ -129,14 +123,7 @@ mod tests {
         for id in 0..MAX_ACTIVE_PER_OWNER {
             let task = tokio::spawn(std::future::pending::<()>());
             registry
-                .insert(
-                    format!("operation-{id}"),
-                    ActiveOperation {
-                        abort: task.abort_handle(),
-                        result: result(id, "accepted"),
-                        owner: None,
-                    },
-                )
+                .insert(None, task.abort_handle(), result(id, "accepted"))
                 .unwrap();
         }
         assert!(registry.admit(None).is_err());

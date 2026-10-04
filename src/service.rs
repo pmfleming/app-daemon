@@ -36,7 +36,7 @@ mod identity;
 mod operations;
 pub(crate) mod query;
 mod watcher;
-use operations::{ActiveOperation, OperationRegistry};
+use operations::OperationRegistry;
 
 pub use action::{ApplicationAction, ExecuteParams};
 use action::{execute_action, operation_result};
@@ -458,14 +458,7 @@ impl ApplicationService {
                 let _ = service.operation_changes.send(completed);
             }
         });
-        operations.insert(
-            accepted.id.clone(),
-            ActiveOperation {
-                abort: task.abort_handle(),
-                result: accepted.clone(),
-                owner,
-            },
-        )?;
+        operations.insert(owner, task.abort_handle(), accepted.clone())?;
         let _ = start_sender.send(());
         Ok(accepted)
     }
