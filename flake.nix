@@ -10,7 +10,11 @@
   };
 
   outputs =
-    { self, nixpkgs, daemonFramework }:
+    {
+      self,
+      nixpkgs,
+      daemonFramework,
+    }:
     let
       systems = [ "x86_64-linux" ];
       forAllSystems = f: nixpkgs.lib.genAttrs systems (system: f system nixpkgs.legacyPackages.${system});
@@ -19,16 +23,30 @@
       packages = forAllSystems (
         system: pkgs:
         let
-          appDaemon = pkgs.rustPlatform.buildRustPackage {
+          appDaemon = daemonFramework.lib.buildRustPackage pkgs {
             pname = "app-daemon";
             version = "0.1.0";
-            src = ./.;
+            src = pkgs.lib.fileset.toSource {
+              root = ./.;
+              fileset = pkgs.lib.fileset.unions [
+                ./Cargo.toml
+                ./Cargo.lock
+                ./src
+                ./tests
+                ./test_support
+                ./benches
+              ];
+            };
             postUnpack = ''
-              cp -R --no-preserve=mode ${daemonFramework} "$(dirname "$sourceRoot")/daemon-framework"
+              cp -R --no-preserve=mode ${daemonFramework.lib.daemonSource pkgs} "$(dirname "$sourceRoot")/daemon-framework"
             '';
             cargoLock.lockFile = ./Cargo.lock;
             nativeBuildInputs = [ pkgs.makeWrapper ];
-            nativeCheckInputs = [ pkgs.bash pkgs.coreutils pkgs.dbus ];
+            nativeCheckInputs = [
+              pkgs.bash
+              pkgs.coreutils
+              pkgs.dbus
+            ];
             strictDeps = true;
             postInstall = ''
               install -Dm644 ${./packaging/systemd/app-daemon.service} $out/share/systemd/user/app-daemon.service
