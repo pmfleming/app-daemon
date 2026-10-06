@@ -449,10 +449,11 @@ impl ApplicationService {
             }
             let lock = service.launch_lock(&params.target_id);
             let _launch = lock.lock().await;
-            let (status, message, launch) = match execute_action(&catalog, &params).await {
-                Ok(outcome) => ("completed", outcome.message, outcome.launch),
-                Err(error) => ("failed", error.to_string(), None),
-            };
+            let (status, message, launch) =
+                match execute_action(&catalog, &params, &service, &operation_id).await {
+                    Ok(outcome) => ("completed", outcome.message, outcome.launch),
+                    Err(error) => ("failed", error.to_string(), None),
+                };
             let completed = operation_result(operation_id, &params, status, message, launch);
             if service.operations.lock().await.finish(completed.clone()) {
                 let _ = service.operation_changes.send(completed);

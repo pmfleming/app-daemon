@@ -93,14 +93,50 @@ impl ActionOutcome {
     }
 }
 
+struct LaunchProgress<'a> {
+    service: &'a super::ApplicationService,
+    operation_id: &'a str,
+}
+
+impl LaunchProgress<'_> {
+    async fn handed_off(&self, params: &ExecuteParams, receipt: &LaunchReceipt) {
+        let progress = operation_result(
+            self.operation_id.into(),
+            params,
+            "running",
+            "Launch handed off; waiting for window placement".into(),
+            Some(receipt.clone()),
+        );
+        // Owned status reads retain the receipt if a subscriber misses the event.
+        if self
+            .service
+            .operations
+            .lock()
+            .await
+            .running(progress.clone())
+        {
+            let _ = self.service.operation_changes.send(progress);
+        }
+    }
+}
+
 pub(super) async fn execute_action(
     catalog: &Catalog,
     params: &ExecuteParams,
+    service: &super::ApplicationService,
+    operation_id: &str,
 ) -> anyhow::Result<ActionOutcome> {
     // The caller holds the application's launch lock. Never use a cached window
     // baseline: a preceding launch or compositor event may not have reconciled yet.
     let windows = Snapshot::load().await;
-    params.action.execute(catalog, &windows, params).await
+    let progress = LaunchProgress {
+        service,
+        operation_id,
+    };
+    params
+        .action
+        .execute(catalog, &windows, params, &progress)
+        .await
 }
 
 impl ApplicationAction {
@@ -109,20 +145,21 @@ impl ApplicationAction {
         catalog: &Catalog,
         windows: &Snapshot,
         params: &ExecuteParams,
+        progress: &LaunchProgress<'_>,
     ) -> anyhow::Result<ActionOutcome> {
         let target_id = &params.target_id;
         match self {
-            Self::Activate => activate(catalog, windows, params).await,
-            Self::Launch => launch_on_workspace(catalog, windows, params).await,
+            Self::Activate => activate(catalog, windows, params, progress).await,
+            Self::Launch => launch_on_workspace(catalog, windows, params, progress).await,
             Self::FocusWindow => hyprland::focus(target_address(catalog, windows, params)?)
                 .await
                 .map(|()| ActionOutcome::new(catalog, target_id, "Focused", None)),
             Self::Close => close_application(catalog, windows, target_id)
                 .await
-                .map(|()| ActionOutcome::new(catalog, target_id, "Closed", None)),
+                .map(|()| ActionOutcome::new(catalog, target_id, "Close requested for", None)),
             Self::CloseWindow => hyprland::close(target_address(catalog, windows, params)?)
                 .await
-                .map(|()| ActionOutcome::new(catalog, target_id, "Closed", None)),
+                .map(|()| ActionOutcome::new(catalog, target_id, "Close requested for", None)),
             Self::MoveToWorkspace => move_to_workspace(catalog, windows, params)
                 .await
                 .map(|()| ActionOutcome::new(catalog, target_id, "Moved", None)),
@@ -148,6 +185,7 @@ async fn activate(
     catalog: &Catalog,
     windows: &Snapshot,
     params: &ExecuteParams,
+    progress: &LaunchProgress<'_>,
 ) -> anyhow::Result<ActionOutcome> {
     let target_id = &params.target_id;
     if let Some(window) = target_window(catalog, windows, target_id) {
@@ -155,6 +193,7 @@ async fn activate(
         return Ok(ActionOutcome::new(catalog, target_id, "Focused", None));
     }
     let launch = launch(catalog, target_id).await?;
+    progress.handed_off(params, &launch).await;
     let placed = place_launched_window(catalog, windows, params, &launch, true).await?;
     let verb = if placed {
         "Launched and focused"
@@ -168,8 +207,10 @@ async fn launch_on_workspace(
     catalog: &Catalog,
     windows: &Snapshot,
     params: &ExecuteParams,
+    progress: &LaunchProgress<'_>,
 ) -> anyhow::Result<ActionOutcome> {
     let launch = launch(catalog, &params.target_id).await?;
+    progress.handed_off(params, &launch).await;
     let placed = if params.workspace_id.is_some() {
         place_launched_window(catalog, windows, params, &launch, false).await?
     } else {
