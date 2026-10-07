@@ -62,6 +62,7 @@ pub(crate) fn run(iterations: usize) -> anyhow::Result<Vec<Measurement>> {
                 &settings,
                 &params,
                 grouped.clone(),
+                0,
             ));
         }));
     }

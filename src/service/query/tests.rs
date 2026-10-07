@@ -40,6 +40,7 @@ fn ranks_prefix_acronym_and_metadata_matches() -> anyhow::Result<()> {
                 limit: 100,
             },
             Default::default(),
+            0,
         )
     };
 
@@ -79,6 +80,7 @@ fn ranks_prefix_acronym_and_metadata_matches() -> anyhow::Result<()> {
             limit: 100,
         },
         Default::default(),
+        0,
     );
     assert_eq!(code.applications.len(), 1);
     assert_eq!(code.applications[0].identity.name, "Google Contacts");
@@ -178,7 +180,10 @@ fn launch_only_entries_remain_shortcuts_without_claiming_windows() -> anyhow::Re
         focus_rank: 0,
         mapped: true,
     };
-    assert_eq!(resolve_target(&catalog, &window), "window-group:browser");
+    assert_eq!(
+        resolve_target(&catalog, &window, &Default::default()),
+        "window-group:browser"
+    );
     let windows = Snapshot {
         available: true,
         clients: vec![window],
@@ -195,7 +200,8 @@ fn launch_only_entries_remain_shortcuts_without_claiming_windows() -> anyhow::Re
             generation: 1,
             limit: 10,
         },
-        group_windows(&catalog, &windows),
+        group_windows(&catalog, &windows, &Default::default()),
+        0,
     );
     let shortcut = result
         .applications

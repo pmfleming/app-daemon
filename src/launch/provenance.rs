@@ -2,7 +2,10 @@
 use crate::process::{
     descendants_where, process_cgroup, process_children, process_stat_fields, read_processes,
 };
-use std::{collections::HashMap, fs};
+use std::{
+    collections::{HashMap, HashSet},
+    fs,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Process {
@@ -13,6 +16,10 @@ struct Process {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct Provenance {
     identities: HashMap<u32, u64>,
+    // Keep original anchors separate from observed descendants. A reparented
+    // child must never become a new authoritative launch root merely by outliving
+    // its parent (it may have entered another application's unit).
+    anchors: HashMap<u32, u64>,
 }
 
 impl Provenance {
@@ -40,12 +47,27 @@ impl Provenance {
                 self.identities.insert(pid, start);
             }
         }
+        for (pid, start) in other.anchors {
+            if self.identities.get(&pid) == Some(&start) {
+                self.anchors.insert(pid, start);
+            }
+        }
     }
 
     pub(super) fn remember(&mut self, pid: u32) {
         if let Some(process) = read_process(pid) {
             self.identities.insert(pid, process.start);
+            self.anchors.insert(pid, process.start);
         }
+    }
+
+    pub(super) fn roots(&self) -> Vec<crate::ownership::Identity> {
+        self.anchors
+            .iter()
+            .filter_map(|(&pid, &start)| {
+                (read_process(pid)?.start == start).then_some((pid, start))
+            })
+            .collect()
     }
 
     pub(super) fn owns(&self, pid: u32) -> bool {
@@ -73,6 +95,18 @@ impl Provenance {
                 .get(pid)
                 .is_some_and(|process| process.start == *start)
         });
+        self.anchors
+            .retain(|pid, start| self.identities.get(pid) == Some(start));
+        let root_set = roots.iter().copied().collect::<HashSet<_>>();
+        for &pid in roots {
+            if let Some(process) = processes.get(&pid)
+                && !self.identities.contains_key(&pid)
+                && !self.identities.contains_key(&process.parent)
+                && !root_set.contains(&process.parent)
+            {
+                self.anchors.insert(pid, process.start);
+            }
+        }
         // Build only valid ancestry edges, then visit each descendant once.
         let children = process_children(processes.iter().filter_map(|(&pid, process)| {
             let parent = processes.get(&process.parent)?;
@@ -174,6 +208,7 @@ mod tests {
         .collect::<HashMap<_, _>>();
         owner.observe_processes(&processes, &[10]);
         assert_eq!(owner.identities.len(), 3);
+        assert_eq!(owner.anchors, HashMap::from([(10, 100)]));
         assert!(
             !owner.identities.contains_key(&21),
             "a child cannot predate its parent"
@@ -183,6 +218,10 @@ mod tests {
         processes.get_mut(&11).unwrap().parent = 1;
         owner.observe_processes(&processes, &[]);
         assert_eq!(owner.identities.len(), 2);
+        assert!(
+            owner.anchors.is_empty(),
+            "reparented descendants are not new launch roots"
+        );
         assert!(!owner.identities.contains_key(&20));
         // The same numeric PIDs are not the same processes.
         processes.get_mut(&11).unwrap().start = 200;

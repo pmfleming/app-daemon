@@ -67,14 +67,14 @@ fn windowless_apps_are_discovered_published_and_added_to_history() -> anyhow::Re
         provider: provider.clone(),
         ..Default::default()
     };
-    sampler.sample_for_applications(&HashMap::new(), &catalog);
+    sampler.sample_for_applications(&HashMap::new(), &catalog, &Default::default());
     sampler.previous_sample = Some(Instant::now() - std::time::Duration::from_secs(2));
     {
         let mut state = provider.state.lock().unwrap();
         state.system_ticks += 100;
         state.processes.get_mut(&42).unwrap().total_ticks += 20;
     }
-    let snapshot = sampler.sample_for_applications(&HashMap::new(), &catalog);
+    let snapshot = sampler.sample_for_applications(&HashMap::new(), &catalog, &Default::default());
     assert_eq!(
         snapshot.target_roots.len(),
         1,
@@ -95,6 +95,7 @@ fn windowless_apps_are_discovered_published_and_added_to_history() -> anyhow::Re
             limit: 100,
         },
         HashMap::new(),
+        0,
     );
     let app = result
         .applications
@@ -134,9 +135,9 @@ fn ownership_follows_window_reassignment_and_survives_parent_exit_but_not_pid_re
         ..Default::default()
     };
     let windows = HashMap::from([("org.example.App.desktop".into(), vec![42])]);
-    sampler.sample_for_applications(&windows, &catalog);
+    sampler.sample_for_applications(&windows, &catalog, &Default::default());
     let windows = HashMap::from([("org.example.Other.desktop".into(), vec![42])]);
-    let reassigned = sampler.sample_for_applications(&windows, &catalog);
+    let reassigned = sampler.sample_for_applications(&windows, &catalog, &Default::default());
     assert_eq!(reassigned.target_roots(), &windows);
     provider
         .state
@@ -144,7 +145,7 @@ fn ownership_follows_window_reassignment_and_survives_parent_exit_but_not_pid_re
         .unwrap()
         .processes
         .insert(43, process(42, 101));
-    sampler.sample_for_applications(&windows, &catalog);
+    sampler.sample_for_applications(&windows, &catalog, &Default::default());
     provider.state.lock().unwrap().processes.remove(&42);
     provider
         .state
@@ -154,7 +155,8 @@ fn ownership_follows_window_reassignment_and_survives_parent_exit_but_not_pid_re
         .get_mut(&43)
         .unwrap()
         .parent_pid = 1;
-    let background = sampler.sample_for_applications(&HashMap::new(), &catalog);
+    let background =
+        sampler.sample_for_applications(&HashMap::new(), &catalog, &Default::default());
     assert_eq!(
         background
             .usage_for_application("org.example.Other.desktop", [])
@@ -170,7 +172,7 @@ fn ownership_follows_window_reassignment_and_survives_parent_exit_but_not_pid_re
         .get_mut(&43)
         .unwrap()
         .start_ticks = 999;
-    let reused = sampler.sample_for_applications(&HashMap::new(), &catalog);
+    let reused = sampler.sample_for_applications(&HashMap::new(), &catalog, &Default::default());
     assert!(reused.target_roots().is_empty());
     assert_ne!(background.runtime_revision(), reused.runtime_revision());
     Ok(())
@@ -194,7 +196,7 @@ fn unrelated_launcher_groups_are_not_borrowed_and_stable_dbus_units_are_discover
         ..Default::default()
     };
     let windows = HashMap::from([("org.example.App.desktop".into(), vec![42])]);
-    let snapshot = sampler.sample_for_applications(&windows, &catalog);
+    let snapshot = sampler.sample_for_applications(&windows, &catalog, &Default::default());
     let usage = snapshot.usage_for_application("org.example.App.desktop", []);
     assert_eq!(
         usage.compute.process_count, 1,
@@ -212,7 +214,7 @@ fn unrelated_launcher_groups_are_not_borrowed_and_stable_dbus_units_are_discover
         .unwrap()
         .cgroups
         .insert(43, "/org.example.Bus.service/worker".into());
-    let snapshot = sampler.sample_for_applications(&HashMap::new(), &catalog);
+    let snapshot = sampler.sample_for_applications(&HashMap::new(), &catalog, &Default::default());
     assert_eq!(
         snapshot
             .usage_for_application("org.example.Bus.desktop", [])
@@ -250,7 +252,7 @@ fn separately_owned_child_applications_are_not_charged_to_the_parent() -> anyhow
         provider,
         ..Default::default()
     };
-    let snapshot = sampler.sample_for_applications(&HashMap::new(), &catalog);
+    let snapshot = sampler.sample_for_applications(&HashMap::new(), &catalog, &Default::default());
     for (id, count) in [
         ("org.example.App.desktop", 3),
         ("org.example.Other.desktop", 2),
@@ -259,5 +261,117 @@ fn separately_owned_child_applications_are_not_charged_to_the_parent() -> anyhow
         assert_eq!(usage.compute.process_count, count, "{id}");
         assert!(!usage.measurement.resources_shared);
     }
+    Ok(())
+}
+
+#[test]
+fn verified_migrated_ownership_unifies_resources_without_borrowing_whole_host_scopes()
+-> anyhow::Result<()> {
+    let (_dir, catalog) = catalog()?;
+    let provider = Arc::new(TestProvider::default());
+    {
+        let mut state = provider.state.lock().unwrap();
+        state.processes = HashMap::from([
+            (42, process(1, 100)),
+            (43, process(42, 101)),
+            (44, process(42, 102)),
+            (50, process(1, 200)),
+            (51, process(50, 201)),
+            (99, process(1, 999)),
+        ]);
+        state.cgroups = HashMap::from([
+            (42, "/app-org.example.Other-42.scope".into()),
+            (43, "/app-org.example.App@123.service".into()),
+            (44, "/app-org.example.Other-42.scope".into()),
+            (50, "/app-org.example.Other-50.scope".into()),
+            (51, "/app-org.example.Other-50.scope".into()),
+            // Another process sharing the migrated scope is not a descendant.
+            (99, "/app-org.example.Other-42.scope".into()),
+        ]);
+    }
+    let mut ownership = crate::ownership::Ownership::default();
+    ownership.remember("org.example.App.desktop", [(42, 100)]);
+    let reconcile = |ownership: &mut crate::ownership::Ownership| {
+        let state = provider.state.lock().unwrap();
+        ownership.reconcile(
+            &catalog,
+            &state
+                .processes
+                .iter()
+                .map(|(&pid, stat)| {
+                    (
+                        pid,
+                        crate::ownership::Process {
+                            parent: stat.parent_pid,
+                            start: stat.start_ticks,
+                            cgroup: state.cgroups.get(&pid).cloned(),
+                        },
+                    )
+                })
+                .collect(),
+        );
+    };
+    reconcile(&mut ownership);
+    let mut sampler = ResourceSampler {
+        provider: provider.clone(),
+        ..Default::default()
+    };
+    // Both launchers can exist in the catalog. A previous generic attribution
+    // must disappear, not survive in KnownRoots and charge the same PID twice.
+    sampler.sample_for_applications(&HashMap::new(), &catalog, &Default::default());
+    let snapshot =
+        sampler.sample_for_applications(&HashMap::new(), &catalog, &ownership.snapshot());
+    let app = snapshot.usage_for_application("org.example.App.desktop", []);
+    let host = snapshot.usage_for_application("org.example.Other.desktop", []);
+    assert_eq!(app.compute.process_count, 3);
+    assert_eq!(host.compute.process_count, 3);
+    assert_eq!(app.measurement.attribution_method, "process-tree");
+    assert!(!app.measurement.resources_shared);
+    assert!(!host.measurement.resources_shared);
+    // Window closure does not forget the app, and a late audio helper joins it.
+    {
+        let mut state = provider.state.lock().unwrap();
+        state.processes.insert(45, process(42, 103));
+        state
+            .cgroups
+            .insert(45, "/app-org.example.Other-42.scope".into());
+    }
+    reconcile(&mut ownership);
+    let snapshot =
+        sampler.sample_for_applications(&HashMap::new(), &catalog, &ownership.snapshot());
+    assert_eq!(
+        snapshot
+            .usage_for_application("org.example.App.desktop", [])
+            .compute
+            .process_count,
+        4
+    );
+    assert_eq!(
+        snapshot
+            .usage_for_application("org.example.Other.desktop", [])
+            .compute
+            .process_count,
+        3
+    );
+    // Ambiguous verified roots and same-scope helpers are not charged to either
+    // application. The early helper's independent App service still identifies it.
+    ownership.remember("org.example.Other.desktop", [(42, 100)]);
+    reconcile(&mut ownership);
+    let snapshot =
+        sampler.sample_for_applications(&HashMap::new(), &catalog, &ownership.snapshot());
+    assert_eq!(
+        snapshot
+            .usage_for_application("org.example.App.desktop", [])
+            .compute
+            .process_count,
+        1
+    );
+    assert_eq!(
+        snapshot
+            .usage_for_application("org.example.Other.desktop", [])
+            .compute
+            .process_count,
+        3
+    );
     Ok(())
 }

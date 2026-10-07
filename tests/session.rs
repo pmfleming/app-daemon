@@ -1,5 +1,7 @@
 #[path = "session/extra.rs"]
 mod extra;
+#[path = "session/ownership.rs"]
+mod ownership;
 #[path = "session/placement.rs"]
 mod placement;
 mod support;

@@ -9,6 +9,7 @@ pub mod hyprland;
 pub mod launch;
 mod metrics;
 pub mod model;
+mod ownership;
 mod platform;
 mod process;
 pub mod protocol;

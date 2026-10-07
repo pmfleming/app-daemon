@@ -13,7 +13,8 @@ use crate::{
     model::{OperationResult, PlacementStatus, WorkspacePlacement},
 };
 
-use super::identity::{resolve_target, resolve_target_with_cgroup, target_window};
+use super::identity::{resolve_target, target_window};
+use crate::ownership::Snapshot as OwnershipSnapshot;
 
 #[cfg(test)]
 mod tests;
@@ -109,6 +110,9 @@ struct LaunchProgress<'a> {
 
 impl LaunchProgress<'_> {
     async fn handed_off(&self, params: &ExecuteParams, receipt: &LaunchReceipt) {
+        self.service
+            .remember_launch(&params.target_id, receipt)
+            .await;
         let progress = operation_result(
             self.operation_id.into(),
             params,
@@ -137,6 +141,8 @@ pub(super) async fn execute_action(
 ) -> anyhow::Result<ActionOutcome> {
     // The caller holds the application's launch lock. Never use a cached window
     // baseline: a preceding launch or compositor event may not have reconciled yet.
+    service.refresh_ownership(false).await;
+    let ownership = service.ownership_snapshot();
     let windows = Snapshot::load().await;
     let progress = LaunchProgress {
         service,
@@ -149,21 +155,23 @@ pub(super) async fn execute_action(
             launch_on_workspace(catalog, &windows, params, &progress, false).await
         }
         ApplicationAction::FocusWindow => {
-            hyprland::focus(target_address(catalog, &windows, params)?)
+            hyprland::focus(target_address(catalog, &windows, params, &ownership)?)
                 .await
                 .map(|()| ActionOutcome::new(catalog, target_id, "Focused"))
         }
-        ApplicationAction::Close => close_application(catalog, &windows, target_id)
+        ApplicationAction::Close => close_application(catalog, &windows, target_id, &ownership)
             .await
             .map(|()| ActionOutcome::new(catalog, target_id, "Close requested for")),
         ApplicationAction::CloseWindow => {
-            hyprland::close(target_address(catalog, &windows, params)?)
+            hyprland::close(target_address(catalog, &windows, params, &ownership)?)
                 .await
                 .map(|()| ActionOutcome::new(catalog, target_id, "Close requested for"))
         }
-        ApplicationAction::MoveToWorkspace => move_to_workspace(catalog, &windows, params)
-            .await
-            .map(|()| ActionOutcome::new(catalog, target_id, "Moved")),
+        ApplicationAction::MoveToWorkspace => {
+            move_to_workspace(catalog, &windows, params, &ownership)
+                .await
+                .map(|()| ActionOutcome::new(catalog, target_id, "Moved"))
+        }
     }
 }
 
@@ -174,7 +182,12 @@ async fn activate(
     progress: &LaunchProgress<'_>,
 ) -> anyhow::Result<ActionOutcome> {
     let target_id = &params.target_id;
-    if let Some(window) = target_window(catalog, windows, target_id) {
+    if let Some(window) = target_window(
+        catalog,
+        windows,
+        target_id,
+        &progress.service.ownership_snapshot(),
+    ) {
         hyprland::focus(&window.address).await?;
         return Ok(ActionOutcome::new(catalog, target_id, "Focused"));
     }
@@ -188,13 +201,14 @@ async fn launch_on_workspace(
     progress: &LaunchProgress<'_>,
     focus: bool,
 ) -> anyhow::Result<ActionOutcome> {
+    let ownership = progress.service.ownership_snapshot();
     let existing = launch::Provenance::for_application(
         catalog,
         &params.target_id,
         windows
             .clients
             .iter()
-            .filter(|window| resolve_target(catalog, window) == params.target_id)
+            .filter(|window| resolve_target(catalog, window, &ownership) == params.target_id)
             .map(|window| window.pid),
     );
     let mut launch = if params.action == ApplicationAction::DesktopAction {
@@ -220,7 +234,15 @@ async fn launch_on_workspace(
     let result = if launch_only || (!focus && launch.placement.is_none()) {
         Ok(true)
     } else {
-        place_launched_window(catalog, windows, params, &mut launch, focus).await
+        place_launched_window(
+            catalog,
+            windows,
+            params,
+            &mut launch,
+            focus,
+            progress.service,
+        )
+        .await
     };
     Ok(ActionOutcome::launched(
         catalog,
@@ -292,6 +314,7 @@ async fn place_launched_window(
     params: &ExecuteParams,
     launch: &mut LaunchReceipt,
     focus: bool,
+    service: &super::ApplicationService,
 ) -> anyhow::Result<bool> {
     if !previous.available {
         return Ok(false);
@@ -301,8 +324,14 @@ async fn place_launched_window(
         .iter()
         .map(|window| window.address.as_str())
         .collect::<Vec<_>>();
-    let Some(window) =
-        wait_for_new_window(catalog, &params.target_id, &previous_addresses, launch).await
+    let Some(window) = wait_for_new_window(
+        catalog,
+        &params.target_id,
+        &previous_addresses,
+        launch,
+        service,
+    )
+    .await
     else {
         return Ok(false);
     };
@@ -322,19 +351,18 @@ async fn wait_for_new_window(
     target_id: &str,
     previous_addresses: &[&str],
     launch: &mut LaunchReceipt,
+    service: &super::ApplicationService,
 ) -> Option<Client> {
     const WINDOW_TIMEOUT: Duration = Duration::from_secs(8);
     let deadline = Instant::now() + WINDOW_TIMEOUT;
     loop {
         launch.observe_processes();
+        service.remember_launch(target_id, launch).await;
+        let ownership = service.ownership_snapshot();
         let windows = Snapshot::load().await;
         if let Some(window) = correlated_window(windows, previous_addresses, |window| {
             launch.owns_process(window.pid)
-                && (resolve_target(catalog, window) == target_id
-                    // Chromium-based applications may adopt a generic Chromium
-                    // scope. Verified launch provenance plus their own window
-                    // identity remains valid even if that helper is installed.
-                    || resolve_target_with_cgroup(catalog, window, None) == target_id)
+                && resolve_target(catalog, window, &ownership) == target_id
         }) {
             return Some(window);
         }
@@ -395,8 +423,9 @@ async fn move_to_workspace(
     catalog: &Catalog,
     windows: &Snapshot,
     params: &ExecuteParams,
+    ownership: &OwnershipSnapshot,
 ) -> anyhow::Result<()> {
-    let address = target_address(catalog, windows, params)?;
+    let address = target_address(catalog, windows, params, ownership)?;
     let workspace = params
         .workspace_id
         .as_deref()
@@ -408,11 +437,12 @@ async fn close_application(
     catalog: &Catalog,
     windows: &Snapshot,
     target_id: &str,
+    ownership: &OwnershipSnapshot,
 ) -> anyhow::Result<()> {
     let windows = windows
         .clients
         .iter()
-        .filter(|window| resolve_target(catalog, window) == target_id)
+        .filter(|window| resolve_target(catalog, window, ownership) == target_id)
         .collect::<Vec<_>>();
     anyhow::ensure!(!windows.is_empty(), "application is no longer running");
     for window in windows {
@@ -425,6 +455,7 @@ fn target_address<'a>(
     catalog: &Catalog,
     windows: &'a Snapshot,
     params: &ExecuteParams,
+    ownership: &OwnershipSnapshot,
 ) -> anyhow::Result<&'a str> {
     let id = params
         .window_id
@@ -434,7 +465,7 @@ fn target_address<'a>(
         .by_window_id(id)
         .context("window is no longer available")?;
     anyhow::ensure!(
-        resolve_target(catalog, window) == params.target_id,
+        resolve_target(catalog, window, ownership) == params.target_id,
         "window no longer belongs to the selected application"
     );
     Ok(&window.address)

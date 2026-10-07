@@ -49,6 +49,10 @@ pub struct LaunchReceipt {
 }
 
 impl LaunchReceipt {
+    pub(crate) fn ownership_roots(&self) -> Vec<crate::ownership::Identity> {
+        self.provenance.roots()
+    }
+
     pub(crate) fn owns_process(&self, pid: u32) -> bool {
         self.provenance.owns(pid)
             || crate::process::process_cgroup(pid).is_some_and(|path| self.owns_cgroup(&path))

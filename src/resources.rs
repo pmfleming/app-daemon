@@ -609,21 +609,23 @@ impl ResourceSampler {
         &mut self,
         active_targets: &HashMap<String, Vec<u32>>,
     ) -> ResourceSnapshot {
-        self.sample_with_catalog(active_targets, None)
+        self.sample_with_catalog(active_targets, None, &crate::ownership::Snapshot::default())
     }
 
     pub(crate) fn sample_for_applications(
         &mut self,
         windows: &HashMap<String, Vec<u32>>,
         catalog: &crate::catalog::Catalog,
+        ownership: &crate::ownership::Snapshot,
     ) -> ResourceSnapshot {
-        self.sample_with_catalog(windows, Some(catalog))
+        self.sample_with_catalog(windows, Some(catalog), ownership)
     }
 
     fn sample_with_catalog(
         &mut self,
         active_targets: &HashMap<String, Vec<u32>>,
         catalog: Option<&crate::catalog::Catalog>,
+        ownership: &crate::ownership::Snapshot,
     ) -> ResourceSnapshot {
         if self.resume_clock.resumed() {
             self.reset_after_resume();
@@ -642,10 +644,13 @@ impl ResourceSampler {
             .filter(|delta| *delta > 0);
         let processes = provider.processes();
         let targets = match catalog {
-            Some(catalog) => {
-                self.known_roots
-                    .discover(provider.as_ref(), active_targets, &processes, catalog)
-            }
+            Some(catalog) => self.known_roots.discover(
+                provider.as_ref(),
+                active_targets,
+                &processes,
+                catalog,
+                ownership,
+            ),
             None => discovery::Targets {
                 roots: active_targets.clone(),
                 owners: HashMap::new(),

@@ -53,12 +53,13 @@ pub(crate) fn page(
     settings: &SettingsStore,
     params: &QueryParams,
     mut grouped: HashMap<String, Vec<&Client>>,
+    ownership_revision: u64,
 ) -> ApplicationPage {
     let revision = combined_revision(
         catalog,
         windows,
         settings.revision,
-        resources.runtime_revision(),
+        resources.runtime_revision() ^ ownership_revision,
     );
     let available = windows.available;
 

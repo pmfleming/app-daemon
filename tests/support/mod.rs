@@ -27,6 +27,7 @@ pub struct Session {
     pub connection: Connection,
     address: String,
     daemon: Child,
+    daemon_command: Command,
     _bus: Child,
     pub compositor: MockCompositor,
 }
@@ -160,6 +161,7 @@ impl Session {
             connection,
             address,
             daemon,
+            daemon_command: command,
             _bus: bus,
             compositor,
         };
@@ -174,6 +176,22 @@ impl Session {
         let response = call(&session.proxy().await?, "applications.refresh", json!({})).await?;
         anyhow::ensure!(response["ok"] == true, "refresh failed: {response}");
         Ok(session)
+    }
+
+    pub async fn restart(&mut self) -> Result<()> {
+        self.shutdown().await?;
+        self.daemon = self.daemon_command.spawn()?;
+        let bus = zbus::fdo::DBusProxy::new(&self.connection).await?;
+        timeout(DEADLINE, async {
+            while !bus.name_has_owner(BUS_NAME.try_into()?).await? {
+                sleep(Duration::from_millis(10)).await;
+            }
+            Result::<()>::Ok(())
+        })
+        .await??;
+        let response = call(&self.proxy().await?, "applications.refresh", json!({})).await?;
+        anyhow::ensure!(response["ok"] == true, "refresh failed: {response}");
+        Ok(())
     }
 
     pub async fn proxy(&self) -> Result<Proxy<'_>> {
@@ -417,7 +435,7 @@ pub async fn stopped(pid: Pid) -> Result<()> {
     .await
     .context("fixture child survived cancellation/shutdown")
 }
-fn tool(name: &str) -> Result<PathBuf> {
+pub fn tool(name: &str) -> Result<PathBuf> {
     std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
         .map(|dir| dir.join(name))
         .find(|path| path.is_file())

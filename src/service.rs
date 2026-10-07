@@ -55,6 +55,8 @@ pub struct ApplicationService {
     catalog: RwLock<Arc<Catalog>>,
     windows: RwLock<Arc<Snapshot>>,
     resources: RwLock<ResourceSnapshot>,
+    ownership: Arc<StdMutex<crate::ownership::Ownership>>,
+    ownership_refresh: Arc<Mutex<()>>,
     history: Mutex<HistoryStore>,
     // When both are needed, acquire settings before resources. Tokio's fair
     // RwLocks can deadlock even readers when writers queue between acquisitions.
@@ -89,6 +91,8 @@ impl ApplicationService {
             catalog: RwLock::new(Arc::new(Catalog::default())),
             windows: RwLock::new(Arc::new(Snapshot::default())),
             resources: RwLock::new(ResourceSnapshot::default()),
+            ownership: Arc::default(),
+            ownership_refresh: Arc::default(),
             history: Mutex::new(HistoryStore::load_default()),
             settings: RwLock::new(SettingsStore::load_default()),
             settings_updates: Mutex::new(()),
@@ -170,7 +174,8 @@ impl ApplicationService {
             catalog: self.catalog.read().await.revision,
             windows: self.windows.read().await.revision,
             settings: self.settings.read().await.revision,
-            runtime: self.resources.read().await.runtime_revision(),
+            runtime: self.resources.read().await.runtime_revision()
+                ^ self.ownership_snapshot().revision(),
         }
     }
 
@@ -182,7 +187,7 @@ impl ApplicationService {
             &catalog,
             &windows,
             settings.revision,
-            self.resources.read().await.runtime_revision(),
+            self.resources.read().await.runtime_revision() ^ self.ownership_snapshot().revision(),
         )
     }
 
@@ -224,14 +229,72 @@ impl ApplicationService {
         let _ = self.state_changes.send(self.revisions().await);
     }
 
+    fn ownership_snapshot(&self) -> crate::ownership::Snapshot {
+        self.ownership
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .snapshot()
+    }
+
+    async fn refresh_ownership(&self, recover: bool) {
+        let refresh = Arc::clone(&self.ownership_refresh).lock_owned().await;
+        self.update_ownership(recover, refresh).await;
+    }
+
+    async fn update_ownership(&self, recover: bool, refresh: tokio::sync::OwnedMutexGuard<()>) {
+        let catalog = Arc::clone(&*self.catalog.read().await);
+        let recovered = if recover {
+            crate::ownership::recover(&catalog).await
+        } else {
+            Vec::new()
+        };
+        let ownership = Arc::clone(&self.ownership);
+        let changed = tokio::task::spawn_blocking(move || {
+            // Retain serialization even if the async caller is cancelled while
+            // procfs is being read: an older scan must not erase a newer claim.
+            let _refresh = refresh;
+            let processes = crate::ownership::processes();
+            let mut ownership = ownership
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            for (target, identity) in recovered {
+                ownership.remember(&target, [identity]);
+            }
+            ownership.reconcile(&catalog, &processes)
+        })
+        .await
+        .unwrap_or(false);
+        if changed {
+            self.publish_state().await;
+        }
+    }
+
+    async fn remember_launch(&self, target: &str, receipt: &crate::launch::LaunchReceipt) {
+        let refresh = Arc::clone(&self.ownership_refresh).lock_owned().await;
+        self.ownership
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remember(target, receipt.ownership_roots());
+        self.update_ownership(false, refresh).await;
+    }
+
     pub async fn query(&self, params: QueryParams) -> ApplicationPage {
         self.mark_resource_demand();
         let windows = Arc::clone(&*self.windows.read().await);
         let catalog = Arc::clone(&*self.catalog.read().await);
-        let grouped = group_windows(&catalog, &windows);
+        let ownership = self.ownership_snapshot();
+        let grouped = group_windows(&catalog, &windows, &ownership);
         let settings = self.settings.read().await;
         let resources = self.resources.read().await;
-        page(&catalog, &windows, &resources, &settings, &params, grouped)
+        page(
+            &catalog,
+            &windows,
+            &resources,
+            &settings,
+            &params,
+            grouped,
+            ownership.revision(),
+        )
     }
 
     pub async fn update_settings(
@@ -397,6 +460,7 @@ impl ApplicationService {
                         &windows,
                         settings.revision,
                         self.resources.read().await.runtime_revision()
+                            ^ self.ownership_snapshot().revision()
                     ),
                 "application state changed; refresh and retry"
             );
@@ -590,19 +654,21 @@ async fn until_shutdown(task: impl Future<Output = ()>, mut stop: watch::Receive
 }
 
 async fn sample_resources(service: &ApplicationService, sampler: &mut ResourceSampler) {
+    service.refresh_ownership(true).await;
+    let ownership = service.ownership_snapshot();
     let windows = Arc::clone(&*service.windows.read().await);
     let catalog = Arc::clone(&*service.catalog.read().await);
     let mut roots: HashMap<String, Vec<u32>> = HashMap::new();
     for window in &windows.clients {
         roots
-            .entry(resolve_target(&catalog, window).into_owned())
+            .entry(resolve_target(&catalog, window, &ownership).into_owned())
             .or_default()
             .push(window.pid);
     }
     let started = Instant::now();
     let mut owned_sampler = std::mem::take(sampler);
     let sampled = tokio::task::spawn_blocking(move || {
-        let snapshot = owned_sampler.sample_for_applications(&roots, &catalog);
+        let snapshot = owned_sampler.sample_for_applications(&roots, &catalog, &ownership);
         (owned_sampler, snapshot)
     })
     .await;

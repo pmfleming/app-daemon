@@ -25,8 +25,29 @@ impl KnownRoots {
         windows: &HashMap<String, Vec<u32>>,
         processes: &HashMap<u32, ProcessStat>,
         catalog: &Catalog,
+        ownership: &crate::ownership::Snapshot,
     ) -> Targets {
         let (mut members, mut owners) = scoped_members(provider, processes, catalog);
+        // Verified ownership follows the process, not the name of a migrated
+        // browser scope. Remove its old membership before seeding the new one.
+        for ((pid, start), target) in ownership.entries() {
+            if processes
+                .get(&pid)
+                .is_none_or(|process| process.start_ticks != start)
+            {
+                continue;
+            }
+            if let Some(previous) = owners.remove(&pid)
+                && let Some(pids) = members.get_mut(&previous)
+            {
+                pids.remove(&pid);
+            }
+            let target = target.unwrap_or("ownership-conflict");
+            owners.insert(pid, target.to_owned());
+            if target != "ownership-conflict" {
+                members.entry(target.to_owned()).or_default().insert(pid);
+            }
+        }
         self.restore(&mut members, &owners, windows, processes);
         for (id, pids) in windows {
             members.entry(id.clone()).or_default().extend(
