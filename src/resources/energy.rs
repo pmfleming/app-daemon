@@ -4,10 +4,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-pub(super) trait EnergyProvider {
-    fn rapl_zones(&self) -> HashMap<PathBuf, (u64, u64)>;
-    fn batteries(&self) -> BatterySample;
-}
+use super::provider::{BatterySample, EnergyProvider};
 
 #[derive(Debug, Default)]
 pub(super) struct EnergySampler {
@@ -63,12 +60,6 @@ pub(super) struct EnergySample {
     pub(super) energy_mwh: f64,
     pub(super) battery_full_mwh: f64,
     pub(super) source: String,
-}
-
-#[derive(Debug, Default)]
-pub(super) struct BatterySample {
-    full_mwh: f64,
-    discharge_watts: f64,
 }
 
 pub(super) fn read_rapl_zones() -> HashMap<PathBuf, (u64, u64)> {

@@ -24,11 +24,7 @@ const TCP_INFO_BYTES_ACKED_OFFSET: usize = 120;
 const TCP_INFO_BYTES_RECEIVED_OFFSET: usize = 128;
 const TCP_INFO_COUNTERS_LENGTH: usize = TCP_INFO_BYTES_RECEIVED_OFFSET + size_of::<u64>();
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub(super) struct NetworkCounters {
-    pub received_bytes: u64,
-    pub transmitted_bytes: u64,
-}
+use super::provider::NetworkCounters;
 
 /// Reads cumulative TCP counters for the requested socket inodes through INET_DIAG.
 /// UDP and Unix sockets do not expose equivalent lifetime byte counters, so callers

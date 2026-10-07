@@ -16,3 +16,21 @@ private-field omission, and independent event/recovered results.
 Validation: `cargo test --locked` (60 passed, 3 opt-in systemd tests ignored),
 `cargo clippy --locked --all-targets --all-features -- -D warnings`, formatting,
 and `git diff --check` passed. No runtime allocation benchmark is claimed.
+
+## 2. Separate observation contracts from Linux reads
+
+`resources/provider.rs` owns the provider traits and raw process, cgroup, disk,
+network, GPU, and battery observations. It has no project-module dependencies.
+`resources/system.rs` owns `LinuxResourceProvider` and its implementation; 17
+Linux helpers are now private. Sampling/attribution state remains in the sampler,
+and disk TTL policy lives with the disk cache. Tests consume the contract rather
+than depending on the sampler to re-export backend types. No read behavior, PID
+identity checks, cache invalidation, or resume boundaries changed.
+
+Validation: 60 tests passed (3 ignored), all-target/all-feature Clippy with denied
+warnings, formatting and diff checks passed. Existing cache/PID-reuse, cgroup,
+network, background ownership, resume, and blocked-worker tests all ran.
+RQLens resource-module locality improves 81.25 → 84.25; its fan-in drops 17 → 13.
+The shared contract has leverage 100, locality 96.25 (17 consumers); moving those
+edges does not eliminate them. Whole-project means are locality 98.99 → 98.95 and
+leverage 20.63 → 20.94 across 63 → 64 modules; measurements remain syntax-partial.

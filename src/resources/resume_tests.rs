@@ -1,5 +1,7 @@
 use super::{
-    CgroupCounters, ResourceSampler, network::NetworkCounters, test_provider::TestProvider,
+    ResourceSampler,
+    provider::{CgroupCounters, NetworkCounters},
+    test_provider::TestProvider,
 };
 use std::{collections::HashMap, path::PathBuf, sync::Arc};
 

@@ -1,4 +1,4 @@
-use super::{GpuProcessStat, ProcessUsage, ResourceSampler, ResourceSnapshot};
+use super::{ProcessUsage, ResourceSampler, ResourceSnapshot, provider::GpuProcessStat};
 use std::collections::HashMap;
 
 #[test]

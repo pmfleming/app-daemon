@@ -3,12 +3,7 @@ use std::{
     fs,
 };
 
-#[derive(Debug, Default)]
-pub(super) struct GpuProcessStat {
-    pub(super) engine_nanoseconds: HashMap<String, u64>,
-    pub(super) resident_memory_bytes: u64,
-    pub(super) allocated_memory_bytes: u64,
-}
+use super::provider::GpuProcessStat;
 
 #[derive(Debug, Clone, Default)]
 struct GpuClientStat {

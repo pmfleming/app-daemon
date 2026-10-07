@@ -1,6 +1,7 @@
 use super::{
-    CgroupUsage, DiskFile, DiskFileId, MemoryUsage, ProcessFiles, ProcessIo, ProcessUsage,
-    ResourceSnapshot, parse_process_stat,
+    CgroupUsage, ProcessUsage, ResourceSnapshot,
+    provider::{CgroupIo, DiskFile, DiskFileId, MemoryUsage, ProcessFiles, ProcessIo},
+    system::parse_process_stat,
 };
 use anyhow::Context;
 use std::{
@@ -117,7 +118,7 @@ fn totals_resources_without_double_counting_roots_in_either_attribution_mode() {
         path,
         CgroupUsage {
             cpu_percent: Some(80.0),
-            io: Some(super::CgroupIo {
+            io: Some(CgroupIo {
                 read_bytes: 4096,
                 ..Default::default()
             }),

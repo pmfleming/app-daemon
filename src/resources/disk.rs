@@ -7,7 +7,9 @@ use std::{
     time::Instant,
 };
 
-use super::{APP_DISK_REFRESH_INTERVAL, DiskBreakdown, ResourceProvider};
+use super::provider::{DiskBreakdown, ResourceProvider};
+
+const APP_DISK_REFRESH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(300);
 
 pub(super) const WORKERS: usize = 2;
 

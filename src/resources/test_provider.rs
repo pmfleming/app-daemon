@@ -1,4 +1,4 @@
-use super::{
+use super::provider::{
     BatterySample, CgroupCounters, DiskBreakdown, EnergyProvider, GpuProcessStat, MemoryUsage,
     NetworkCounters, ProcessFiles, ProcessIo, ProcessStat, ResourceProvider,
 };

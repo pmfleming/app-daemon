@@ -1,4 +1,4 @@
-use super::{ProcessStat, ResourceSampler, test_provider::TestProvider};
+use super::{ResourceSampler, provider::ProcessStat, test_provider::TestProvider};
 use crate::{
     catalog::Catalog,
     history::{HistoryStore, now_milliseconds},

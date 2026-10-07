@@ -1,4 +1,8 @@
-use super::{NetworkCounters, ProcessStat, ResourceSampler, test_provider::TestProvider};
+use super::{
+    ResourceSampler,
+    provider::{NetworkCounters, ProcessStat},
+    test_provider::TestProvider,
+};
 use crate::model::ResourceUsage;
 use std::{collections::HashMap, sync::Arc};
 

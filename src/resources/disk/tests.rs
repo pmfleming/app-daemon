@@ -1,6 +1,7 @@
-use super::{AppDiskCache, WORKERS};
+use super::{APP_DISK_REFRESH_INTERVAL, AppDiskCache, WORKERS};
 use crate::resources::{
-    APP_DISK_REFRESH_INTERVAL, DiskBreakdown, ProcessStat, ResourceProvider, ResourceSampler,
+    ResourceSampler,
+    provider::{DiskBreakdown, ProcessStat, ResourceProvider},
     test_provider::TestProvider,
 };
 use std::{

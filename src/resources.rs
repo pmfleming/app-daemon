@@ -1,7 +1,5 @@
 use std::{
     collections::{HashMap, HashSet},
-    fmt::Debug,
-    path::PathBuf,
     sync::Arc,
     time::Instant,
 };
@@ -9,7 +7,7 @@ use std::{
 use crate::{
     metrics::{add_counter, available_label, finite_nonnegative, rate, rounded},
     model::{ComputeUsage, EnergyUsage, NetworkUsage, ResourceUsage, StorageUsage},
-    process::{descendants, process_cgroup, process_children, read_processes},
+    process::{descendants, process_children},
 };
 
 mod discovery;
@@ -17,40 +15,21 @@ mod disk;
 mod energy;
 mod gpu;
 mod network;
+mod provider;
 #[cfg(test)]
 mod resume_tests;
 mod system;
 
 use disk::AppDiskCache;
-use energy::{BatterySample, EnergyProvider, EnergySampler};
-use gpu::{GpuProcessStat, read_gpu_processes};
-use network::{NetworkCounters, read_network_counters};
-use system::parse_process_stat;
-use system::{
-    application_disk_usage, cgroup_members_for_paths, cgroup_paths_for_roots, merge_disk_files,
-    read_cgroup_counters, read_cgroup_members, read_process_file_sets, read_process_io,
-    read_process_memory, read_process_sockets, read_system_cpu, shared_target_pids,
+use energy::EnergySampler;
+use provider::{
+    CgroupCounters, CgroupIo, DiskBreakdown, DiskFile, DiskFileId, GpuProcessStat, MemoryUsage,
+    NetworkCounters, ProcessFiles, ProcessIo, ProcessStat, ResourceProvider,
 };
-
-#[derive(Debug, Clone, Copy)]
-struct ProcessStat {
-    parent_pid: u32,
-    total_ticks: u64,
-    start_ticks: u64,
-    major_faults: u64,
-    thread_count: u64,
-}
-
-#[derive(Debug, Clone, Copy, Default)]
-struct ProcessIo {
-    physical_read_bytes: u64,
-    physical_write_bytes: u64,
-    logical_read_bytes: u64,
-    logical_write_bytes: u64,
-    read_operations: u64,
-    write_operations: u64,
-    cancelled_write_bytes: u64,
-}
+use system::{
+    LinuxResourceProvider, cgroup_members_for_paths, cgroup_paths_for_roots, merge_disk_files,
+    shared_target_pids,
+};
 
 #[derive(Debug, Clone, Copy)]
 struct PreviousProcess {
@@ -61,35 +40,10 @@ struct PreviousProcess {
 }
 
 #[derive(Debug, Clone, Copy, Default)]
-struct CgroupCounters {
-    cpu_usage_usec: Option<u64>,
-    io: Option<CgroupIo>,
-    memory_bytes: Option<u64>,
-}
-
-#[derive(Debug, Clone, Copy, Default)]
-struct CgroupIo {
-    read_bytes: u64,
-    write_bytes: u64,
-    read_operations: u64,
-    write_operations: u64,
-}
-
-#[derive(Debug, Clone, Copy, Default)]
 struct CgroupUsage {
     cpu_percent: Option<f64>,
     io: Option<CgroupIo>,
     memory_bytes: Option<u64>,
-}
-
-#[derive(Debug, Clone, Copy, Default)]
-struct MemoryUsage {
-    rss_bytes: u64,
-    pss_bytes: u64,
-    private_bytes: u64,
-    swap_bytes: u64,
-    rss_available: bool,
-    pss_available: bool,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -108,104 +62,8 @@ struct ProcessUsage {
     storage_available: bool,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-struct DiskFileId {
-    device: u64,
-    inode: u64,
-}
-
-#[derive(Debug, Clone, Copy)]
-struct DiskFile {
-    bytes: u64,
-    temporary: bool,
-}
-
 const MEMORY_REFRESH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(10);
 const OPEN_FILE_REFRESH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
-const APP_DISK_REFRESH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(300);
-
-trait ResourceProvider: Debug + EnergyProvider + Send + Sync {
-    fn system_cpu(&self) -> (u64, usize);
-    fn processes(&self) -> HashMap<u32, ProcessStat>;
-    fn process_memory(&self, pid: u32) -> MemoryUsage;
-    fn process_io(&self, pid: u32) -> Option<ProcessIo>;
-    fn process_files(&self, pid: u32) -> ProcessFiles;
-    fn process_sockets(&self, pid: u32) -> Option<HashSet<u64>>;
-    fn network_counters(&self, inodes: &HashSet<u64>) -> Option<HashMap<u64, NetworkCounters>>;
-    fn gpu_processes(&self, pids: &HashSet<u32>) -> HashMap<u32, GpuProcessStat>;
-    fn process_cgroup(&self, pid: u32) -> Option<String>;
-    fn owned_process_cgroups(&self, processes: &HashMap<u32, ProcessStat>) -> HashMap<u32, String>;
-    fn cgroup_counters(&self, path: &str) -> Option<CgroupCounters>;
-    fn cgroup_members(&self, path: &str) -> HashSet<u32>;
-    fn application_disk_usage(&self, target_id: &str) -> Option<DiskBreakdown>;
-}
-
-#[derive(Debug, Default)]
-struct LinuxResourceProvider;
-
-impl EnergyProvider for LinuxResourceProvider {
-    fn rapl_zones(&self) -> HashMap<PathBuf, (u64, u64)> {
-        energy::read_rapl_zones()
-    }
-
-    fn batteries(&self) -> BatterySample {
-        energy::read_batteries()
-    }
-}
-
-impl ResourceProvider for LinuxResourceProvider {
-    fn system_cpu(&self) -> (u64, usize) {
-        read_system_cpu()
-    }
-
-    fn processes(&self) -> HashMap<u32, ProcessStat> {
-        read_processes(parse_process_stat)
-    }
-
-    fn process_memory(&self, pid: u32) -> MemoryUsage {
-        read_process_memory(pid)
-    }
-
-    fn process_io(&self, pid: u32) -> Option<ProcessIo> {
-        read_process_io(pid)
-    }
-
-    fn process_files(&self, pid: u32) -> ProcessFiles {
-        read_process_file_sets(pid)
-    }
-
-    fn process_sockets(&self, pid: u32) -> Option<HashSet<u64>> {
-        read_process_sockets(pid)
-    }
-
-    fn network_counters(&self, inodes: &HashSet<u64>) -> Option<HashMap<u64, NetworkCounters>> {
-        read_network_counters(inodes)
-    }
-
-    fn gpu_processes(&self, pids: &HashSet<u32>) -> HashMap<u32, GpuProcessStat> {
-        read_gpu_processes(pids)
-    }
-
-    fn process_cgroup(&self, pid: u32) -> Option<String> {
-        process_cgroup(pid)
-    }
-
-    fn owned_process_cgroups(&self, processes: &HashMap<u32, ProcessStat>) -> HashMap<u32, String> {
-        system::owned_process_cgroups(processes)
-    }
-
-    fn cgroup_counters(&self, path: &str) -> Option<CgroupCounters> {
-        read_cgroup_counters(path)
-    }
-
-    fn cgroup_members(&self, path: &str) -> HashSet<u32> {
-        read_cgroup_members(path)
-    }
-
-    fn application_disk_usage(&self, target_id: &str) -> Option<DiskBreakdown> {
-        application_disk_usage(target_id)
-    }
-}
 
 #[derive(Debug, Clone, Default)]
 pub struct ResourceSnapshot {
@@ -728,20 +586,6 @@ type ProcessIdentity = (u32, u64);
 struct ProcessCache<T> {
     samples: HashMap<ProcessIdentity, T>,
     next_refresh: Option<Instant>,
-}
-
-#[derive(Debug, Clone, Default)]
-struct ProcessFiles {
-    open: HashMap<DiskFileId, DiskFile>,
-    referenced: HashMap<DiskFileId, DiskFile>,
-    fd_available: bool,
-}
-
-#[derive(Debug, Clone, Copy, Default)]
-struct DiskBreakdown {
-    total_bytes: u64,
-    temporary_bytes: u64,
-    permanent_bytes: u64,
 }
 
 impl ResourceSampler {

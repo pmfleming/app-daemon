@@ -1,5 +1,7 @@
 use super::{
-    DiskBreakdown, MemoryUsage, ProcessIo, ProcessStat, ResourceSampler, disk::WORKERS,
+    ResourceSampler,
+    disk::WORKERS,
+    provider::{DiskBreakdown, MemoryUsage, ProcessIo, ProcessStat},
     test_provider::TestProvider,
 };
 use crate::benchmarks::{Measurement, measure};

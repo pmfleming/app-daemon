@@ -1,4 +1,4 @@
-use super::{ProcessStat, ResourceProvider};
+use super::provider::{ProcessStat, ResourceProvider};
 use crate::{
     catalog::Catalog,
     process::{descendants_where, process_children},

@@ -1,4 +1,7 @@
-use super::{CgroupCounters, CgroupIo, ProcessIo, ProcessUsage, ResourceSampler, ResourceSnapshot};
+use super::{
+    ProcessUsage, ResourceSampler, ResourceSnapshot,
+    provider::{CgroupCounters, CgroupIo, ProcessIo},
+};
 use std::collections::{HashMap, HashSet};
 
 #[test]

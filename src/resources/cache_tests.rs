@@ -1,6 +1,9 @@
 use super::{
-    DiskFile, DiskFileId, MemoryUsage, NetworkCounters, ProcessFiles, ProcessIo, ProcessStat,
-    ResourceSampler, test_provider::TestProvider,
+    ResourceSampler,
+    provider::{
+        DiskFile, DiskFileId, MemoryUsage, NetworkCounters, ProcessFiles, ProcessIo, ProcessStat,
+    },
+    test_provider::TestProvider,
 };
 use std::{
     collections::{HashMap, HashSet},
