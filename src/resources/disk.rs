@@ -118,27 +118,36 @@ impl AppDiskCache {
                 )
                 .ok();
         }
+        self.collect_completed(&targets, now);
         if let Some(workers) = &self.workers {
-            for result in workers.results.try_iter() {
-                self.in_flight.remove(&result.target);
-                if !targets.contains(&result.target) {
-                    continue;
-                }
-                let cached = self.samples.entry(result.target).or_insert(CachedDisk {
-                    usage: None,
-                    next_refresh: now,
-                });
-                // An incomplete/failed refresh must not replace a completed
-                // footprint with a partial total or invented zero.
-                cached.usage = result.usage.or(cached.usage);
-                cached.next_refresh = now + APP_DISK_REFRESH_INTERVAL;
-            }
             workers.request_due(&targets, &self.samples, &mut self.in_flight, now);
         }
         self.samples
             .iter()
             .filter_map(|(target, sample)| Some((target.clone(), sample.usage?)))
             .collect()
+    }
+
+    fn collect_completed(&mut self, targets: &HashSet<&String>, now: Instant) {
+        // Drain even with no active targets: retired work must release capacity.
+        for result in self
+            .workers
+            .iter()
+            .flat_map(|workers| workers.results.try_iter())
+        {
+            self.in_flight.remove(&result.target);
+            if !targets.contains(&result.target) {
+                continue;
+            }
+            let cached = self.samples.entry(result.target).or_insert(CachedDisk {
+                usage: None,
+                next_refresh: now,
+            });
+            // An incomplete/failed refresh must not replace a completed
+            // footprint with a partial total or invented zero.
+            cached.usage = result.usage.or(cached.usage);
+            cached.next_refresh = now + APP_DISK_REFRESH_INTERVAL;
+        }
     }
 }
 

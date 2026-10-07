@@ -34,3 +34,21 @@ RQLens resource-module locality improves 81.25 → 84.25; its fan-in drops 17 �
 The shared contract has leverage 100, locality 96.25 (17 consumers); moving those
 edges does not eliminate them. Whole-project means are locality 98.99 → 98.95 and
 leverage 20.63 → 20.94 across 63 → 64 modules; measurements remain syntax-partial.
+
+## 3. Separate disk completion from scheduling
+
+`AppDiskCache::read` now orchestrates retention, startup, completion ingestion,
+and scheduling. `collect_completed` drains results even with no active targets,
+releases capacity before scheduling, ignores retired targets, and preserves the
+last completed footprint on failure. Channel bounds, nonblocking request sends,
+worker panic containment, and TTL semantics are unchanged.
+
+Two deterministic channel-driven tests cover bounded outstanding work, late
+results for retired targets, initial failure TTL/exact-deadline retries, draining
+with no targets, and full/disconnected request channels. Existing real-worker
+blocking and failed-refresh tests remain.
+
+Validation: 62 tests passed (3 ignored), all-target/all-feature Clippy, formatting
+and diff checks passed. RQLens `read` cognitive/cyclomatic/effort: 8/7/45,488 →
+3/5/23,622, plus `collect_completed` at 3/3/11,257. The combined cognitive and
+effort signals improve; cyclomatic rises by one function's base path.

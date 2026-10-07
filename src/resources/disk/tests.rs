@@ -1,4 +1,4 @@
-use super::{APP_DISK_REFRESH_INTERVAL, AppDiskCache, WORKERS};
+use super::{APP_DISK_REFRESH_INTERVAL, AppDiskCache, DiskResult, DiskWorkers, WORKERS};
 use crate::resources::{
     ResourceSampler,
     provider::{DiskBreakdown, ProcessStat, ResourceProvider},
@@ -9,6 +9,104 @@ use std::{
     sync::{Arc, Barrier, atomic::Ordering, mpsc},
     time::{Duration, Instant},
 };
+
+fn channels() -> (
+    AppDiskCache,
+    mpsc::Receiver<String>,
+    mpsc::SyncSender<DiskResult>,
+) {
+    let (sender, requests) = mpsc::sync_channel(WORKERS);
+    let (results, receiver) = mpsc::sync_channel(WORKERS);
+    let cache = AppDiskCache {
+        workers: Some(DiskWorkers {
+            requests: sender,
+            results: receiver,
+        }),
+        ..Default::default()
+    };
+    (cache, requests, results)
+}
+
+#[test]
+fn completion_releases_capacity_without_reviving_removed_targets_or_retrying_early() {
+    let provider: Arc<dyn ResourceProvider> = Arc::new(TestProvider::default());
+    let (mut cache, requests, results) = channels();
+    let targets = ["A".to_owned(), "B".to_owned(), "C".to_owned()];
+    let now = Instant::now();
+    assert!(cache.read(&provider, &targets, now).is_empty());
+    assert_eq!(requests.try_iter().collect::<Vec<_>>(), ["A", "B"]);
+    cache.read(&provider, &targets, now);
+    assert!(
+        requests.try_recv().is_err(),
+        "running work still occupies capacity"
+    );
+    for target in ["A", "B"] {
+        results
+            .send(DiskResult {
+                target: target.into(),
+                usage: Some(DiskBreakdown {
+                    total_bytes: 100,
+                    ..Default::default()
+                }),
+            })
+            .unwrap();
+    }
+    let remaining = [&targets[0], &targets[2]];
+    let samples = cache.read(&provider, remaining, now);
+    assert_eq!(samples.len(), 1);
+    assert_eq!(samples["A"].total_bytes, 100);
+    assert!(!cache.samples.contains_key("B"));
+    assert_eq!(requests.try_recv().unwrap(), "C");
+    results
+        .send(DiskResult {
+            target: "C".into(),
+            usage: None,
+        })
+        .unwrap();
+    assert_eq!(cache.read(&provider, remaining, now).len(), 1);
+    assert!(cache.in_flight.is_empty());
+    assert!(
+        requests.try_recv().is_err(),
+        "failed initial reads respect TTL too"
+    );
+    let later = now + APP_DISK_REFRESH_INTERVAL;
+    cache.read(&provider, remaining, later);
+    assert_eq!(requests.try_iter().collect::<Vec<_>>(), ["A", "C"]);
+    for target in ["A", "C"] {
+        results
+            .send(DiskResult {
+                target: target.into(),
+                usage: None,
+            })
+            .unwrap();
+    }
+    assert!(cache.read(&provider, [], later).is_empty());
+    assert!(cache.samples.is_empty() && cache.in_flight.is_empty());
+}
+
+#[test]
+fn rejected_sends_never_reserve_in_flight_capacity() {
+    let provider: Arc<dyn ResourceProvider> = Arc::new(TestProvider::default());
+    let (mut cache, requests, _results) = channels();
+    for _ in 0..WORKERS {
+        cache
+            .workers
+            .as_ref()
+            .unwrap()
+            .requests
+            .try_send("occupied".into())
+            .unwrap();
+    }
+    let targets = ["A".to_owned()];
+    cache.read(&provider, &targets, Instant::now());
+    assert!(cache.in_flight.is_empty(), "full channel rejected the send");
+    drop(requests);
+    cache.read(&provider, &targets, Instant::now());
+    assert!(
+        cache.in_flight.is_empty(),
+        "disconnected channel rejected the send"
+    );
+}
 
 fn finish(
     cache: &mut AppDiskCache,
