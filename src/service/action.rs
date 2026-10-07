@@ -386,8 +386,11 @@ async fn verify_placement(
 }
 
 fn workspace_matches(window: &Client, workspace: &str) -> bool {
-    window.workspace.id.to_string() == workspace
-        || window.workspace.name == workspace.strip_prefix("name:").unwrap_or(workspace)
+    if let Ok(id) = workspace.parse::<i64>() {
+        window.workspace.id == id
+    } else {
+        window.workspace.name == workspace.strip_prefix("name:").unwrap_or(workspace)
+    }
 }
 
 fn correlated_window(

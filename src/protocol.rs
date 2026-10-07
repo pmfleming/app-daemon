@@ -71,6 +71,39 @@ mod tests {
     }
 
     #[test]
+    fn placement_contract_preserves_partial_success_and_optional_compatibility()
+    -> anyhow::Result<()> {
+        use crate::model::{OperationResult, PlacementStatus};
+        let fixture = contract_fixture()?;
+        let example = &fixture["operation_outcome"]["partial_success_example"];
+        let operation: OperationResult = serde_json::from_value(example.clone())?;
+        assert_eq!(operation.status, "completed");
+        assert!(operation.launch_backend.is_some());
+        assert_eq!(
+            operation.placement.as_ref().unwrap().status,
+            PlacementStatus::Unavailable
+        );
+        assert_eq!(serde_json::to_value(&operation)?, *example);
+        assert_eq!(
+            serde_json::to_value([
+                PlacementStatus::Pending,
+                PlacementStatus::Placed,
+                PlacementStatus::Unavailable,
+                PlacementStatus::Failed,
+            ])?,
+            fixture["operation_outcome"]["placement_statuses"]
+        );
+        let mut legacy = example.clone();
+        legacy.as_object_mut().unwrap().remove("placement");
+        assert!(
+            serde_json::from_value::<OperationResult>(legacy)?
+                .placement
+                .is_none()
+        );
+        Ok(())
+    }
+
+    #[test]
     fn v1_contract_matches_registry_and_serialized_resources() -> anyhow::Result<()> {
         let fixture = contract_fixture()?;
         assert_eq!(fixture["version"], VERSION);

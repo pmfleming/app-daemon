@@ -53,3 +53,28 @@ fail the operation while preserving the successful launch and placement receipt.
 No placement object is supplied for ordinary existing-window focus, launch-only
 shortcuts, or launches with no workspace request. Older consumers can ignore the
 new object, but should upgrade to surface partial-success warnings.
+
+## Stage 3 consumer contract and acceptance
+
+Shelllist uses the structured status only to present daemon-owned placement
+warnings. Completed partial successes stay inline when visible or notify after
+handoff, including outcomes recovered through an owned status read. Duplicate or
+foreign events cannot notify twice or replay a launch. The shared keyboard model
+and settings acknowledgement are unchanged. The app-api fixture includes a
+serialized partial-success example and the four placement statuses; daemon
+serialization tests and Shelllist's fixture comparison keep both sides aligned.
+
+Validation completed:
+
+- Rust all-feature suite: 47 unit tests and 12 private-session tests passed.
+- Rust Clippy (all targets/features, warnings denied) passed.
+- Real user-systemd lifetime fixtures: both opt-in tests passed and cleaned up.
+- Shelllist Qt suite: 388 passed, 0 failed, 1 renderer-dependent skip.
+- Shelllist strict QML lint, app-api fixture comparison and lifecycle checks passed.
+
+No real graphical apps were launched or moved for validation, and the running
+NixOS daemon was not replaced. Build/deploy both repositories before live
+acceptance: from workspace 9, launch an app assigned to each category and check
+its resulting workspace; check Spotify scope migration and D-Bus/new-window
+singletons. Existing windows must remain untouched. An unprovable handoff must
+warn rather than moving a guessed window or starting another instance.

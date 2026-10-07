@@ -1,6 +1,23 @@
 {
   "protocol": "app-api",
   "version": 1,
+  "operation_outcome": {
+    "placement_statuses": ["pending", "placed", "unavailable", "failed"],
+    "partial_success_example": {
+      "id": "operation-example",
+      "action": "launch",
+      "target_id": "org.example.App.desktop",
+      "status": "completed",
+      "message": "Application started; workspace placement unavailable. Do not relaunch automatically.",
+      "launch_backend": "uwsm-app",
+      "launch_scope": "app-graphical.slice",
+      "placement": {
+        "workspace_id": "3",
+        "status": "unavailable",
+        "reason": "no unambiguous new window with verified launch ownership"
+      }
+    }
+  },
   "registry": {
     "methods": [
       {

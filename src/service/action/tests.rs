@@ -31,6 +31,12 @@ fn workspace_confirmation_accepts_ids_and_named_workspaces_not_unrelated_state()
     assert!(!super::workspace_matches(&window, "name:media"));
     window.workspace.name = "special:scratchpad".into();
     assert!(super::workspace_matches(&window, "special:scratchpad"));
+    window.workspace.name = "2".into();
+    assert!(
+        !super::workspace_matches(&window, "2"),
+        "numeric selectors refer to IDs, not renamed workspaces"
+    );
+    assert!(super::workspace_matches(&window, "name:2"));
 }
 
 #[test]
