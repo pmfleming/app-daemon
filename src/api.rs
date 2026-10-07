@@ -23,6 +23,11 @@ pub struct ApiService {
     applications: Arc<ApplicationService>,
 }
 
+#[derive(Deserialize)]
+struct OperationStatusParams {
+    operation_id: String,
+}
+
 impl ApiService {
     pub fn new(applications: Arc<ApplicationService>) -> Self {
         Self { applications }
@@ -121,11 +126,7 @@ impl ApiService {
         params: Value,
         owner: Option<&str>,
     ) -> Result<Value, ApiError> {
-        #[derive(Deserialize)]
-        struct Params {
-            operation_id: String,
-        }
-        let params: Params = decode(params)?;
+        let params: OperationStatusParams = decode(params)?;
         self.applications
             .operation_status_owned(&params.operation_id, owner)
             .await

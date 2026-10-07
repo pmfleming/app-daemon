@@ -104,6 +104,43 @@ mod tests {
     }
 
     #[test]
+    fn resource_groups_keep_defaults_for_legacy_partial_payloads() -> anyhow::Result<()> {
+        let empty = serde_json::json!({"measurement": {}});
+        assert_eq!(
+            serde_json::from_value::<ResourceUsage>(empty)?,
+            ResourceUsage::default()
+        );
+        let partial: ResourceUsage = serde_json::from_value(serde_json::json!({
+            "cpu_percent": 42.5, "disk_read_bytes": 73,
+            "network_receive_bytes": 19, "energy_source": "rapl", "measurement": {}
+        }))?;
+        let mut expected = ResourceUsage::default();
+        expected.compute.cpu_percent = 42.5;
+        expected.storage.disk_read_bytes = 73;
+        expected.network.network_receive_bytes = 19;
+        expected.energy.energy_source = "rapl".into();
+        assert_eq!(partial, expected);
+        assert_eq!(
+            serde_json::from_value::<ResourceUsage>(serde_json::to_value(&partial)?)?,
+            expected
+        );
+        assert_eq!(
+            serde_json::from_value::<ResourceAvailability>(serde_json::json!({"cpu": true}))?,
+            ResourceAvailability {
+                cpu: true,
+                ..Default::default()
+            }
+        );
+        assert!(
+            serde_json::from_value::<ResourceUsage>(serde_json::json!({
+                "disk_read_bytes": "invalid", "measurement": {}
+            }))
+            .is_err()
+        );
+        Ok(())
+    }
+
+    #[test]
     fn v1_contract_matches_registry_and_serialized_resources() -> anyhow::Result<()> {
         let fixture = contract_fixture()?;
         assert_eq!(fixture["version"], VERSION);

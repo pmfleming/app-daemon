@@ -106,6 +106,7 @@
               dbus
               cargo
               cargo-llvm-cov
+              cargo-machete
               clippy
               jq
               python3

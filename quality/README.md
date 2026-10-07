@@ -1,7 +1,9 @@
 # RustQualityLens baseline
 
-The latest [process/launch/watcher review](process-launch-review.md) records a
-focused refactor, current-tool measurements, verification, and remaining limits.
+The latest [five follow-up improvements](five-improvements.md) record receipt,
+provider, disk, watcher, and source-inventory changes, including metric tradeoffs.
+The preceding [process/launch/watcher review](process-launch-review.md) records
+its own measurements, verification, and remaining limits.
 
 For the newer focused hotspot/allocation refactor and its before/after metrics,
 see [refactor-review.md](refactor-review.md). It does not replace this full baseline.

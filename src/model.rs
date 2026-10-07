@@ -1,84 +1,91 @@
 use serde::{Deserialize, Serialize};
 
-macro_rules! usage_fields {
-    ($name:ident { $($(#[$meta:meta])* $field:ident: $type:ty),+ $(,)? }) => {
-        #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-        #[serde(default)]
-        pub struct $name { $( $(#[$meta])* pub $field: $type, )+ }
-    };
+/// CPU, memory, and GPU observations for the current interval.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ComputeUsage {
+    /// Top-compatible CPU usage: 100% is one fully occupied logical CPU.
+    pub cpu_percent: f64,
+    /// CPU usage as a percentage of the whole machine, always capped at 100%.
+    pub cpu_percent_of_machine: f64,
+    /// Best available physical-memory estimate: PSS when readable, RSS otherwise.
+    pub memory_bytes: u64,
+    pub memory_rss_bytes: u64,
+    pub memory_pss_bytes: u64,
+    pub memory_private_bytes: u64,
+    pub memory_swap_bytes: u64,
+    pub memory_cgroup_bytes: u64,
+    pub process_count: u64,
+    pub thread_count: u64,
+    pub major_faults_per_second: f64,
+    /// Aggregate DRM engine occupancy; it can exceed 100% across engines.
+    pub gpu_percent: f64,
+    /// Occupancy of the busiest DRM engine, capped at 100%.
+    pub gpu_busy_percent: f64,
+    /// Resident GPU memory reported by DRM, falling back to allocated memory.
+    pub gpu_memory_bytes: u64,
+    pub gpu_memory_resident_bytes: u64,
+    pub gpu_memory_allocated_bytes: u64,
 }
 
-usage_fields!(ComputeUsage {
-    /// Top-compatible CPU usage: 100% is one fully occupied logical CPU.
-    cpu_percent: f64,
-    /// CPU usage as a percentage of the whole machine, always capped at 100%.
-    cpu_percent_of_machine: f64,
-    /// Best available physical-memory estimate: PSS when readable, RSS otherwise.
-    memory_bytes: u64,
-    memory_rss_bytes: u64,
-    memory_pss_bytes: u64,
-    memory_private_bytes: u64,
-    memory_swap_bytes: u64,
-    memory_cgroup_bytes: u64,
-    process_count: u64,
-    thread_count: u64,
-    major_faults_per_second: f64,
-    /// Aggregate DRM engine occupancy; it can exceed 100% across engines.
-    gpu_percent: f64,
-    /// Occupancy of the busiest DRM engine, capped at 100%.
-    gpu_busy_percent: f64,
-    /// Resident GPU memory reported by DRM, falling back to allocated memory.
-    gpu_memory_bytes: u64,
-    gpu_memory_resident_bytes: u64,
-    gpu_memory_allocated_bytes: u64,
-});
-usage_fields!(StorageUsage {
+/// Interval I/O and allocated storage footprints, in bytes unless named otherwise.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct StorageUsage {
     /// Physical storage bytes completed during the current interval.
-    disk_read_bytes: u64,
-    disk_write_bytes: u64,
-    disk_read_bytes_per_second: f64,
-    disk_write_bytes_per_second: f64,
+    pub disk_read_bytes: u64,
+    pub disk_write_bytes: u64,
+    pub disk_read_bytes_per_second: f64,
+    pub disk_write_bytes_per_second: f64,
     /// Logical process I/O, including page-cache hits.
-    logical_read_bytes: u64,
-    logical_write_bytes: u64,
-    logical_read_bytes_per_second: f64,
-    logical_write_bytes_per_second: f64,
-    read_operations: u64,
-    write_operations: u64,
-    read_operations_per_second: f64,
-    write_operations_per_second: f64,
-    cancelled_write_bytes: u64,
+    pub logical_read_bytes: u64,
+    pub logical_write_bytes: u64,
+    pub logical_read_bytes_per_second: f64,
+    pub logical_write_bytes_per_second: f64,
+    pub read_operations: u64,
+    pub write_operations: u64,
+    pub read_operations_per_second: f64,
+    pub write_operations_per_second: f64,
+    pub cancelled_write_bytes: u64,
     /// Allocated size of unique regular files currently held open.
-    open_file_disk_bytes: u64,
+    pub open_file_disk_bytes: u64,
     /// Allocated size of unique open or mapped regular files.
-    referenced_file_disk_bytes: u64,
-    referenced_file_temporary_bytes: u64,
-    referenced_file_permanent_bytes: u64,
+    pub referenced_file_disk_bytes: u64,
+    pub referenced_file_temporary_bytes: u64,
+    pub referenced_file_permanent_bytes: u64,
     /// Allocated size of identified application-owned data directories.
-    disk_space_total_bytes: u64,
-    disk_space_temporary_bytes: u64,
-    disk_space_permanent_bytes: u64,
-});
-usage_fields!(NetworkUsage {
-    network_receive_bytes: u64,
-    network_transmit_bytes: u64,
-    network_receive_bytes_per_second: f64,
-    network_transmit_bytes_per_second: f64,
-    network_connection_count: u64,
-});
-usage_fields!(EnergyUsage {
+    pub disk_space_total_bytes: u64,
+    pub disk_space_temporary_bytes: u64,
+    pub disk_space_permanent_bytes: u64,
+}
+
+/// Socket-attributed byte deltas, rates, and connection count.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct NetworkUsage {
+    pub network_receive_bytes: u64,
+    pub network_transmit_bytes: u64,
+    pub network_receive_bytes_per_second: f64,
+    pub network_transmit_bytes_per_second: f64,
+    pub network_connection_count: u64,
+}
+
+/// Estimated energy attribution together with its source and confidence labels.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct EnergyUsage {
     /// Application-attributed energy. This is only populated for attributable domains.
-    energy_mwh: f64,
-    battery_percent: f64,
+    pub energy_mwh: f64,
+    pub battery_percent: f64,
     /// Estimated application power, retained under the v1-compatible field name.
-    power_watts: f64,
-    estimated_app_power_watts: f64,
-    system_power_watts: f64,
-    battery_percent_per_hour: f64,
-    attributed_fraction: f64,
-    energy_source: String,
-    energy_confidence: String,
-});
+    pub power_watts: f64,
+    pub estimated_app_power_watts: f64,
+    pub system_power_watts: f64,
+    pub battery_percent_per_hour: f64,
+    pub attributed_fraction: f64,
+    pub energy_source: String,
+    pub energy_confidence: String,
+}
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -199,19 +206,21 @@ pub struct ResourcePeaks {
     pub network_transmit_bytes_per_second: f64,
 }
 
-// A capability is true only when available throughout the observed bucket.
-// Missing metadata in older history files means unknown, not measured zero.
-usage_fields!(ResourceAvailability {
-    cpu: bool,
-    memory: bool,
-    gpu: bool,
-    storage: bool,
-    referenced_files: bool,
-    disk_space: bool,
-    network_bytes: bool,
-    network_connections: bool,
-    energy: bool,
-});
+/// A capability is true only when available throughout the observed bucket.
+/// Missing metadata in older history files means unknown, not measured zero.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ResourceAvailability {
+    pub cpu: bool,
+    pub memory: bool,
+    pub gpu: bool,
+    pub storage: bool,
+    pub referenced_files: bool,
+    pub disk_space: bool,
+    pub network_bytes: bool,
+    pub network_connections: bool,
+    pub energy: bool,
+}
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
