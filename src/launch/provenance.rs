@@ -8,11 +8,38 @@ struct Process {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub(super) struct Provenance {
+pub(crate) struct Provenance {
     identities: HashMap<u32, u64>,
 }
 
 impl Provenance {
+    /// Established application processes can service a singleton launch without
+    /// entering the new launch unit. Capture identities BEFORE the handoff.
+    pub(crate) fn for_application(
+        catalog: &crate::catalog::Catalog,
+        target: &str,
+        window_pids: impl IntoIterator<Item = u32>,
+    ) -> Self {
+        let processes = processes();
+        let mut roots = window_pids.into_iter().collect::<Vec<_>>();
+        roots.extend(processes.keys().copied().filter(|pid| {
+            crate::resources::process_cgroup(*pid)
+                .and_then(|path| catalog.target_for_cgroup(&path).map(str::to_owned))
+                .is_some_and(|id| id == target)
+        }));
+        let mut owner = Self::default();
+        owner.observe_processes(&processes, &roots);
+        owner
+    }
+
+    pub(super) fn merge(&mut self, other: Self) {
+        for (pid, start) in other.identities {
+            if read_process(pid).is_some_and(|process| process.start == start) {
+                self.identities.insert(pid, start);
+            }
+        }
+    }
+
     pub(super) fn remember(&mut self, pid: u32) {
         if let Some(process) = read_process(pid) {
             self.identities.insert(pid, process.start);

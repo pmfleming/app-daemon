@@ -7,6 +7,7 @@ use tokio::{io::AsyncReadExt, process::Command};
 use crate::platform::command_available;
 
 mod provenance;
+pub(crate) use provenance::Provenance;
 
 #[cfg(test)]
 mod tests;
@@ -42,7 +43,9 @@ pub struct LaunchReceipt {
     #[serde(skip)]
     pub(crate) unit: Option<String>,
     #[serde(skip)]
-    provenance: provenance::Provenance,
+    provenance: Provenance,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub placement: Option<crate::model::WorkspacePlacement>,
 }
 
 impl LaunchReceipt {
@@ -53,6 +56,10 @@ impl LaunchReceipt {
 
     pub(crate) fn remember_process(&mut self, pid: u32) {
         self.provenance.remember(pid);
+    }
+
+    pub(crate) fn include_existing(&mut self, existing: Provenance) {
+        self.provenance.merge(existing);
     }
 
     pub(crate) fn observe_processes(&mut self) {
@@ -88,7 +95,8 @@ impl From<LaunchBackend> for LaunchReceipt {
             backend: backend.into(),
             scope: scope.into(),
             unit: None,
-            provenance: provenance::Provenance::default(),
+            provenance: Provenance::default(),
+            placement: None,
         }
     }
 }

@@ -276,6 +276,25 @@ pub struct ApplicationEnergyOverview {
     pub applications: Vec<ApplicationEnergySummary>,
 }
 
+/// Launch handoff and workspace placement have independent outcomes. A
+/// completed launch with unavailable/failed placement must never be replayed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspacePlacement {
+    pub workspace_id: String,
+    pub status: PlacementStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PlacementStatus {
+    Pending,
+    Placed,
+    Unavailable,
+    Failed,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OperationResult {
     pub id: String,
@@ -287,4 +306,6 @@ pub struct OperationResult {
     pub launch_backend: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub launch_scope: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub placement: Option<WorkspacePlacement>,
 }

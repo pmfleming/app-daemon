@@ -21,6 +21,19 @@ fn windows() -> Snapshot {
 }
 
 #[test]
+fn workspace_confirmation_accepts_ids_and_named_workspaces_not_unrelated_state() {
+    let mut window = windows().clients.remove(0);
+    window.workspace.id = 3;
+    window.workspace.name = "code".into();
+    assert!(super::workspace_matches(&window, "3"));
+    assert!(super::workspace_matches(&window, "name:code"));
+    assert!(!super::workspace_matches(&window, "2"));
+    assert!(!super::workspace_matches(&window, "name:media"));
+    window.workspace.name = "special:scratchpad".into();
+    assert!(super::workspace_matches(&window, "special:scratchpad"));
+}
+
+#[test]
 fn placement_requires_one_new_owned_window() {
     let windows = windows();
     let previous = vec!["0x1".into()];

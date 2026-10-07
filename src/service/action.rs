@@ -10,10 +10,10 @@ use crate::{
     catalog::{Catalog, CatalogEntry},
     hyprland::{self, Client, Snapshot},
     launch::{self, LaunchReceipt},
-    model::OperationResult,
+    model::{OperationResult, PlacementStatus, WorkspacePlacement},
 };
 
-use super::identity::{resolve_target, target_window};
+use super::identity::{resolve_target, resolve_target_with_cgroup, target_window};
 
 #[cfg(test)]
 mod tests;
@@ -61,6 +61,7 @@ impl ApplicationAction {
 pub(super) struct ActionOutcome {
     pub(super) message: String,
     pub(super) launch: Option<LaunchReceipt>,
+    pub(super) status: &'static str,
 }
 
 pub(super) fn operation_result(
@@ -70,8 +71,14 @@ pub(super) fn operation_result(
     message: String,
     launch: Option<LaunchReceipt>,
 ) -> OperationResult {
-    let (launch_backend, launch_scope) = launch
-        .map(|receipt| (Some(receipt.backend), Some(receipt.scope)))
+    let (launch_backend, launch_scope, placement) = launch
+        .map(|receipt| {
+            (
+                Some(receipt.backend),
+                Some(receipt.scope),
+                receipt.placement,
+            )
+        })
         .unwrap_or_default();
     OperationResult {
         id,
@@ -81,6 +88,7 @@ pub(super) fn operation_result(
         message,
         launch_backend,
         launch_scope,
+        placement,
     }
 }
 
@@ -89,6 +97,7 @@ impl ActionOutcome {
         Self {
             message: format!("{verb} {}", display_name(catalog, target_id)),
             launch,
+            status: "completed",
         }
     }
 }
@@ -150,7 +159,9 @@ impl ApplicationAction {
         let target_id = &params.target_id;
         match self {
             Self::Activate => activate(catalog, windows, params, progress).await,
-            Self::Launch => launch_on_workspace(catalog, windows, params, progress).await,
+            Self::Launch | Self::DesktopAction => {
+                launch_on_workspace(catalog, windows, params, progress, false).await
+            }
             Self::FocusWindow => hyprland::focus(target_address(catalog, windows, params)?)
                 .await
                 .map(|()| ActionOutcome::new(catalog, target_id, "Focused", None)),
@@ -163,9 +174,6 @@ impl ApplicationAction {
             Self::MoveToWorkspace => move_to_workspace(catalog, windows, params)
                 .await
                 .map(|()| ActionOutcome::new(catalog, target_id, "Moved", None)),
-            Self::DesktopAction => desktop_action(catalog, params)
-                .await
-                .map(|launch| ActionOutcome::new(catalog, target_id, "Started", Some(launch))),
         }
     }
 }
@@ -192,15 +200,7 @@ async fn activate(
         hyprland::focus(&window.address).await?;
         return Ok(ActionOutcome::new(catalog, target_id, "Focused", None));
     }
-    let launch = launch(catalog, target_id).await?;
-    progress.handed_off(params, &launch).await;
-    let placed = place_launched_window(catalog, windows, params, &launch, true).await?;
-    let verb = if placed {
-        "Launched and focused"
-    } else {
-        "Launched (no safely attributable new window to place/focus)"
-    };
-    Ok(ActionOutcome::new(catalog, target_id, verb, Some(launch)))
+    launch_on_workspace(catalog, windows, params, progress, true).await
 }
 
 async fn launch_on_workspace(
@@ -208,43 +208,105 @@ async fn launch_on_workspace(
     windows: &Snapshot,
     params: &ExecuteParams,
     progress: &LaunchProgress<'_>,
+    focus: bool,
 ) -> anyhow::Result<ActionOutcome> {
-    let launch = launch(catalog, &params.target_id).await?;
-    progress.handed_off(params, &launch).await;
-    let placed = if params.workspace_id.is_some() {
-        place_launched_window(catalog, windows, params, &launch, false).await?
-    } else {
-        true
-    };
-    let verb = if placed {
-        "Launched"
-    } else {
-        "Launched (workspace placement unavailable: no safely attributable new window)"
-    };
-    Ok(ActionOutcome::new(
+    let existing = launch::Provenance::for_application(
         catalog,
         &params.target_id,
-        verb,
-        Some(launch),
-    ))
+        windows
+            .clients
+            .iter()
+            .filter(|window| resolve_target(catalog, window) == params.target_id)
+            .map(|window| window.pid),
+    );
+    let mut launch = if params.action == ApplicationAction::DesktopAction {
+        desktop_action(catalog, params).await?
+    } else {
+        launch(catalog, &params.target_id).await?
+    };
+    launch.include_existing(existing);
+    let launch_only = catalog
+        .by_id(&params.target_id)
+        .is_some_and(|entry| entry.launch_only);
+    if !launch_only {
+        launch.placement = params
+            .workspace_id
+            .as_ref()
+            .map(|workspace| WorkspacePlacement {
+                workspace_id: workspace.clone(),
+                status: PlacementStatus::Pending,
+                reason: None,
+            });
+    }
+    progress.handed_off(params, &launch).await;
+    let result = if launch_only || (!focus && launch.placement.is_none()) {
+        Ok(true)
+    } else {
+        place_launched_window(catalog, windows, params, &mut launch, focus).await
+    };
+    let mut outcome = ActionOutcome::new(catalog, &params.target_id, "Launched", None);
+    match result {
+        Ok(true) => {}
+        Ok(false) => {
+            let reason = if windows.available {
+                "no unambiguous new window with verified launch ownership"
+            } else {
+                "pre-launch compositor snapshot unavailable"
+            };
+            set_placement(
+                &mut launch,
+                PlacementStatus::Unavailable,
+                Some(reason.into()),
+            );
+            outcome.message.push_str(&format!(
+                "; placement/focus unavailable: {reason}. Do not relaunch automatically."
+            ));
+        }
+        Err(error) => {
+            // Preserve a successful launch receipt even if subsequent move,
+            // verification or focus fails. Retrying must never replay the launch.
+            if launch
+                .placement
+                .as_ref()
+                .is_some_and(|value| value.status == PlacementStatus::Placed)
+            {
+                outcome.status = "failed"; // Placement succeeded; focus failed.
+            } else {
+                set_placement(
+                    &mut launch,
+                    PlacementStatus::Failed,
+                    Some(error.to_string()),
+                );
+                if launch.placement.is_none() {
+                    outcome.status = "failed";
+                }
+            }
+            outcome.message.push_str(&format!(
+                "; placement/focus failed: {error}. The app has already started."
+            ));
+        }
+    }
+    tracing::debug!(target_id = %params.target_id, backend = %launch.backend,
+        unit = ?launch.unit, placement = ?launch.placement, "application launch outcome");
+    outcome.launch = Some(launch);
+    Ok(outcome)
+}
+
+fn set_placement(launch: &mut LaunchReceipt, status: PlacementStatus, reason: Option<String>) {
+    if let Some(placement) = launch.placement.as_mut() {
+        placement.status = status;
+        placement.reason = reason;
+    }
 }
 
 async fn place_launched_window(
     catalog: &Catalog,
     previous: &Snapshot,
     params: &ExecuteParams,
-    launch: &LaunchReceipt,
+    launch: &mut LaunchReceipt,
     focus: bool,
 ) -> anyhow::Result<bool> {
-    if launch.unit.is_none() || !previous.available {
-        // Direct/D-Bus singleton launches may not expose a provable process or
-        // unit relationship. Do not move an unrelated instance as a fallback.
-        return Ok(false);
-    }
-    if catalog
-        .by_id(&params.target_id)
-        .is_some_and(|entry| entry.launch_only)
-    {
+    if !previous.available {
         return Ok(false);
     }
     let previous_addresses = previous
@@ -252,16 +314,18 @@ async fn place_launched_window(
         .iter()
         .map(|window| window.address.clone())
         .collect::<Vec<_>>();
-    let Some(address) =
+    let Some(window) =
         wait_for_new_window(catalog, &params.target_id, &previous_addresses, launch).await
     else {
         return Ok(false);
     };
     if let Some(workspace) = params.workspace_id.as_deref() {
-        hyprland::move_to_workspace(&address, workspace).await?;
+        hyprland::move_to_workspace(&window.address, workspace).await?;
+        verify_placement(&window, workspace, launch).await?;
+        set_placement(launch, PlacementStatus::Placed, None);
     }
     if focus {
-        hyprland::focus(&address).await?;
+        hyprland::focus(&window.address).await?;
     }
     Ok(true)
 }
@@ -270,24 +334,60 @@ async fn wait_for_new_window(
     catalog: &Catalog,
     target_id: &str,
     previous_addresses: &[String],
-    launch: &LaunchReceipt,
-) -> Option<String> {
+    launch: &mut LaunchReceipt,
+) -> Option<Client> {
     const WINDOW_TIMEOUT: Duration = Duration::from_secs(8);
-    const WINDOW_RETRY_INTERVAL: Duration = Duration::from_millis(100);
-
     let deadline = Instant::now() + WINDOW_TIMEOUT;
     loop {
+        launch.observe_processes();
         let windows = Snapshot::load().await;
         if let Some(address) = correlated_window(&windows, previous_addresses, |window| {
-            resolve_target(catalog, window) == target_id && launch.owns_process(window.pid)
+            launch.owns_process(window.pid)
+                && (resolve_target(catalog, window) == target_id
+                    // Chromium-based applications may adopt a generic Chromium
+                    // scope. Verified launch provenance plus their own window
+                    // identity remains valid even if that helper is installed.
+                    || resolve_target_with_cgroup(catalog, window, None) == target_id)
         }) {
-            return Some(address);
+            return windows
+                .clients
+                .into_iter()
+                .find(|window| window.address == address);
         }
         if Instant::now() >= deadline {
             return None;
         }
-        time::sleep(WINDOW_RETRY_INTERVAL).await;
+        time::sleep(Duration::from_millis(100)).await;
     }
+}
+
+async fn verify_placement(
+    window: &Client,
+    workspace: &str,
+    launch: &LaunchReceipt,
+) -> anyhow::Result<()> {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        let snapshot = Snapshot::load().await;
+        let current = snapshot.clients.iter().find(|current| {
+            current.address == window.address
+                && current.pid == window.pid
+                && launch.owns_process(current.pid)
+        });
+        if current.is_some_and(|current| workspace_matches(current, workspace)) {
+            return Ok(());
+        }
+        anyhow::ensure!(
+            Instant::now() < deadline,
+            "workspace move was not confirmed by the compositor"
+        );
+        time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+fn workspace_matches(window: &Client, workspace: &str) -> bool {
+    window.workspace.id.to_string() == workspace
+        || window.workspace.name == workspace.strip_prefix("name:").unwrap_or(workspace)
 }
 
 fn correlated_window(

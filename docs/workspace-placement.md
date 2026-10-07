@@ -34,3 +34,22 @@ systemd and D-Bus failures retain existing bounded handoff/cancellation behavior
 reparenting, unrelated processes, PID reuse, procfs parsing, exact unit boundaries
 and bounded launcher handoff. Later stages add private-bus/compositor integration
 coverage; no real graphical application is launched by these tests.
+
+## Stage 2 validation and API
+
+`cargo test --locked --all-features` includes private D-Bus/systemd/compositor
+fixtures. These verify all five saved categories overriding workspace context for
+launch, activation and desktop actions; MainPID ownership outside the launch
+cgroup; established singleton and D-Bus owner windows; existing-window exclusion;
+ambiguous/unrelated windows; rejected moves and acknowledged-but-unobserved moves.
+Operation-status reads retain the same structured placement result as events.
+
+The additive `placement` object has `workspace_id`, `status` and optional `reason`.
+`pending` accompanies checked launch handoff; `placed` requires observed compositor
+state; `unavailable` means no safe candidate/baseline; `failed` means dispatch or
+verification failed. A completed launch with failed/unavailable placement is a
+partial success: do not retry the launch. A subsequent focus failure can still
+fail the operation while preserving the successful launch and placement receipt.
+No placement object is supplied for ordinary existing-window focus, launch-only
+shortcuts, or launches with no workspace request. Older consumers can ignore the
+new object, but should upgrade to surface partial-success warnings.

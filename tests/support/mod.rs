@@ -244,6 +244,8 @@ pub struct MockCompositor {
     response: Arc<Mutex<String>>,
     events: broadcast::Sender<String>,
     tasks: Vec<tokio::task::JoinHandle<()>>,
+    commands: Arc<Mutex<Vec<String>>>,
+    move_behavior: Arc<Mutex<(bool, bool)>>,
 }
 impl MockCompositor {
     async fn start(root: &Path) -> Result<Self> {
@@ -255,14 +257,33 @@ impl MockCompositor {
         let reply = Arc::clone(&response);
         let (events, _) = broadcast::channel::<String>(32);
         let sender = events.clone();
-        let commands = tokio::spawn(async move {
+        let commands = Arc::new(Mutex::new(Vec::new()));
+        let recorded = Arc::clone(&commands);
+        let move_behavior = Arc::new(Mutex::new((true, true)));
+        let behavior = Arc::clone(&move_behavior);
+        let command_task = tokio::spawn(async move {
             while let Ok((mut stream, _)) = command.accept().await {
                 let reply = Arc::clone(&reply);
+                let recorded = Arc::clone(&recorded);
+                let behavior = Arc::clone(&behavior);
                 tokio::spawn(async move {
                     let mut request = String::new();
                     if stream.read_to_string(&mut request).await.is_ok() {
+                        recorded.lock().unwrap().push(request.clone());
                         let output = if request == "j/clients" {
                             reply.lock().unwrap().clone()
+                        } else if request.contains("hl.dsp.window.move")
+                            || request.contains("movetoworkspacesilent")
+                        {
+                            let (accept, apply) = *behavior.lock().unwrap();
+                            if accept && apply {
+                                apply_move(&mut reply.lock().unwrap(), &request);
+                            }
+                            if accept {
+                                "ok".into()
+                            } else {
+                                "fixture rejected move".into()
+                            }
                         } else {
                             "ok".into()
                         };
@@ -291,7 +312,9 @@ impl MockCompositor {
         Ok(Self {
             response,
             events,
-            tasks: vec![commands, event_task],
+            tasks: vec![command_task, event_task],
+            commands,
+            move_behavior,
         })
     }
     pub fn set(&self, response: &str) {
@@ -300,6 +323,38 @@ impl MockCompositor {
     }
     pub fn disconnect(&self) {
         let _ = self.events.send("disconnect".into());
+    }
+    pub fn commands(&self) -> Vec<String> {
+        self.commands.lock().unwrap().clone()
+    }
+    pub fn moves(&self, accept: bool, apply: bool) {
+        *self.move_behavior.lock().unwrap() = (accept, apply);
+    }
+}
+
+fn apply_move(response: &mut String, request: &str) {
+    let Some(workspace) = request
+        .split("workspace = '")
+        .nth(1)
+        .and_then(|value| value.split('\'').next())
+    else {
+        return;
+    };
+    let Some(address) = request
+        .split("window = 'address:")
+        .nth(1)
+        .and_then(|value| value.split('\'').next())
+    else {
+        return;
+    };
+    if let Ok(mut windows) = serde_json::from_str::<Vec<Value>>(response) {
+        for window in &mut windows {
+            if window["address"] == address {
+                window["workspace"] =
+                    json!({"id": workspace.parse::<i64>().unwrap_or(-1), "name": workspace});
+            }
+        }
+        *response = serde_json::to_string(&windows).unwrap();
     }
 }
 impl Drop for MockCompositor {

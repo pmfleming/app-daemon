@@ -406,7 +406,9 @@ impl ApplicationService {
         let mut params = params;
         if matches!(
             params.action,
-            ApplicationAction::Activate | ApplicationAction::Launch
+            ApplicationAction::Activate
+                | ApplicationAction::Launch
+                | ApplicationAction::DesktopAction
         ) && let Some(workspace) = settings
             .for_application(&params.target_id)
             .and_then(|value| value.workspace_id.clone())
@@ -451,7 +453,7 @@ impl ApplicationService {
             let _launch = lock.lock().await;
             let (status, message, launch) =
                 match execute_action(&catalog, &params, &service, &operation_id).await {
-                    Ok(outcome) => ("completed", outcome.message, outcome.launch),
+                    Ok(outcome) => (outcome.status, outcome.message, outcome.launch),
                     Err(error) => ("failed", error.to_string(), None),
                 };
             let completed = operation_result(operation_id, &params, status, message, launch);
