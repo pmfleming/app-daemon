@@ -1,4 +1,5 @@
-use super::*;
+use super::{CgroupCounters, CgroupIo, ProcessIo, ProcessUsage, ResourceSampler, ResourceSnapshot};
+use std::collections::{HashMap, HashSet};
 
 #[test]
 fn unavailable_controllers_fall_back_then_recover_without_lifetime_spikes() {

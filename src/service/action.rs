@@ -93,10 +93,10 @@ pub(super) fn operation_result(
 }
 
 impl ActionOutcome {
-    fn new(catalog: &Catalog, target_id: &str, verb: &str, launch: Option<LaunchReceipt>) -> Self {
+    fn new(catalog: &Catalog, target_id: &str, verb: &str) -> Self {
         Self {
             message: format!("{verb} {}", display_name(catalog, target_id)),
-            launch,
+            launch: None,
             status: "completed",
         }
     }
@@ -142,51 +142,29 @@ pub(super) async fn execute_action(
         service,
         operation_id,
     };
-    params
-        .action
-        .execute(catalog, &windows, params, &progress)
-        .await
-}
-
-impl ApplicationAction {
-    async fn execute(
-        self,
-        catalog: &Catalog,
-        windows: &Snapshot,
-        params: &ExecuteParams,
-        progress: &LaunchProgress<'_>,
-    ) -> anyhow::Result<ActionOutcome> {
-        let target_id = &params.target_id;
-        match self {
-            Self::Activate => activate(catalog, windows, params, progress).await,
-            Self::Launch | Self::DesktopAction => {
-                launch_on_workspace(catalog, windows, params, progress, false).await
-            }
-            Self::FocusWindow => hyprland::focus(target_address(catalog, windows, params)?)
-                .await
-                .map(|()| ActionOutcome::new(catalog, target_id, "Focused", None)),
-            Self::Close => close_application(catalog, windows, target_id)
-                .await
-                .map(|()| ActionOutcome::new(catalog, target_id, "Close requested for", None)),
-            Self::CloseWindow => hyprland::close(target_address(catalog, windows, params)?)
-                .await
-                .map(|()| ActionOutcome::new(catalog, target_id, "Close requested for", None)),
-            Self::MoveToWorkspace => move_to_workspace(catalog, windows, params)
-                .await
-                .map(|()| ActionOutcome::new(catalog, target_id, "Moved", None)),
+    let target_id = &params.target_id;
+    match params.action {
+        ApplicationAction::Activate => activate(catalog, &windows, params, &progress).await,
+        ApplicationAction::Launch | ApplicationAction::DesktopAction => {
+            launch_on_workspace(catalog, &windows, params, &progress, false).await
         }
+        ApplicationAction::FocusWindow => {
+            hyprland::focus(target_address(catalog, &windows, params)?)
+                .await
+                .map(|()| ActionOutcome::new(catalog, target_id, "Focused"))
+        }
+        ApplicationAction::Close => close_application(catalog, &windows, target_id)
+            .await
+            .map(|()| ActionOutcome::new(catalog, target_id, "Close requested for")),
+        ApplicationAction::CloseWindow => {
+            hyprland::close(target_address(catalog, &windows, params)?)
+                .await
+                .map(|()| ActionOutcome::new(catalog, target_id, "Close requested for"))
+        }
+        ApplicationAction::MoveToWorkspace => move_to_workspace(catalog, &windows, params)
+            .await
+            .map(|()| ActionOutcome::new(catalog, target_id, "Moved")),
     }
-}
-
-async fn desktop_action(
-    catalog: &Catalog,
-    params: &ExecuteParams,
-) -> anyhow::Result<LaunchReceipt> {
-    let action = params
-        .desktop_action_id
-        .as_deref()
-        .context("desktop_action_id is required")?;
-    launch_action(catalog, &params.target_id, action).await
 }
 
 async fn activate(
@@ -198,7 +176,7 @@ async fn activate(
     let target_id = &params.target_id;
     if let Some(window) = target_window(catalog, windows, target_id) {
         hyprland::focus(&window.address).await?;
-        return Ok(ActionOutcome::new(catalog, target_id, "Focused", None));
+        return Ok(ActionOutcome::new(catalog, target_id, "Focused"));
     }
     launch_on_workspace(catalog, windows, params, progress, true).await
 }
@@ -220,7 +198,7 @@ async fn launch_on_workspace(
             .map(|window| window.pid),
     );
     let mut launch = if params.action == ApplicationAction::DesktopAction {
-        desktop_action(catalog, params).await?
+        launch_action(catalog, params).await?
     } else {
         launch(catalog, &params.target_id).await?
     };
@@ -244,52 +222,61 @@ async fn launch_on_workspace(
     } else {
         place_launched_window(catalog, windows, params, &mut launch, focus).await
     };
-    let mut outcome = ActionOutcome::new(catalog, &params.target_id, "Launched", None);
-    match result {
-        Ok(true) => {}
-        Ok(false) => {
-            let reason = if windows.available {
-                "no unambiguous new window with verified launch ownership"
-            } else {
-                "pre-launch compositor snapshot unavailable"
-            };
-            set_placement(
-                &mut launch,
-                PlacementStatus::Unavailable,
-                Some(reason.into()),
-            );
-            outcome.message.push_str(&format!(
-                "; placement/focus unavailable: {reason}. Do not relaunch automatically."
-            ));
-        }
-        Err(error) => {
-            // Preserve a successful launch receipt even if subsequent move,
-            // verification or focus fails. Retrying must never replay the launch.
-            if launch
-                .placement
-                .as_ref()
-                .is_some_and(|value| value.status == PlacementStatus::Placed)
-            {
-                outcome.status = "failed"; // Placement succeeded; focus failed.
-            } else {
+    Ok(ActionOutcome::launched(
+        catalog,
+        params,
+        launch,
+        result,
+        windows.available,
+    ))
+}
+
+impl ActionOutcome {
+    fn launched(
+        catalog: &Catalog,
+        params: &ExecuteParams,
+        mut launch: LaunchReceipt,
+        result: anyhow::Result<bool>,
+        snapshot_available: bool,
+    ) -> Self {
+        let mut outcome = Self::new(catalog, &params.target_id, "Launched");
+        match result {
+            Ok(true) => {}
+            Ok(false) => {
+                let reason = if snapshot_available {
+                    "no unambiguous new window with verified launch ownership"
+                } else {
+                    "pre-launch compositor snapshot unavailable"
+                };
                 set_placement(
                     &mut launch,
-                    PlacementStatus::Failed,
-                    Some(error.to_string()),
+                    PlacementStatus::Unavailable,
+                    Some(reason.into()),
                 );
-                if launch.placement.is_none() {
-                    outcome.status = "failed";
-                }
+                outcome.message.push_str(&format!(
+                    "; placement/focus unavailable: {reason}. Do not relaunch automatically."
+                ));
             }
-            outcome.message.push_str(&format!(
-                "; placement/focus failed: {error}. The app has already started."
-            ));
+            Err(error) => {
+                // Preserve a successful launch receipt even if subsequent move,
+                // verification or focus fails. Retrying must never replay the launch.
+                match launch.placement.as_mut() {
+                    Some(placement) if placement.status != PlacementStatus::Placed => {
+                        placement.status = PlacementStatus::Failed;
+                        placement.reason = Some(error.to_string());
+                    }
+                    _ => outcome.status = "failed", // No placement, or placement succeeded but focus failed.
+                }
+                outcome.message.push_str(&format!(
+                    "; placement/focus failed: {error}. The app has already started."
+                ));
+            }
         }
-    }
-    tracing::debug!(target_id = %params.target_id, backend = %launch.backend,
+        tracing::debug!(target_id = %params.target_id, backend = %launch.backend,
         unit = ?launch.unit, placement = ?launch.placement, "application launch outcome");
-    outcome.launch = Some(launch);
-    Ok(outcome)
+        outcome.launch = Some(launch);
+        outcome
+    }
 }
 
 fn set_placement(launch: &mut LaunchReceipt, status: PlacementStatus, reason: Option<String>) {
@@ -312,7 +299,7 @@ async fn place_launched_window(
     let previous_addresses = previous
         .clients
         .iter()
-        .map(|window| window.address.clone())
+        .map(|window| window.address.as_str())
         .collect::<Vec<_>>();
     let Some(window) =
         wait_for_new_window(catalog, &params.target_id, &previous_addresses, launch).await
@@ -333,7 +320,7 @@ async fn place_launched_window(
 async fn wait_for_new_window(
     catalog: &Catalog,
     target_id: &str,
-    previous_addresses: &[String],
+    previous_addresses: &[&str],
     launch: &mut LaunchReceipt,
 ) -> Option<Client> {
     const WINDOW_TIMEOUT: Duration = Duration::from_secs(8);
@@ -341,7 +328,7 @@ async fn wait_for_new_window(
     loop {
         launch.observe_processes();
         let windows = Snapshot::load().await;
-        if let Some(address) = correlated_window(&windows, previous_addresses, |window| {
+        if let Some(window) = correlated_window(windows, previous_addresses, |window| {
             launch.owns_process(window.pid)
                 && (resolve_target(catalog, window) == target_id
                     // Chromium-based applications may adopt a generic Chromium
@@ -349,10 +336,7 @@ async fn wait_for_new_window(
                     // identity remains valid even if that helper is installed.
                     || resolve_target_with_cgroup(catalog, window, None) == target_id)
         }) {
-            return windows
-                .clients
-                .into_iter()
-                .find(|window| window.address == address);
+            return Some(window);
         }
         if Instant::now() >= deadline {
             return None;
@@ -394,17 +378,17 @@ fn workspace_matches(window: &Client, workspace: &str) -> bool {
 }
 
 fn correlated_window(
-    windows: &Snapshot,
-    previous_addresses: &[String],
+    windows: Snapshot,
+    previous_addresses: &[&str],
     belongs: impl Fn(&Client) -> bool,
-) -> Option<String> {
+) -> Option<Client> {
     let mut matches = windows
         .clients
-        .iter()
-        .filter(|window| !previous_addresses.contains(&window.address) && belongs(window));
+        .into_iter()
+        .filter(|window| !previous_addresses.contains(&window.address.as_str()) && belongs(window));
     let window = matches.next()?;
     // A multi-window launch is ambiguous too; leave all windows untouched.
-    matches.next().is_none().then(|| window.address.clone())
+    matches.next().is_none().then_some(window)
 }
 
 async fn move_to_workspace(
@@ -425,25 +409,16 @@ async fn close_application(
     windows: &Snapshot,
     target_id: &str,
 ) -> anyhow::Result<()> {
-    let addresses = application_window_addresses(catalog, windows, target_id);
-    anyhow::ensure!(!addresses.is_empty(), "application is no longer running");
-    for address in addresses {
-        hyprland::close(&address).await?;
-    }
-    Ok(())
-}
-
-pub(super) fn application_window_addresses(
-    catalog: &Catalog,
-    windows: &Snapshot,
-    target_id: &str,
-) -> Vec<String> {
-    windows
+    let windows = windows
         .clients
         .iter()
         .filter(|window| resolve_target(catalog, window) == target_id)
-        .map(|window| window.address.clone())
-        .collect()
+        .collect::<Vec<_>>();
+    anyhow::ensure!(!windows.is_empty(), "application is no longer running");
+    for window in windows {
+        hyprland::close(&window.address).await?;
+    }
+    Ok(())
 }
 
 fn target_address<'a>(
@@ -465,15 +440,10 @@ fn target_address<'a>(
     Ok(&window.address)
 }
 
-fn display_name(catalog: &Catalog, target_id: &str) -> String {
+fn display_name<'a>(catalog: &'a Catalog, target_id: &'a str) -> &'a str {
     catalog.by_id(target_id).map_or_else(
-        || {
-            target_id
-                .strip_prefix("window-group:")
-                .unwrap_or(target_id)
-                .to_owned()
-        },
-        |entry| entry.name.clone(),
+        || target_id.strip_prefix("window-group:").unwrap_or(target_id),
+        |entry| entry.name.as_str(),
     )
 }
 
@@ -534,11 +504,12 @@ async fn launch_in_terminal(
         .context("start application in the default terminal")
 }
 
-async fn launch_action(
-    catalog: &Catalog,
-    target_id: &str,
-    action_id: &str,
-) -> anyhow::Result<LaunchReceipt> {
+async fn launch_action(catalog: &Catalog, params: &ExecuteParams) -> anyhow::Result<LaunchReceipt> {
+    let target_id = &params.target_id;
+    let action_id = params
+        .desktop_action_id
+        .as_deref()
+        .context("desktop_action_id is required")?;
     let entry = catalog
         .by_id(target_id)
         .context("application is no longer available")?;

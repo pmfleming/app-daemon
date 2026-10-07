@@ -1,4 +1,5 @@
-use super::*;
+use super::read_cgroup_counters_at;
+use std::fs;
 
 #[test]
 fn reads_cgroup_controllers_independently_and_distinguishes_idle_from_missing() -> anyhow::Result<()>

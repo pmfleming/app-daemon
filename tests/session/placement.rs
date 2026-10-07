@@ -1,6 +1,7 @@
 //! Private bus/compositor regressions. No host application or workspace changes.
-use super::*;
-use serde_json::Value;
+use super::support::{Session, call, events, operation};
+use anyhow::{Context, Result};
+use serde_json::{Value, json};
 
 struct Manager;
 #[zbus::interface(name = "org.freedesktop.systemd1.Manager")]

@@ -1,8 +1,8 @@
-use super::{
-    ProcessStat, ResourceProvider,
-    system::{descendants_where, process_children},
+use super::{ProcessStat, ResourceProvider};
+use crate::{
+    catalog::Catalog,
+    process::{descendants_where, process_children},
 };
-use crate::catalog::Catalog;
 use std::collections::{HashMap, HashSet, hash_map::Entry};
 
 type Members = HashMap<String, HashSet<u32>>;
@@ -36,7 +36,8 @@ impl KnownRoots {
             );
         }
         members.retain(|id, _| !catalog.by_id(id).is_some_and(|entry| entry.launch_only));
-        let children = process_children(processes);
+        let children =
+            process_children(processes.iter().map(|(&pid, stat)| (pid, stat.parent_pid)));
         inherit_owners(&mut owners, &children);
         let mut roots = HashMap::new();
         for (id, pids) in members {

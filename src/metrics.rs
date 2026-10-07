@@ -1,3 +1,7 @@
+pub(crate) fn add_counter(counter: &mut u64, value: u64) {
+    *counter = counter.saturating_add(value);
+}
+
 pub(crate) fn finite_nonnegative(value: f64) -> f64 {
     if value.is_finite() && value > 0.0 {
         value

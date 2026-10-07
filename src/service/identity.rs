@@ -4,7 +4,7 @@ use std::{borrow::Cow, collections::HashMap};
 use crate::{
     catalog::Catalog,
     hyprland::{Client, Snapshot},
-    resources::process_cgroup,
+    process::process_cgroup,
 };
 
 pub(super) fn group_windows<'a>(

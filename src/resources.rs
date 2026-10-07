@@ -7,8 +7,9 @@ use std::{
 };
 
 use crate::{
-    metrics::{available_label, finite_nonnegative, rate, rounded},
+    metrics::{add_counter, available_label, finite_nonnegative, rate, rounded},
     model::{ComputeUsage, EnergyUsage, NetworkUsage, ResourceUsage, StorageUsage},
+    process::{descendants, process_cgroup, process_children, read_processes},
 };
 
 mod discovery;
@@ -24,14 +25,11 @@ use disk::AppDiskCache;
 use energy::{BatterySample, EnergyProvider, EnergySampler};
 use gpu::{GpuProcessStat, read_gpu_processes};
 use network::{NetworkCounters, read_network_counters};
-#[cfg(test)]
 use system::parse_process_stat;
-pub(crate) use system::process_cgroup;
 use system::{
-    application_disk_usage, cgroup_members_for_paths, cgroup_paths_for_roots, descendants,
-    merge_disk_files, process_children, read_cgroup_counters, read_cgroup_members,
-    read_process_file_sets, read_process_io, read_process_memory, read_process_sockets,
-    read_processes, read_system_cpu, shared_target_pids,
+    application_disk_usage, cgroup_members_for_paths, cgroup_paths_for_roots, merge_disk_files,
+    read_cgroup_counters, read_cgroup_members, read_process_file_sets, read_process_io,
+    read_process_memory, read_process_sockets, read_system_cpu, shared_target_pids,
 };
 
 #[derive(Debug, Clone, Copy)]
@@ -161,7 +159,7 @@ impl ResourceProvider for LinuxResourceProvider {
     }
 
     fn processes(&self) -> HashMap<u32, ProcessStat> {
-        read_processes()
+        read_processes(parse_process_stat)
     }
 
     fn process_memory(&self, pid: u32) -> MemoryUsage {
@@ -230,16 +228,10 @@ pub struct ResourceSnapshot {
     energy_source: String,
 }
 
-struct SampledNetwork {
-    current: HashMap<u64, NetworkCounters>,
-    deltas: HashMap<u64, NetworkCounters>,
-    available: bool,
-}
-
-struct ResourceAttribution {
+struct ResourceAttribution<'a> {
     root_count: usize,
     pids: HashSet<u32>,
-    cgroup_paths: HashSet<String>,
+    cgroup_paths: HashSet<&'a str>,
     cgroup_roots: usize,
     cgroups_cover_process_trees: bool,
 }
@@ -254,7 +246,6 @@ struct ProcessAggregation {
     memory_processes: u64,
     pss_processes: u64,
     gpu_processes: u64,
-    gpu_engine_percent: HashMap<String, f64>,
     network_processes: u64,
     storage_processes: u64,
     file_processes: u64,
@@ -340,7 +331,10 @@ impl ResourceSnapshot {
         self.complete(aggregate.usage, process_cpu_percent)
     }
 
-    fn resource_attribution(&self, roots: impl IntoIterator<Item = u32>) -> ResourceAttribution {
+    fn resource_attribution(
+        &self,
+        roots: impl IntoIterator<Item = u32>,
+    ) -> ResourceAttribution<'_> {
         let roots = roots
             .into_iter()
             .filter(|pid| *pid > 0)
@@ -358,7 +352,7 @@ impl ResourceSnapshot {
         attribution
     }
 
-    fn attribute_root(&self, attribution: &mut ResourceAttribution, root: u32) {
+    fn attribute_root<'a>(&'a self, attribution: &mut ResourceAttribution<'a>, root: u32) {
         // A descendant can move into a sibling scope after it is spawned (terminal
         // emulators commonly do this for each surface). Keep process-tree members in
         // the attribution even when the application root has a specific cgroup.
@@ -371,13 +365,14 @@ impl ResourceSnapshot {
         attribution.cgroups_cover_process_trees &= tree.is_subset(members);
         attribution.pids.extend(members);
         if let Some(path) = self.cgroup_path_by_root.get(&root) {
-            attribution.cgroup_paths.insert(path.clone());
+            attribution.cgroup_paths.insert(path.as_str());
         }
         attribution.cgroup_roots += 1;
     }
 
     fn aggregate_processes(&self, pids: &HashSet<u32>) -> ProcessAggregation {
         let mut aggregate = ProcessAggregation::default();
+        let mut gpu_engines = HashMap::<&str, f64>::new();
         for process in pids.iter().filter_map(|pid| self.processes.get(pid)) {
             aggregate.usage.add_process(process);
             aggregate.covered_processes += 1;
@@ -385,10 +380,7 @@ impl ResourceSnapshot {
             aggregate.pss_processes += u64::from(process.memory.pss_available);
             aggregate.gpu_processes += u64::from(process.gpu_available);
             for (engine, percent) in &process.gpu_engine_percent {
-                *aggregate
-                    .gpu_engine_percent
-                    .entry(engine.clone())
-                    .or_default() += percent;
+                *gpu_engines.entry(engine).or_default() += percent;
             }
             aggregate.network_processes += u64::from(process.sockets.is_some());
             aggregate.storage_processes += u64::from(process.storage_available);
@@ -401,11 +393,8 @@ impl ResourceSnapshot {
                 .network_sockets
                 .extend(process.sockets.as_deref().into_iter().flatten().copied());
         }
-        aggregate.usage.compute.gpu_busy_percent = aggregate
-            .gpu_engine_percent
-            .values()
-            .copied()
-            .fold(0.0, f64::max);
+        aggregate.usage.compute.gpu_busy_percent =
+            gpu_engines.values().copied().fold(0.0, f64::max);
         aggregate
     }
 
@@ -416,13 +405,13 @@ impl ResourceSnapshot {
             && attribution
                 .cgroup_paths
                 .iter()
-                .all(|path| self.cgroup_usage.contains_key(path))
+                .all(|path| self.cgroup_usage.contains_key(*path))
     }
 
-    fn apply_cgroup_usage(&self, usage: &mut ResourceUsage, paths: &HashSet<String>) {
+    fn apply_cgroup_usage(&self, usage: &mut ResourceUsage, paths: &HashSet<&str>) {
         let groups = paths
             .iter()
-            .filter_map(|path| self.cgroup_usage.get(path))
+            .filter_map(|path| self.cgroup_usage.get(*path))
             .collect::<Vec<_>>();
         if let Some(cpu) = groups
             .iter()
@@ -490,7 +479,7 @@ impl ResourceSnapshot {
             || (complete_cgroup
                 && attribution.cgroup_paths.iter().all(|path| {
                     self.cgroup_usage
-                        .get(path)
+                        .get(*path)
                         .is_some_and(|usage| usage.io.is_some())
                 }));
         measurement.referenced_files_available = aggregate.file_processes > 0;
@@ -660,10 +649,6 @@ impl ResourceUsage {
             process.io.cancelled_write_bytes,
         );
     }
-}
-
-fn add_counter(counter: &mut u64, value: u64) {
-    *counter = counter.saturating_add(value);
 }
 
 impl ComputeUsage {
@@ -887,7 +872,8 @@ impl ResourceSampler {
             .refresh(identities, now, OPEN_FILE_REFRESH_INTERVAL, |pid| {
                 Arc::new(provider.process_files(pid))
             });
-        let network = self.sample_network(provider, active_processes);
+        (snapshot.network_deltas, snapshot.network_counters_available) =
+            self.sample_network(provider, active_processes);
         self.memory
             .refresh(identities, now, MEMORY_REFRESH_INTERVAL, |pid| {
                 provider.process_memory(pid)
@@ -897,8 +883,6 @@ impl ResourceSampler {
             .copied()
             .filter_map(|pid| Some((pid, provider.process_io(pid)?)))
             .collect::<HashMap<_, _>>();
-        snapshot.network_deltas = network.deltas;
-        snapshot.network_counters_available = network.available;
         let mut next_gpu_engines = HashMap::new();
         for (&pid, process) in current {
             let cpu_percent = self.cpu_percent(pid, process, system_delta, logical_cpus);
@@ -946,7 +930,6 @@ impl ResourceSampler {
             );
         }
         self.previous_gpu_engines = next_gpu_engines;
-        self.previous_network_counters = network.current;
         self.remember_processes(current, &sampled_io);
     }
 
@@ -954,7 +937,7 @@ impl ResourceSampler {
         &mut self,
         provider: &dyn ResourceProvider,
         active_processes: &HashSet<u32>,
-    ) -> SampledNetwork {
+    ) -> (HashMap<u64, NetworkCounters>, bool) {
         // Socket discovery is lightweight and must not share the file-footprint TTL.
         let sockets_by_pid = active_processes
             .iter()
@@ -1012,11 +995,8 @@ impl ResourceSampler {
             .collect();
         self.previous_sockets_by_pid = sockets_by_pid;
         self.previous_network_available = available;
-        SampledNetwork {
-            current,
-            deltas,
-            available,
-        }
+        self.previous_network_counters = current;
+        (deltas, available)
     }
 
     fn cpu_percent(
@@ -1181,7 +1161,8 @@ impl ProcessSample {
         processes: HashMap<u32, ProcessStat>,
         catalog: Option<&crate::catalog::Catalog>,
     ) -> (Self, ResourceSnapshot) {
-        let children = process_children(&processes);
+        let children =
+            process_children(processes.iter().map(|(&pid, stat)| (pid, stat.parent_pid)));
         let roots = targets
             .values()
             .flatten()

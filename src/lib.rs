@@ -10,6 +10,7 @@ pub mod launch;
 mod metrics;
 pub mod model;
 mod platform;
+mod process;
 pub mod protocol;
 pub mod resources;
 mod resume;

@@ -12,11 +12,11 @@ use std::{
 fn descendant_traversal_prunes_rejected_branches_and_terminates_cycles() {
     let children = HashMap::from([(1, vec![2, 3]), (2, vec![4]), (3, vec![1])]);
     assert_eq!(
-        super::system::descendants([0, 1], &children),
+        crate::process::descendants([0, 1], &children),
         HashSet::from([1, 2, 3, 4])
     );
     assert_eq!(
-        super::system::descendants_where([1, 1], &children, |pid| pid != 2),
+        crate::process::descendants_where([1, 1], &children, |pid| pid != 2),
         HashSet::from([1, 3]),
     );
 }

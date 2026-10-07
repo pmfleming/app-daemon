@@ -1,4 +1,7 @@
 //! Short-lived launch ownership, independent of an application's current cgroup.
+use crate::process::{
+    descendants_where, process_cgroup, process_children, process_stat_fields, read_processes,
+};
 use std::{collections::HashMap, fs};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -20,12 +23,11 @@ impl Provenance {
         target: &str,
         window_pids: impl IntoIterator<Item = u32>,
     ) -> Self {
-        let processes = processes();
+        let processes = read_processes(parse_process);
         let mut roots = window_pids.into_iter().collect::<Vec<_>>();
         roots.extend(processes.keys().copied().filter(|pid| {
-            crate::resources::process_cgroup(*pid)
-                .and_then(|path| catalog.target_for_cgroup(&path).map(str::to_owned))
-                .is_some_and(|id| id == target)
+            process_cgroup(*pid)
+                .is_some_and(|path| catalog.target_for_cgroup(&path) == Some(target))
         }));
         let mut owner = Self::default();
         owner.observe_processes(&processes, &roots);
@@ -51,13 +53,13 @@ impl Provenance {
     }
 
     pub(super) fn observe(&mut self, unit: Option<&str>) {
-        let processes = processes();
+        let processes = read_processes(parse_process);
         let roots = processes
             .keys()
             .copied()
             .filter(|pid| {
                 unit.is_some_and(|unit| {
-                    crate::resources::process_cgroup(*pid)
+                    process_cgroup(*pid)
                         .is_some_and(|path| path.split('/').any(|part| part == unit))
                 })
             })
@@ -71,24 +73,20 @@ impl Provenance {
                 .get(pid)
                 .is_some_and(|process| process.start == *start)
         });
-        for pid in roots {
-            if let Some(process) = processes.get(pid) {
-                self.identities.insert(*pid, process.start);
-            }
-        }
-        loop {
-            let before = self.identities.len();
-            for (&pid, process) in processes {
-                if let Some(parent_start) = self.identities.get(&process.parent)
-                    && process.start >= *parent_start
-                {
-                    self.identities.insert(pid, process.start);
-                }
-            }
-            if self.identities.len() == before {
-                break;
-            }
-        }
+        // Build only valid ancestry edges, then visit each descendant once.
+        let children = process_children(processes.iter().filter_map(|(&pid, process)| {
+            let parent = processes.get(&process.parent)?;
+            (process.start >= parent.start).then_some((pid, process.parent))
+        }));
+        let owned = descendants_where(
+            roots.iter().chain(self.identities.keys()).copied(),
+            &children,
+            |pid| processes.contains_key(&pid),
+        );
+        self.identities = owned
+            .into_iter()
+            .filter_map(|pid| Some((pid, processes.get(&pid)?.start)))
+            .collect();
     }
 }
 
@@ -99,11 +97,7 @@ fn read_process(pid: u32) -> Option<Process> {
 fn parse_process(stat: &str) -> Option<Process> {
     // comm can contain spaces and parentheses. Fields after its final ')' start
     // with state (field 3); starttime is field 22 and ppid is field 4.
-    let fields = stat
-        .rsplit_once(')')?
-        .1
-        .split_whitespace()
-        .collect::<Vec<_>>();
+    let fields = process_stat_fields(stat)?;
     if matches!(*fields.first()?, "Z" | "X") {
         return None;
     }
@@ -111,19 +105,6 @@ fn parse_process(stat: &str) -> Option<Process> {
         parent: fields.get(1)?.parse().ok()?,
         start: fields.get(19)?.parse().ok()?,
     })
-}
-
-fn processes() -> HashMap<u32, Process> {
-    let Ok(entries) = fs::read_dir("/proc") else {
-        return HashMap::new();
-    };
-    entries
-        .filter_map(Result::ok)
-        .filter_map(|entry| {
-            let pid = entry.file_name().to_str()?.parse().ok()?;
-            Some((pid, read_process(pid)?))
-        })
-        .collect()
 }
 
 /// A unique launch unit can retain MainPID even after Chromium migrates that
@@ -173,43 +154,30 @@ pub(super) async fn bus_owner_pid(connection: &zbus::Connection, name: &str) -> 
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{Process, Provenance, parse_process};
+    use std::collections::HashMap;
 
     #[test]
     fn retains_migrated_processes_and_observed_descendants_but_rejects_pid_reuse() {
         let mut owner = Provenance::default();
-        let mut processes = HashMap::from([
-            (
-                10,
-                Process {
-                    parent: 1,
-                    start: 100,
-                },
-            ),
-            (
-                11,
-                Process {
-                    parent: 10,
-                    start: 101,
-                },
-            ),
-            (
-                12,
-                Process {
-                    parent: 11,
-                    start: 102,
-                },
-            ),
-            (
-                20,
-                Process {
-                    parent: 1,
-                    start: 99,
-                },
-            ),
-        ]);
+        let mut processes = [
+            (10, 1, 100),
+            (11, 10, 101),
+            (12, 11, 102),
+            (20, 1, 99),
+            (21, 10, 99),
+            (30, 31, 300),
+            (31, 30, 300),
+        ]
+        .into_iter()
+        .map(|(pid, parent, start)| (pid, Process { parent, start }))
+        .collect::<HashMap<_, _>>();
         owner.observe_processes(&processes, &[10]);
         assert_eq!(owner.identities.len(), 3);
+        assert!(
+            !owner.identities.contains_key(&21),
+            "a child cannot predate its parent"
+        );
         // No launch-cgroup members remain. An observed child is reparented.
         processes.remove(&10);
         processes.get_mut(&11).unwrap().parent = 1;
@@ -221,6 +189,9 @@ mod tests {
         processes.get_mut(&12).unwrap().start = 201;
         owner.observe_processes(&processes, &[]);
         assert!(owner.identities.is_empty());
+        // Broken/cyclic ancestry and duplicate or missing roots still terminate.
+        owner.observe_processes(&processes, &[30, 30, 999]);
+        assert_eq!(owner.identities, HashMap::from([(30, 300), (31, 300)]));
     }
 
     #[test]

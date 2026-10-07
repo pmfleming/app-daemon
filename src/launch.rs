@@ -51,7 +51,7 @@ pub struct LaunchReceipt {
 impl LaunchReceipt {
     pub(crate) fn owns_process(&self, pid: u32) -> bool {
         self.provenance.owns(pid)
-            || crate::resources::process_cgroup(pid).is_some_and(|path| self.owns_cgroup(&path))
+            || crate::process::process_cgroup(pid).is_some_and(|path| self.owns_cgroup(&path))
     }
 
     pub(crate) fn remember_process(&mut self, pid: u32) {
@@ -309,7 +309,7 @@ pub(crate) async fn spawn_for_application(
 }
 
 fn ensure_safe_backend(backend: LaunchBackend) -> anyhow::Result<()> {
-    let cgroup = crate::resources::process_cgroup(std::process::id());
+    let cgroup = crate::process::process_cgroup(std::process::id());
     anyhow::ensure!(
         backend != LaunchBackend::Direct
             || cgroup.as_deref().is_some_and(|path| !service_cgroup(path)),

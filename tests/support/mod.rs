@@ -241,11 +241,39 @@ impl Drop for Session {
 }
 
 pub struct MockCompositor {
-    response: Arc<Mutex<String>>,
+    state: Arc<Mutex<CompositorState>>,
     events: broadcast::Sender<String>,
     tasks: Vec<tokio::task::JoinHandle<()>>,
-    commands: Arc<Mutex<Vec<String>>>,
-    move_behavior: Arc<Mutex<(bool, bool)>>,
+}
+
+struct CompositorState {
+    response: String,
+    commands: Vec<String>,
+    move_behavior: (bool, bool),
+}
+
+impl CompositorState {
+    fn respond(&mut self, request: String) -> String {
+        let output = if request == "j/clients" {
+            self.response.clone()
+        } else if request.contains("hl.dsp.window.move")
+            || request.contains("movetoworkspacesilent")
+        {
+            let (accept, apply) = self.move_behavior;
+            if accept && apply {
+                apply_move(&mut self.response, &request);
+            }
+            if accept {
+                "ok".into()
+            } else {
+                "fixture rejected move".into()
+            }
+        } else {
+            "ok".into()
+        };
+        self.commands.push(request);
+        output
+    }
 }
 impl MockCompositor {
     async fn start(root: &Path) -> Result<Self> {
@@ -253,40 +281,21 @@ impl MockCompositor {
         fs::create_dir_all(&path)?;
         let command = UnixListener::bind(path.join(".socket.sock"))?;
         let event = UnixListener::bind(path.join(".socket2.sock"))?;
-        let response = Arc::new(Mutex::new("[]".to_owned()));
-        let reply = Arc::clone(&response);
+        let state = Arc::new(Mutex::new(CompositorState {
+            response: "[]".into(),
+            commands: Vec::new(),
+            move_behavior: (true, true),
+        }));
+        let reply = Arc::clone(&state);
         let (events, _) = broadcast::channel::<String>(32);
         let sender = events.clone();
-        let commands = Arc::new(Mutex::new(Vec::new()));
-        let recorded = Arc::clone(&commands);
-        let move_behavior = Arc::new(Mutex::new((true, true)));
-        let behavior = Arc::clone(&move_behavior);
         let command_task = tokio::spawn(async move {
             while let Ok((mut stream, _)) = command.accept().await {
                 let reply = Arc::clone(&reply);
-                let recorded = Arc::clone(&recorded);
-                let behavior = Arc::clone(&behavior);
                 tokio::spawn(async move {
                     let mut request = String::new();
                     if stream.read_to_string(&mut request).await.is_ok() {
-                        recorded.lock().unwrap().push(request.clone());
-                        let output = if request == "j/clients" {
-                            reply.lock().unwrap().clone()
-                        } else if request.contains("hl.dsp.window.move")
-                            || request.contains("movetoworkspacesilent")
-                        {
-                            let (accept, apply) = *behavior.lock().unwrap();
-                            if accept && apply {
-                                apply_move(&mut reply.lock().unwrap(), &request);
-                            }
-                            if accept {
-                                "ok".into()
-                            } else {
-                                "fixture rejected move".into()
-                            }
-                        } else {
-                            "ok".into()
-                        };
+                        let output = reply.lock().unwrap().respond(request);
                         let _ = stream.write_all(output.as_bytes()).await;
                     }
                 });
@@ -310,25 +319,23 @@ impl MockCompositor {
             }
         });
         Ok(Self {
-            response,
+            state,
             events,
             tasks: vec![command_task, event_task],
-            commands,
-            move_behavior,
         })
     }
     pub fn set(&self, response: &str) {
-        *self.response.lock().unwrap() = response.to_owned();
+        self.state.lock().unwrap().response = response.to_owned();
         let _ = self.events.send("openwindow>>fixture".into());
     }
     pub fn disconnect(&self) {
         let _ = self.events.send("disconnect".into());
     }
     pub fn commands(&self) -> Vec<String> {
-        self.commands.lock().unwrap().clone()
+        self.state.lock().unwrap().commands.clone()
     }
     pub fn moves(&self, accept: bool, apply: bool) {
-        *self.move_behavior.lock().unwrap() = (accept, apply);
+        self.state.lock().unwrap().move_behavior = (accept, apply);
     }
 }
 

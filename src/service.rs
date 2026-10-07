@@ -10,7 +10,7 @@ use std::{
 
 use serde::Deserialize;
 use tokio::{
-    sync::{Mutex, Notify, RwLock, broadcast, mpsc, oneshot, watch},
+    sync::{Mutex, Notify, RwLock, broadcast, oneshot, watch},
     time,
 };
 use uuid::Uuid;
@@ -18,7 +18,7 @@ use uuid::Uuid;
 use crate::{
     catalog::Catalog,
     history::{HistoryStore, merged_labels, now_milliseconds, persist_snapshot},
-    hyprland::{self, Snapshot},
+    hyprland::Snapshot,
     model::{
         ApplicationEnergyOverview, ApplicationEnergySummary, ApplicationPage,
         ApplicationResourceHistory, OperationResult,
@@ -28,10 +28,9 @@ use crate::{
 };
 
 mod action;
-mod catalog_watch;
-use catalog_watch::CatalogEvent;
 #[cfg(feature = "benchmarks")]
 pub(crate) mod benchmarks;
+mod catalog_watch;
 mod identity;
 mod operations;
 pub(crate) mod query;
@@ -114,7 +113,7 @@ impl ApplicationService {
                     service.stop.subscribe(),
                 )),
                 tokio::spawn(until_shutdown(
-                    track_state(Arc::downgrade(&service)),
+                    watcher::track_state(Arc::downgrade(&service)),
                     service.stop.subscribe(),
                 )),
                 tokio::spawn(track_resources(Arc::downgrade(&service))),
@@ -494,11 +493,6 @@ impl ApplicationService {
 const ACTIVE_RESOURCE_SAMPLE_INTERVAL: Duration = Duration::from_secs(2);
 const BACKGROUND_RESOURCE_SAMPLE_INTERVAL: Duration = Duration::from_secs(10);
 const RESOURCE_DEMAND_WINDOW: Duration = Duration::from_secs(15);
-const WINDOW_RECOVERY_INTERVAL: Duration = Duration::from_secs(5);
-const CATALOG_RECOVERY_INTERVAL: Duration = Duration::from_secs(30);
-const HEALTHY_WINDOW_INTERVAL: Duration = Duration::from_secs(30);
-const HEALTHY_CATALOG_INTERVAL: Duration = Duration::from_secs(300);
-const EVENT_DEBOUNCE: Duration = Duration::from_millis(75);
 const HISTORY_SAVE_INTERVAL: Duration = Duration::from_secs(60);
 
 #[derive(Debug, Default)]
@@ -517,137 +511,6 @@ impl ResourceSamplingPolicy {
         } else {
             BACKGROUND_RESOURCE_SAMPLE_INTERVAL
         }
-    }
-}
-
-async fn track_state(service: std::sync::Weak<ApplicationService>) {
-    let (window_sender, mut window_events) = mpsc::channel(64);
-    let events_task = tokio::spawn(hyprland::watch_window_events(window_sender));
-    let _events = crate::platform::AbortOnDrop(events_task.abort_handle());
-    let (catalog_sender, mut catalog_events) = mpsc::channel(64);
-    let mut catalog_watch = watcher::WatchRecovery::new(Instant::now());
-    let mut window_events_open = true;
-    let mut catalog_events_open = true;
-    let mut window_connected = false;
-    let Some(initial) = service.upgrade() else {
-        return;
-    };
-    let mut resumes = initial.resume_events.clone();
-    let (_, mut window_available) =
-        tokio::join!(initial.refresh_catalog(), initial.refresh_windows());
-    drop(initial);
-    let mut window_refreshed = Instant::now();
-    let mut catalog_refreshed = Instant::now();
-
-    loop {
-        let Some(service) = service.upgrade() else {
-            return;
-        };
-        let (window_interval, catalog_interval) = reconciliation_intervals(
-            window_connected && window_available,
-            catalog_watch.retry_deadline().is_none(),
-        );
-        tokio::select! {
-            _ = resumes.changed(), if resumes.has_changed().is_ok() => {
-                (_, window_available) = tokio::join!(service.refresh_catalog(), service.refresh_windows());
-                window_refreshed = Instant::now();
-                catalog_refreshed = window_refreshed;
-                catalog_watch.rebuild(catalog_refreshed);
-            }
-            _ = wait_for_watcher_retry(catalog_watch.retry_deadline()) => {
-                if let Err(error) = catalog_watch.attempt(Instant::now(), || catalog_watch::create(catalog_sender.clone())) {
-                    tracing::warn!(%error, "catalog watcher unavailable; polling continues, retry scheduled");
-                } else {
-                    // Close the gap between the last snapshot and installing a watch.
-                    service.refresh_catalog().await;
-                    catalog_refreshed = Instant::now();
-                }
-            }
-            event = window_events.recv(), if window_events_open => {
-                let Some(event) = event else {
-                    window_events_open = false;
-                    window_connected = false;
-                    tracing::warn!("window event stream ended; continuing reconciliation");
-                    continue;
-                };
-                let mut refresh = observe_window_event(event, &mut window_connected);
-                if !refresh { continue; }
-                time::sleep(EVENT_DEBOUNCE).await;
-                while let Ok(event) = window_events.try_recv() {
-                    refresh |= observe_window_event(event, &mut window_connected);
-                }
-                if refresh {
-                    window_available = service.refresh_windows().await;
-                    window_refreshed = Instant::now();
-                }
-            }
-            event = catalog_events.recv(), if catalog_events_open => {
-                let Some(event) = event else { catalog_events_open = false; continue; };
-                let mut failed = matches!(event, CatalogEvent::Failed);
-                let mut rewatch = matches!(event, CatalogEvent::Rewatch);
-                time::sleep(EVENT_DEBOUNCE).await;
-                while let Ok(event) = catalog_events.try_recv() {
-                    failed |= matches!(event, CatalogEvent::Failed);
-                    rewatch |= matches!(event, CatalogEvent::Rewatch);
-                }
-                if failed { catalog_watch.failed(Instant::now()); }
-                else if rewatch { catalog_watch.rebuild(Instant::now()); }
-                service.refresh_catalog().await;
-                catalog_refreshed = Instant::now();
-            }
-            _ = time::sleep_until(time::Instant::from_std(window_refreshed + window_interval)) => {
-                window_available = service.refresh_windows().await;
-                window_refreshed = Instant::now();
-            }
-            _ = time::sleep_until(time::Instant::from_std(catalog_refreshed + catalog_interval)) => {
-                // Install the repaired watch before taking a single snapshot,
-                // avoiding a second full catalog scan on every healthy timer.
-                if catalog_watch.retry_deadline().is_none() {
-                    catalog_watch.rebuild(Instant::now());
-                    if let Err(error) = catalog_watch.attempt(Instant::now(), || catalog_watch::create(catalog_sender.clone())) {
-                        tracing::warn!(%error, "catalog watch repair failed; polling continues");
-                    }
-                }
-                service.refresh_catalog().await;
-                catalog_refreshed = Instant::now();
-            }
-        }
-    }
-}
-
-fn reconciliation_intervals(windows_healthy: bool, catalog_healthy: bool) -> (Duration, Duration) {
-    (
-        if windows_healthy {
-            HEALTHY_WINDOW_INTERVAL
-        } else {
-            WINDOW_RECOVERY_INTERVAL
-        },
-        if catalog_healthy {
-            HEALTHY_CATALOG_INTERVAL
-        } else {
-            CATALOG_RECOVERY_INTERVAL
-        },
-    )
-}
-
-fn observe_window_event(event: shelllist_hyprland::Event, connected: &mut bool) -> bool {
-    match event {
-        shelllist_hyprland::Event::Connected => {
-            *connected = true;
-            true
-        }
-        shelllist_hyprland::Event::Disconnected => {
-            *connected = false;
-            true
-        }
-        shelllist_hyprland::Event::Message(line) => hyprland::window_event_relevant(&line),
-    }
-}
-
-async fn wait_for_watcher_retry(deadline: Option<Instant>) {
-    match deadline {
-        Some(deadline) => time::sleep_until(time::Instant::from_std(deadline)).await,
-        None => std::future::pending().await,
     }
 }
 

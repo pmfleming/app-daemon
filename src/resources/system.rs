@@ -5,6 +5,8 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use crate::process::{descendants, process_cgroup, process_stat_fields};
+
 use super::{
     CgroupCounters, CgroupIo, DiskBreakdown, DiskFile, DiskFileId, MemoryUsage, ProcessFiles,
     ProcessIo, ProcessStat, ResourceProvider,
@@ -150,28 +152,6 @@ fn allocated_directory_bytes(roots: &[PathBuf], budget: &mut DiskScanBudget) -> 
     (std::time::Instant::now() < budget.deadline).then(|| files.values().copied().sum())
 }
 
-pub(super) fn read_processes() -> HashMap<u32, ProcessStat> {
-    let Ok(entries) = fs::read_dir("/proc") else {
-        return HashMap::new();
-    };
-    entries
-        .filter_map(Result::ok)
-        .filter_map(|entry| {
-            let pid = entry.file_name().to_str()?.parse::<u32>().ok()?;
-            let stat = fs::read_to_string(entry.path().join("stat")).ok()?;
-            parse_process_stat(&stat).map(|process| (pid, process))
-        })
-        .collect()
-}
-
-pub(super) fn process_children(processes: &HashMap<u32, ProcessStat>) -> HashMap<u32, Vec<u32>> {
-    let mut children: HashMap<u32, Vec<u32>> = HashMap::new();
-    for (&pid, process) in processes {
-        children.entry(process.parent_pid).or_default().push(pid);
-    }
-    children
-}
-
 pub(super) fn shared_target_pids(
     targets: &HashMap<String, Vec<u32>>,
     children: &HashMap<u32, Vec<u32>>,
@@ -260,13 +240,6 @@ fn application_cgroup_path(mut path: &str) -> Option<&str> {
     }
 }
 
-pub(crate) fn process_cgroup(pid: u32) -> Option<String> {
-    fs::read_to_string(format!("/proc/{pid}/cgroup"))
-        .ok()?
-        .lines()
-        .find_map(|line| line.strip_prefix("0::").map(str::to_owned))
-}
-
 pub(super) fn specific_application_cgroup(path: &str) -> bool {
     let name = Path::new(path)
         .file_name()
@@ -348,29 +321,6 @@ pub(super) fn read_cgroup_members(path: &str) -> HashSet<u32> {
                 .collect::<Vec<_>>()
         })
         .collect()
-}
-
-pub(super) fn descendants(
-    roots: impl IntoIterator<Item = u32>,
-    children: &HashMap<u32, Vec<u32>>,
-) -> HashSet<u32> {
-    descendants_where(roots.into_iter().filter(|pid| *pid > 0), children, |_| true)
-}
-
-/// Traverse accepted processes only: rejecting a parent also prunes its children.
-pub(super) fn descendants_where(
-    roots: impl IntoIterator<Item = u32>,
-    children: &HashMap<u32, Vec<u32>>,
-    accept: impl Fn(u32) -> bool,
-) -> HashSet<u32> {
-    let mut pending = roots.into_iter().collect::<Vec<_>>();
-    let mut included = HashSet::new();
-    while let Some(pid) = pending.pop() {
-        if accept(pid) && included.insert(pid) {
-            pending.extend(children.get(&pid).into_iter().flatten());
-        }
-    }
-    included
 }
 
 pub(super) fn read_process_file_sets(pid: u32) -> ProcessFiles {
@@ -466,11 +416,6 @@ pub(super) fn parse_process_stat(value: &str) -> Option<ProcessStat> {
         major_faults: parse_field(&fields, 9)?,
         thread_count: parse_field(&fields, 17)?,
     })
-}
-
-pub(super) fn process_stat_fields(value: &str) -> Option<Vec<&str>> {
-    let command_end = value.rfind(')')?;
-    Some(value.get(command_end + 1..)?.split_whitespace().collect())
 }
 
 pub(super) fn parse_field<T: std::str::FromStr>(fields: &[&str], index: usize) -> Option<T> {

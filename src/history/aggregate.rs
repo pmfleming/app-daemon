@@ -1,5 +1,5 @@
 use crate::{
-    metrics::{available_label, merge_label, rounded},
+    metrics::{add_counter, available_label, merge_label, rounded},
     model::{
         ComputeUsage, HistoricalResourceUsage, NetworkUsage, ResourceAvailability,
         ResourceHistoryPoint, ResourcePeaks, ResourceUsage, StorageUsage,
@@ -341,8 +341,4 @@ fn average(weighted: f64, duration: f64) -> u64 {
 
 fn per_second(total: u64, duration_ms: f64) -> f64 {
     rounded(total as f64 * 1_000.0 / duration_ms, 1)
-}
-
-fn add_counter(counter: &mut u64, value: u64) {
-    *counter = counter.saturating_add(value);
 }

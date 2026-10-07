@@ -1,5 +1,8 @@
 # RustQualityLens baseline
 
+The latest [process/launch/watcher review](process-launch-review.md) records a
+focused refactor, current-tool measurements, verification, and remaining limits.
+
 For the newer focused hotspot/allocation refactor and its before/after metrics,
 see [refactor-review.md](refactor-review.md). It does not replace this full baseline.
 The subsequent [test-suite reduction](test-reduction.md) records the 77 → 52 test
