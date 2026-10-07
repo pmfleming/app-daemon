@@ -6,6 +6,8 @@ use tokio::{io::AsyncReadExt, process::Command};
 
 use crate::platform::command_available;
 
+mod provenance;
+
 #[cfg(test)]
 mod tests;
 
@@ -39,11 +41,33 @@ pub struct LaunchReceipt {
     /// Exact unit used for this launch; never infer ownership from application class alone.
     #[serde(skip)]
     pub(crate) unit: Option<String>,
+    #[serde(skip)]
+    provenance: provenance::Provenance,
 }
 
 impl LaunchReceipt {
     pub(crate) fn owns_process(&self, pid: u32) -> bool {
-        crate::resources::process_cgroup(pid).is_some_and(|path| self.owns_cgroup(&path))
+        self.provenance.owns(pid)
+            || crate::resources::process_cgroup(pid).is_some_and(|path| self.owns_cgroup(&path))
+    }
+
+    pub(crate) fn remember_process(&mut self, pid: u32) {
+        self.provenance.remember(pid);
+    }
+
+    pub(crate) fn observe_processes(&mut self) {
+        self.provenance.observe(self.unit.as_deref());
+    }
+
+    async fn track_unit(mut self) -> Self {
+        if let Some(unit) = self.unit.as_deref()
+            && unit.ends_with(".service")
+            && let Some(pid) = provenance::unit_main_pid(unit).await
+        {
+            self.remember_process(pid);
+        }
+        self.observe_processes();
+        self
     }
 
     fn owns_cgroup(&self, path: &str) -> bool {
@@ -64,6 +88,7 @@ impl From<LaunchBackend> for LaunchReceipt {
             backend: backend.into(),
             scope: scope.into(),
             unit: None,
+            provenance: provenance::Provenance::default(),
         }
     }
 }
@@ -102,11 +127,16 @@ pub(crate) async fn activate_dbus(id: &str, action: Option<&str>) -> anyhow::Res
         } else {
             proxy.call::<_, _, ()>("Activate", &(platform,)).await?;
         }
-        Ok::<_, anyhow::Error>(LaunchReceipt {
+        let mut receipt = LaunchReceipt {
             backend: "dbus-activation".into(),
             scope: "session-bus".into(),
-            unit: None,
-        })
+            ..LaunchBackend::Direct.into()
+        };
+        if let Some(pid) = provenance::bus_owner_pid(&connection, name.as_str()).await {
+            receipt.remember_process(pid);
+        }
+        receipt.observe_processes();
+        Ok::<_, anyhow::Error>(receipt)
     })
     .await
     .context("desktop D-Bus activation timed out")?
@@ -138,7 +168,9 @@ pub async fn launch_desktop(id: &str) -> anyhow::Result<LaunchReceipt> {
     Ok(LaunchReceipt {
         unit,
         ..backend.into()
-    })
+    }
+    .track_unit()
+    .await)
 }
 
 pub async fn launch_desktop_action(id: &str, action_id: &str) -> anyhow::Result<LaunchReceipt> {
@@ -150,7 +182,9 @@ pub async fn launch_desktop_action(id: &str, action_id: &str) -> anyhow::Result<
     Ok(LaunchReceipt {
         unit: Some(unit),
         ..backend.into()
-    })
+    }
+    .track_unit()
+    .await)
 }
 
 async fn checked_handoff(command: Command, description: &str) -> anyhow::Result<()> {
@@ -243,6 +277,10 @@ pub(crate) async fn spawn_for_application(
         command.current_dir(directory);
     }
     command.args(arguments);
+    let mut receipt = LaunchReceipt {
+        unit,
+        ..backend.into()
+    };
     if backend == LaunchBackend::Direct {
         let mut child = command
             .stdin(Stdio::null())
@@ -250,16 +288,16 @@ pub(crate) async fn spawn_for_application(
             .stderr(Stdio::null())
             .spawn()
             .with_context(|| format!("start application command {program}"))?;
+        if let Some(pid) = child.id() {
+            receipt.remember_process(pid);
+        }
         tokio::spawn(async move {
             let _ = child.wait().await;
         });
     } else {
         checked_handoff(command, "application command").await?;
     }
-    Ok(LaunchReceipt {
-        unit,
-        ..backend.into()
-    })
+    Ok(receipt.track_unit().await)
 }
 
 fn ensure_safe_backend(backend: LaunchBackend) -> anyhow::Result<()> {
