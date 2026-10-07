@@ -455,7 +455,8 @@ impl ApplicationService {
                     Ok(outcome) => (outcome.status, outcome.message, outcome.launch),
                     Err(error) => ("failed", error.to_string(), None),
                 };
-            let completed = operation_result(operation_id, &params, status, message, launch);
+            let completed =
+                operation_result(operation_id, &params, status, message, launch.as_ref());
             if service.operations.lock().await.finish(completed.clone()) {
                 let _ = service.operation_changes.send(completed);
             }

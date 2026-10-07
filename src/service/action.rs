@@ -69,14 +69,14 @@ pub(super) fn operation_result(
     params: &ExecuteParams,
     status: &str,
     message: String,
-    launch: Option<LaunchReceipt>,
+    launch: Option<&LaunchReceipt>,
 ) -> OperationResult {
     let (launch_backend, launch_scope, placement) = launch
         .map(|receipt| {
             (
-                Some(receipt.backend),
-                Some(receipt.scope),
-                receipt.placement,
+                Some(receipt.backend.clone()),
+                Some(receipt.scope.clone()),
+                receipt.placement.clone(),
             )
         })
         .unwrap_or_default();
@@ -114,7 +114,7 @@ impl LaunchProgress<'_> {
             params,
             "running",
             "Launch handed off; waiting for window placement".into(),
-            Some(receipt.clone()),
+            Some(receipt),
         );
         // Owned status reads retain the receipt if a subscriber misses the event.
         if self

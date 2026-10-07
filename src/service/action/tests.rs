@@ -143,16 +143,32 @@ async fn checked_launch_receipt_is_recoverable_and_cannot_revive_cancelled_opera
         service: &service,
         operation_id: "handoff",
     };
-    let receipt = LaunchReceipt::from(LaunchBackend::Systemd);
+    let mut receipt = LaunchReceipt::from(LaunchBackend::Systemd);
+    receipt.unit = Some("private-launch.service".into());
+    receipt.remember_process(std::process::id());
+    receipt.placement = Some(super::WorkspacePlacement {
+        workspace_id: "3".into(),
+        status: super::PlacementStatus::Pending,
+        reason: None,
+    });
     progress.handed_off(&params, &receipt).await;
     let event = events.try_recv().unwrap();
+    assert_eq!(event.placement, receipt.placement);
+    assert!(receipt.owns_process(std::process::id()));
+    let wire = serde_json::to_value(&event).unwrap();
+    assert!(wire.get("unit").is_none() && wire.get("provenance").is_none());
     assert_eq!(event.status, "running");
     assert_eq!(event.launch_backend.as_deref(), Some("systemd-run"));
     let recovered = service
         .operation_status_owned("handoff", owner)
         .await
         .unwrap();
-    assert_eq!(recovered.launch_scope, event.launch_scope);
+    assert_eq!(recovered, event);
+    receipt.placement.as_mut().unwrap().status = super::PlacementStatus::Placed;
+    assert_eq!(
+        event.placement.unwrap().status,
+        super::PlacementStatus::Pending
+    );
     assert!(
         service
             .operation_status_owned("handoff", Some(":other"))
