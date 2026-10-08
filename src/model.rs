@@ -366,8 +366,19 @@ pub enum PlacementStatus {
     Failed,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CloseObservation {
+    pub targeted_window_ids: Vec<String>,
+    pub dispatched_window_ids: Vec<String>,
+    pub remaining_window_ids: Vec<String>,
+    pub status: String,
+    pub dispatch_error: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OperationResult {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub close: Option<CloseObservation>,
     pub id: String,
     pub action: String,
     pub target_id: String,

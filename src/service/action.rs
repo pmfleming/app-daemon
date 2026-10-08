@@ -16,6 +16,7 @@ use crate::{
 use super::identity::{resolve_target, target_window};
 use crate::ownership::Snapshot as OwnershipSnapshot;
 
+mod close;
 #[cfg(test)]
 mod tests;
 
@@ -62,6 +63,7 @@ impl ApplicationAction {
 pub(super) struct ActionOutcome {
     pub(super) message: String,
     pub(super) launch: Option<LaunchReceipt>,
+    pub(super) close: Option<crate::model::CloseObservation>,
     pub(super) status: &'static str,
 }
 
@@ -82,6 +84,7 @@ pub(super) fn operation_result(
         })
         .unwrap_or_default();
     OperationResult {
+        close: None,
         id,
         action: params.action.as_str().into(),
         target_id: params.target_id.clone(),
@@ -98,6 +101,7 @@ impl ActionOutcome {
         Self {
             message: format!("{verb} {}", display_name(catalog, target_id)),
             launch: None,
+            close: None,
             status: "completed",
         }
     }
@@ -159,13 +163,8 @@ pub(super) async fn execute_action(
                 .await
                 .map(|()| ActionOutcome::new(catalog, target_id, "Focused"))
         }
-        ApplicationAction::Close => close_application(catalog, &windows, target_id, &ownership)
-            .await
-            .map(|()| ActionOutcome::new(catalog, target_id, "Close requested for")),
-        ApplicationAction::CloseWindow => {
-            hyprland::close(target_address(catalog, &windows, params, &ownership)?)
-                .await
-                .map(|()| ActionOutcome::new(catalog, target_id, "Close requested for"))
+        ApplicationAction::Close | ApplicationAction::CloseWindow => {
+            close_application(catalog, &windows, params, &ownership, &progress).await
         }
         ApplicationAction::MoveToWorkspace => {
             move_to_workspace(catalog, &windows, params, &ownership)
@@ -436,19 +435,73 @@ async fn move_to_workspace(
 async fn close_application(
     catalog: &Catalog,
     windows: &Snapshot,
-    target_id: &str,
+    params: &ExecuteParams,
     ownership: &OwnershipSnapshot,
-) -> anyhow::Result<()> {
-    let windows = windows
+    progress: &LaunchProgress<'_>,
+) -> anyhow::Result<ActionOutcome> {
+    anyhow::ensure!(
+        windows.available,
+        "compositor window observation is unavailable"
+    );
+    let address = if params.action == ApplicationAction::CloseWindow {
+        Some(target_address(catalog, windows, params, ownership)?)
+    } else {
+        None
+    };
+    let targets = windows
         .clients
         .iter()
-        .filter(|window| resolve_target(catalog, window, ownership) == target_id)
+        .filter(|window| {
+            address.map_or_else(
+                || resolve_target(catalog, window, ownership) == params.target_id,
+                |address| window.address == address,
+            )
+        })
+        .cloned()
         .collect::<Vec<_>>();
-    anyhow::ensure!(!windows.is_empty(), "application is no longer running");
-    for window in windows {
-        hyprland::close(&window.address).await?;
+    anyhow::ensure!(!targets.is_empty(), "application is no longer running");
+    let close = close::observe(
+        &close::Compositor,
+        &targets,
+        |close| async move {
+            let mut result = operation_result(
+                progress.operation_id.into(),
+                params,
+                "running",
+                "Close requested; observing targeted windows".into(),
+                None,
+            );
+            result.close = Some(close);
+            if progress
+                .service
+                .operations
+                .lock()
+                .await
+                .running(result.clone())
+            {
+                let _ = progress.service.operation_changes.send(result);
+            }
+        },
+        Duration::from_secs(5),
+    )
+    .await;
+    let mut outcome = ActionOutcome::new(catalog, &params.target_id, "Close requested for");
+    outcome.message = match close.status.as_str() {
+        "closed" => "Requested windows closed".into(),
+        "still-open" => format!(
+            "Close requested; {} window(s) still open. Focus a window to check for a save prompt.",
+            close.remaining_window_ids.len()
+        ),
+        _ => "Close outcome unknown; check windows before trying again".into(),
+    };
+    if let Some(error) = &close.dispatch_error {
+        outcome.status = "failed";
+        outcome.message.push_str(&format!(
+            ". Some close requests could not be dispatched: {error}"
+        ));
     }
-    Ok(())
+    outcome.close = Some(close);
+    Ok(outcome)
 }
 
 fn target_address<'a>(

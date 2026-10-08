@@ -514,13 +514,19 @@ impl ApplicationService {
             }
             let lock = service.launch_lock(&params.target_id);
             let _launch = lock.lock().await;
-            let (status, message, launch) =
+            let (status, message, launch, close) =
                 match execute_action(&catalog, &params, &service, &operation_id).await {
-                    Ok(outcome) => (outcome.status, outcome.message, outcome.launch),
-                    Err(error) => ("failed", error.to_string(), None),
+                    Ok(outcome) => (
+                        outcome.status,
+                        outcome.message,
+                        outcome.launch,
+                        outcome.close,
+                    ),
+                    Err(error) => ("failed", error.to_string(), None, None),
                 };
-            let completed =
+            let mut completed =
                 operation_result(operation_id, &params, status, message, launch.as_ref());
+            completed.close = close;
             if service.operations.lock().await.finish(completed.clone()) {
                 let _ = service.operation_changes.send(completed);
             }

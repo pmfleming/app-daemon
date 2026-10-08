@@ -93,6 +93,10 @@ fn record_cancelled(
     let mut result = active.value.result;
     result.status = "cancelled".into();
     result.message = "Operation cancelled".into();
+    if let Some(close) = &mut result.close {
+        close.status = "unknown".into();
+        result.message = "Close observation cancelled; dispatched requests may still take effect. Check windows before retrying.".into();
+    }
     recent.record(result.id.clone(), active.owner, result.clone());
     result
 }
@@ -117,6 +121,25 @@ mod tests {
             None,
         )
     }
+    #[tokio::test]
+    async fn close_cancellation_retains_targets_and_never_claims_rollback() {
+        let mut registry = OperationRegistry::default();
+        let task = tokio::spawn(std::future::pending::<()>());
+        let mut value = result(0, "running");
+        value.close = Some(crate::model::CloseObservation {
+            targeted_window_ids: vec!["window-a".into()],
+            dispatched_window_ids: vec!["window-a".into()],
+            status: "observing".into(),
+            ..Default::default()
+        });
+        registry.insert(None, task.abort_handle(), value).unwrap();
+        let cancelled = registry.cancel("operation-0", None).unwrap();
+        assert_eq!(cancelled.close.as_ref().unwrap().status, "unknown");
+        assert_eq!(cancelled.close.unwrap().dispatched_window_ids, ["window-a"]);
+        assert!(cancelled.message.contains("may still take effect"));
+        assert!(!registry.finish(result(0, "completed")));
+    }
+
     #[tokio::test]
     async fn cancellation_is_terminal_and_admission_is_bounded() {
         let mut registry = OperationRegistry::default();
