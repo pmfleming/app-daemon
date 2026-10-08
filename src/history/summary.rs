@@ -15,7 +15,10 @@ pub(super) fn availability(point: &ResourceHistoryPoint) -> ResourceAvailability
         })
 }
 pub(super) fn normalize(mut point: ResourceHistoryPoint) -> ResourceHistoryPoint {
-    point.resources.availability = Some(availability(&point));
+    let mut available = availability(&point);
+    available.energy &= point.resources.energy_source == "rapl";
+    point.resources.metric_availability = available.project();
+    point.resources.availability = Some(available);
     point
 }
 // Keep response keys and their observation sources together: no duplicate
@@ -69,7 +72,7 @@ const METRICS: &[(&str, MetricReader)] = &[
     }),
     ("average_power_watts", |r, a| {
         (
-            a.energy,
+            a.energy && r.energy_source == "rapl",
             r.average_power_watts,
             r.peaks.estimated_app_power_watts,
         )
@@ -85,6 +88,7 @@ pub(super) fn summarize(
     let mut metrics: [MetricSummary; METRICS.len()] =
         std::array::from_fn(|_| MetricSummary::default());
     let window_ms = end.saturating_sub(start).max(1);
+    let mut confidence = None;
     for point in points {
         let weight = point.timestamp_ms.min(end).saturating_sub(
             point
@@ -93,11 +97,49 @@ pub(super) fn summarize(
                 .max(start),
         );
         let available = availability(point);
+        let power = point.resources.average_power_watts;
+        if weight > 0
+            && available.energy
+            && point.resources.energy_source == "rapl"
+            && power.is_finite()
+            && power >= 0.0
+        {
+            let next = match point.resources.energy_confidence.as_str() {
+                "low" => 0,
+                "high" => 3,
+                "medium" => 2,
+                _ => 1,
+            };
+            confidence = Some(confidence.map_or(next, |previous: u8| previous.min(next)));
+        }
         for ((_, read), stats) in METRICS.iter().zip(&mut metrics) {
             stats.observe(read(&point.resources, &available), weight, window_ms);
         }
     }
+    for ((name, _), stats) in METRICS.iter().zip(&mut metrics) {
+        let unit = if *name == "average_power_watts" {
+            Some((3600.0, "mWh"))
+        } else if name.ends_with("_bytes_per_second") {
+            Some((1000.0, "bytes"))
+        } else {
+            None
+        };
+        if let (Some(mean), Some((divisor, unit))) = (stats.mean, unit) {
+            let total = mean * stats.observed_ms as f64 / divisor;
+            if total.is_finite() && total >= 0.0 {
+                stats.observed_total = Some(total);
+                stats.total_unit = Some(unit.into());
+            }
+        }
+    }
     HistorySummary {
+        energy_confidence: match confidence {
+            Some(0) => "low",
+            Some(2) => "medium",
+            Some(3) => "high",
+            _ => "unknown",
+        }
+        .into(),
         window_start_ms: start,
         window_end_ms: end,
         revision: format!(
@@ -156,6 +198,72 @@ mod tests {
             resources,
         }
     }
+    #[test]
+    fn resource_projection_fixture_is_current() {
+        let mut fixture: serde_json::Value =
+            serde_json::from_str(include_str!("../../test_support/app-resource-v1.json")).unwrap();
+        let original = fixture.clone();
+        let current: crate::model::ResourceUsage =
+            serde_json::from_value(fixture["current"].clone()).unwrap();
+        fixture["current"]["metric_availability"] =
+            serde_json::to_value(ResourceAvailability::for_usage(&current).project()).unwrap();
+        let point =
+            super::normalize(serde_json::from_value(fixture["history_point"].clone()).unwrap());
+        fixture["history_point"]["metric_availability"] =
+            serde_json::to_value(&point.resources.metric_availability).unwrap();
+        fixture["summary"] = serde_json::to_value(super::summarize(
+            &[&point],
+            point.timestamp_ms - point.duration_ms,
+            point.timestamp_ms,
+            "fixture",
+        ))
+        .unwrap();
+        if std::env::var_os("APP_DAEMON_UPDATE_RESOURCE_FIXTURE").is_some() {
+            std::fs::write(
+                "test_support/app-resource-v1.json",
+                format!("{}\n", serde_json::to_string_pretty(&fixture).unwrap()),
+            )
+            .unwrap();
+        } else {
+            assert_eq!(fixture, original);
+        }
+    }
+
+    #[test]
+    fn totals_and_confidence_use_only_available_clipped_intervals() {
+        let mut first = point(1000, 1000, 0.0);
+        first.resources.availability.as_mut().unwrap().energy = true;
+        first.resources.energy_source = "rapl".into();
+        first.resources.energy_confidence = "high".into();
+        first.resources.average_power_watts = 3.6;
+        let mut second = first.clone();
+        second.timestamp_ms = 3000;
+        second.resources.energy_confidence = "low".into();
+        let summary = super::summarize(&[&first, &second], 500, 2500, "test");
+        assert_eq!(
+            summary.metrics["average_power_watts"].observed_total,
+            Some(1.0)
+        );
+        assert_eq!(
+            summary.metrics["average_power_watts"].total_unit.as_deref(),
+            Some("mWh")
+        );
+        assert_eq!(summary.energy_confidence, "low");
+        second.resources.energy_source = "battery".into();
+        let summary = super::summarize(&[&first, &second], 500, 2500, "test");
+        assert_eq!(
+            summary.metrics["average_power_watts"].observed_total,
+            Some(0.5)
+        );
+        assert_eq!(summary.energy_confidence, "high");
+        first.resources.average_power_watts = 0.0;
+        assert_eq!(
+            super::summarize(&[&first], 0, 1000, "test").metrics["average_power_watts"]
+                .observed_total,
+            Some(0.0)
+        );
+    }
+
     #[test]
     fn pagination_and_incremental_reads_share_full_window_statistics() {
         let base = super::super::now_milliseconds() - 60_000;

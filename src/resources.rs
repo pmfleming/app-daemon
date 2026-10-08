@@ -156,6 +156,7 @@ impl ResourceSnapshot {
         } else {
             usage.measurement.disk_space_scope = "unavailable".into();
         }
+        usage.metric_availability = crate::model::ResourceAvailability::for_usage(&usage).project();
         usage
     }
 
@@ -376,6 +377,7 @@ impl ResourceSnapshot {
         usage.storage = usage.storage.with_rates(self.interval_seconds);
         usage.network = usage.network.with_rates(self.interval_seconds);
         usage.energy = self.estimated_energy(energy_cpu_percent, self.total_process_cpu_percent);
+        usage.metric_availability = crate::model::ResourceAvailability::for_usage(&usage).project();
         usage
     }
 

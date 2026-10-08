@@ -139,6 +139,8 @@ pub struct ResourceMeasurement {
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ResourceUsage {
+    #[serde(default)]
+    pub metric_availability: crate::projection::MetricAvailability,
     #[serde(flatten)]
     pub compute: ComputeUsage,
     #[serde(flatten)]
@@ -258,6 +260,8 @@ pub struct ResourceAvailability {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct HistoricalResourceUsage {
+    #[serde(skip_deserializing)]
+    pub metric_availability: crate::projection::MetricAvailability,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub availability: Option<ResourceAvailability>,
     #[serde(flatten)]
@@ -300,6 +304,8 @@ pub struct ApplicationResourceHistory {
 /// Canonical statistics over a selected window, independent of response pagination.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct HistorySummary {
+    #[serde(default)]
+    pub energy_confidence: String,
     pub window_start_ms: u64,
     pub window_end_ms: u64,
     pub revision: String,
@@ -309,6 +315,10 @@ pub struct HistorySummary {
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct MetricSummary {
+    #[serde(default)]
+    pub observed_total: Option<f64>,
+    #[serde(default)]
+    pub total_unit: Option<String>,
     pub available: bool,
     pub mean: Option<f64>,
     pub peak: Option<f64>,

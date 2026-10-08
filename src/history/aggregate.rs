@@ -151,6 +151,7 @@ impl PendingPoint {
             duration_ms: self.duration_ms,
             resources: HistoricalResourceUsage {
                 availability: self.availability,
+                metric_availability: Default::default(),
                 compute: self.compute.finish(duration),
                 storage: self.storage.finish(duration),
                 network: self.network.finish(duration),
@@ -197,7 +198,7 @@ impl crate::model::ResourcePeaks {
 }
 
 impl crate::model::ResourceAvailability {
-    fn for_usage(usage: &ResourceUsage) -> Self {
+    pub(crate) fn for_usage(usage: &ResourceUsage) -> Self {
         let measurement = &usage.measurement;
         Self {
             cpu: measurement.coverage > 0.0,

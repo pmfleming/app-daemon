@@ -12,6 +12,7 @@ pub mod model;
 mod ownership;
 mod platform;
 mod process;
+pub mod projection;
 pub mod protocol;
 pub mod resources;
 pub mod service;
