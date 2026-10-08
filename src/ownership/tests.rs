@@ -1,4 +1,6 @@
-use super::*;
+use super::{Ownership, Process, process_identity};
+use crate::catalog::Catalog;
+use std::{collections::HashMap, sync::Arc};
 
 fn catalog() -> (tempfile::TempDir, Catalog) {
     let dir = tempfile::tempdir().unwrap();
@@ -61,6 +63,12 @@ fn migrated_instances_keep_early_and_late_helpers_without_claiming_browser_sibli
         assert_eq!(snapshot.target((pid, processes[&pid].start)), None);
     }
     assert!(!tracker.reconcile(&catalog, &processes));
+    assert_eq!(snapshot, tracker.snapshot());
+    assert!(Arc::ptr_eq(&tracker.snapshot(), &tracker.snapshot()));
+    tracker.anchors.clear();
+    tracker.reconcile(&catalog, &HashMap::new());
+    assert_eq!(tracker.snapshot().entries().count(), 0);
+    assert_eq!(snapshot.target((10, 100)), Some(Some("pocket.desktop")));
 }
 
 #[test]
@@ -193,7 +201,7 @@ fn cached_window_ownership_requires_a_live_pid_identity() {
         Some(Some("pocket.desktop"))
     );
     tracker.anchors.clear();
-    tracker.snapshot.owners.clear();
+    tracker.snapshot = Arc::default();
     tracker.remember("pocket.desktop", [(pid, identity.1 + 1)]);
     tracker.reconcile(
         &catalog,

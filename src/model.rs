@@ -1,3 +1,4 @@
+use crate::metrics::{rate, rounded};
 use serde::{Deserialize, Serialize};
 
 /// CPU, memory, and GPU observations for the current interval.
@@ -26,6 +27,17 @@ pub struct ComputeUsage {
     pub gpu_memory_bytes: u64,
     pub gpu_memory_resident_bytes: u64,
     pub gpu_memory_allocated_bytes: u64,
+}
+
+impl ComputeUsage {
+    pub(crate) fn normalize_cpu(&mut self, logical_cpus: usize) {
+        let raw_cpu = self.cpu_percent.max(0.0);
+        self.cpu_percent = rounded(raw_cpu, 1);
+        self.cpu_percent_of_machine =
+            rounded((raw_cpu / logical_cpus.max(1) as f64).clamp(0.0, 100.0), 1);
+        self.gpu_percent = rounded(self.gpu_percent, 1);
+        self.gpu_busy_percent = rounded(self.gpu_busy_percent.clamp(0.0, 100.0), 1);
+    }
 }
 
 /// Interval I/O and allocated storage footprints, in bytes unless named otherwise.
@@ -59,6 +71,18 @@ pub struct StorageUsage {
     pub disk_space_permanent_bytes: u64,
 }
 
+impl StorageUsage {
+    pub(crate) fn with_rates(mut self, seconds: f64) -> Self {
+        self.disk_read_bytes_per_second = rate(self.disk_read_bytes as f64, seconds, 1);
+        self.disk_write_bytes_per_second = rate(self.disk_write_bytes as f64, seconds, 1);
+        self.logical_read_bytes_per_second = rate(self.logical_read_bytes as f64, seconds, 1);
+        self.logical_write_bytes_per_second = rate(self.logical_write_bytes as f64, seconds, 1);
+        self.read_operations_per_second = rate(self.read_operations as f64, seconds, 1);
+        self.write_operations_per_second = rate(self.write_operations as f64, seconds, 1);
+        self
+    }
+}
+
 /// Socket-attributed byte deltas, rates, and connection count.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -68,6 +92,15 @@ pub struct NetworkUsage {
     pub network_receive_bytes_per_second: f64,
     pub network_transmit_bytes_per_second: f64,
     pub network_connection_count: u64,
+}
+
+impl NetworkUsage {
+    pub(crate) fn with_rates(mut self, seconds: f64) -> Self {
+        self.network_receive_bytes_per_second = rate(self.network_receive_bytes as f64, seconds, 1);
+        self.network_transmit_bytes_per_second =
+            rate(self.network_transmit_bytes as f64, seconds, 1);
+        self
+    }
 }
 
 /// Estimated energy attribution together with its source and confidence labels.
@@ -256,12 +289,31 @@ pub struct ResourceHistoryPoint {
 #[derive(Debug, PartialEq, Serialize, Deserialize)]
 pub struct ApplicationResourceHistory {
     pub target_id: String,
-    pub summary: crate::history::summary::HistorySummary,
+    pub summary: HistorySummary,
     /// Chronological page ordered from oldest to newest.
     pub points: Vec<ResourceHistoryPoint>,
     pub has_more: bool,
     /// Opaque forward-pagination cursor. Pass it back as `cursor` to fetch the next page.
     pub next_cursor: Option<String>,
+}
+
+/// Canonical statistics over a selected window, independent of response pagination.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct HistorySummary {
+    pub window_start_ms: u64,
+    pub window_end_ms: u64,
+    pub revision: String,
+    pub weighting: String,
+    pub metrics: std::collections::BTreeMap<String, MetricSummary>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct MetricSummary {
+    pub available: bool,
+    pub mean: Option<f64>,
+    pub peak: Option<f64>,
+    pub observed_ms: u64,
+    pub coverage: f64,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]

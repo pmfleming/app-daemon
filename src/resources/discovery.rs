@@ -3,10 +3,13 @@ use crate::{
     catalog::Catalog,
     process::{descendants_where, process_children},
 };
-use std::collections::{HashMap, HashSet, hash_map::Entry};
+use std::{
+    collections::{HashMap, HashSet, hash_map::Entry},
+    sync::Arc,
+};
 
 type Members = HashMap<String, HashSet<u32>>;
-type Owners = HashMap<u32, String>;
+type Owners = HashMap<u32, Arc<str>>;
 
 #[derive(Debug, Default)]
 pub(super) struct KnownRoots {
@@ -28,26 +31,7 @@ impl KnownRoots {
         ownership: &crate::ownership::Snapshot,
     ) -> Targets {
         let (mut members, mut owners) = scoped_members(provider, processes, catalog);
-        // Verified ownership follows the process, not the name of a migrated
-        // browser scope. Remove its old membership before seeding the new one.
-        for ((pid, start), target) in ownership.entries() {
-            if processes
-                .get(&pid)
-                .is_none_or(|process| process.start_ticks != start)
-            {
-                continue;
-            }
-            if let Some(previous) = owners.remove(&pid)
-                && let Some(pids) = members.get_mut(&previous)
-            {
-                pids.remove(&pid);
-            }
-            let target = target.unwrap_or("ownership-conflict");
-            owners.insert(pid, target.to_owned());
-            if target != "ownership-conflict" {
-                members.entry(target.to_owned()).or_default().insert(pid);
-            }
-        }
+        apply_ownership(&mut members, &mut owners, processes, ownership);
         self.restore(&mut members, &owners, windows, processes);
         for (id, pids) in windows {
             members.entry(id.clone()).or_default().extend(
@@ -65,7 +49,7 @@ impl KnownRoots {
             // Retain children as PID/start-time identities after their window or
             // parent exits, but never traverse another application's boundary.
             let pids = descendants_where(pids, &children, |pid| {
-                owners.get(&pid).is_none_or(|owner| owner == &id)
+                owners.get(&pid).is_none_or(|owner| owner.as_ref() == id)
             });
             if pids.is_empty() {
                 continue;
@@ -93,12 +77,37 @@ impl KnownRoots {
                 let same_process = processes
                     .get(pid)
                     .is_some_and(|process| process.start_ticks == *start);
-                let same_owner = owners.get(pid).is_none_or(|owner| owner == &id);
+                let same_owner = owners.get(pid).is_none_or(|owner| owner.as_ref() == id);
                 let reassigned = !windows.get(&id).is_some_and(|pids| pids.contains(pid))
                     && windows.values().any(|pids| pids.contains(pid));
                 same_process && same_owner && !reassigned
             });
             members.entry(id).or_default().extend(known.into_keys());
+        }
+    }
+}
+
+// Verified ownership follows the process, not the name of a migrated browser scope.
+fn apply_ownership(
+    members: &mut Members,
+    owners: &mut Owners,
+    processes: &HashMap<u32, ProcessStat>,
+    ownership: &crate::ownership::Snapshot,
+) {
+    for ((pid, _), target) in ownership.entries().filter(|((pid, start), _)| {
+        processes
+            .get(pid)
+            .is_some_and(|process| process.start_ticks == *start)
+    }) {
+        if let Some(previous) = owners
+            .remove(&pid)
+            .and_then(|id| members.get_mut(id.as_ref()))
+        {
+            previous.remove(&pid);
+        }
+        owners.insert(pid, target.unwrap_or("ownership-conflict").into());
+        if let Some(target) = target {
+            members.entry(target.to_owned()).or_default().insert(pid);
         }
     }
 }
@@ -117,7 +126,8 @@ fn scoped_members(
     let mut owners = Owners::new();
     for (path, pids) in groups {
         if let Some(id) = catalog.target_for_cgroup(&path) {
-            owners.extend(pids.iter().map(|&pid| (pid, id.to_owned())));
+            let owner = Arc::<str>::from(id);
+            owners.extend(pids.iter().map(|&pid| (pid, Arc::clone(&owner))));
             members.entry(id.to_owned()).or_default().extend(pids);
         }
     }
@@ -151,7 +161,7 @@ fn inherit_owners(owners: &mut Owners, children: &HashMap<u32, Vec<u32>>) {
         };
         for &child in children.get(&pid).into_iter().flatten() {
             if let Entry::Vacant(entry) = owners.entry(child) {
-                entry.insert(owner.clone());
+                entry.insert(Arc::clone(&owner));
                 pending.push(child);
             }
         }

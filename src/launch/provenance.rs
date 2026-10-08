@@ -1,17 +1,9 @@
 //! Short-lived launch ownership, independent of an application's current cgroup.
 use crate::process::{
-    descendants_where, process_cgroup, process_children, process_stat_fields, read_processes,
+    Identity, Process, descendants_where, live_process_children, parse_process, process_cgroup,
+    read_process, read_processes,
 };
-use std::{
-    collections::{HashMap, HashSet},
-    fs,
-};
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct Process {
-    parent: u32,
-    start: u64,
-}
+use std::collections::{HashMap, HashSet};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct Provenance {
@@ -61,7 +53,7 @@ impl Provenance {
         }
     }
 
-    pub(super) fn roots(&self) -> Vec<crate::ownership::Identity> {
+    pub(super) fn roots(&self) -> Vec<Identity> {
         self.anchors
             .iter()
             .filter_map(|(&pid, &start)| {
@@ -108,10 +100,7 @@ impl Provenance {
             }
         }
         // Build only valid ancestry edges, then visit each descendant once.
-        let children = process_children(processes.iter().filter_map(|(&pid, process)| {
-            let parent = processes.get(&process.parent)?;
-            (process.start >= parent.start).then_some((pid, process.parent))
-        }));
+        let children = live_process_children(processes);
         let owned = descendants_where(
             roots.iter().chain(self.identities.keys()).copied(),
             &children,
@@ -122,23 +111,6 @@ impl Provenance {
             .filter_map(|pid| Some((pid, processes.get(&pid)?.start)))
             .collect();
     }
-}
-
-fn read_process(pid: u32) -> Option<Process> {
-    parse_process(&fs::read_to_string(format!("/proc/{pid}/stat")).ok()?)
-}
-
-fn parse_process(stat: &str) -> Option<Process> {
-    // comm can contain spaces and parentheses. Fields after its final ')' start
-    // with state (field 3); starttime is field 22 and ppid is field 4.
-    let fields = process_stat_fields(stat)?;
-    if matches!(*fields.first()?, "Z" | "X") {
-        return None;
-    }
-    Some(Process {
-        parent: fields.get(1)?.parse().ok()?,
-        start: fields.get(19)?.parse().ok()?,
-    })
 }
 
 /// A unique launch unit can retain MainPID even after Chromium migrates that
@@ -204,7 +176,16 @@ mod tests {
             (31, 30, 300),
         ]
         .into_iter()
-        .map(|(pid, parent, start)| (pid, Process { parent, start }))
+        .map(|(pid, parent, start)| {
+            (
+                pid,
+                Process {
+                    parent,
+                    start,
+                    cgroup: None,
+                },
+            )
+        })
         .collect::<HashMap<_, _>>();
         owner.observe_processes(&processes, &[10]);
         assert_eq!(owner.identities.len(), 3);
@@ -243,7 +224,8 @@ mod tests {
             parse_process(&stat),
             Some(Process {
                 parent: 1,
-                start: 1234
+                start: 1234,
+                cgroup: None,
             })
         );
         assert!(parse_process(&stat.replace(") S", ") Z")).is_none());

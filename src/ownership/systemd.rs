@@ -1,6 +1,8 @@
 //! Bounded recovery from live user-manager services, never ExecMainPID history.
-use super::{Identity, process_identity};
-use crate::catalog::Catalog;
+use crate::{
+    catalog::Catalog,
+    process::{Identity, process_identity},
+};
 use futures::{StreamExt, stream};
 use std::time::Duration;
 use zbus::zvariant::OwnedObjectPath;
@@ -75,17 +77,8 @@ async fn live_main_process(
     connection: &zbus::Connection,
     path: OwnedObjectPath,
 ) -> Option<Identity> {
-    let unit = zbus::Proxy::new(
-        connection,
-        BUS,
-        path.clone(),
-        "org.freedesktop.systemd1.Unit",
-    )
-    .await
-    .ok()?;
-    let service = zbus::Proxy::new(connection, BUS, path, "org.freedesktop.systemd1.Service")
-        .await
-        .ok()?;
+    let unit = uncached_proxy(connection, &path, "org.freedesktop.systemd1.Unit").await?;
+    let service = uncached_proxy(connection, &path, "org.freedesktop.systemd1.Service").await?;
     let invocation: Vec<u8> = unit.get_property("InvocationID").await.ok()?;
     if invocation.len() != 16 || invocation.iter().all(|b| *b == 0) {
         return None;
@@ -95,46 +88,31 @@ async fn live_main_process(
         return None;
     }
     let identity = process_identity(pid)?;
-    // Re-read without the proxy's property cache: a unit may restart during the
-    // observation, and a retained ExecMainPID can refer to an unrelated process.
-    let properties = zbus::fdo::PropertiesProxy::builder(connection)
-        .destination(BUS)
-        .ok()?
-        .path(unit.path().clone())
-        .ok()?
-        .build()
-        .await
-        .ok()?;
-    let current_pid: u32 = properties
-        .get(
-            "org.freedesktop.systemd1.Service".try_into().ok()?,
-            "MainPID",
-        )
-        .await
-        .ok()?
-        .try_into()
-        .ok()?;
-    let current_invocation: Vec<u8> = properties
-        .get(
-            "org.freedesktop.systemd1.Unit".try_into().ok()?,
-            "InvocationID",
-        )
-        .await
-        .ok()?
-        .try_into()
-        .ok()?;
-    let active: String = properties
-        .get(
-            "org.freedesktop.systemd1.Unit".try_into().ok()?,
-            "ActiveState",
-        )
-        .await
-        .ok()?
-        .try_into()
-        .ok()?;
+    // These proxies never cache: a restart between reads must invalidate the claim.
+    let current_pid: u32 = service.get_property("MainPID").await.ok()?;
+    let current_invocation: Vec<u8> = unit.get_property("InvocationID").await.ok()?;
+    let active: String = unit.get_property("ActiveState").await.ok()?;
     (active == "active"
         && current_pid == pid
         && invocation == current_invocation
         && process_identity(pid) == Some(identity))
     .then_some(identity)
+}
+
+async fn uncached_proxy<'a>(
+    connection: &zbus::Connection,
+    path: &'a OwnedObjectPath,
+    interface: &'static str,
+) -> Option<zbus::Proxy<'a>> {
+    zbus::proxy::Builder::new(connection)
+        .destination(BUS)
+        .ok()?
+        .path(path.as_str())
+        .ok()?
+        .interface(interface)
+        .ok()?
+        .cache_properties(zbus::proxy::CacheProperties::No)
+        .build()
+        .await
+        .ok()
 }

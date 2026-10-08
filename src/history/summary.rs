@@ -1,24 +1,7 @@
 //! Canonical statistics over a selected window, independent of response pagination.
 use crate::model::{HistoricalResourceUsage, ResourceAvailability, ResourceHistoryPoint};
-use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+pub use crate::model::{HistorySummary, MetricSummary};
 
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-pub struct MetricSummary {
-    pub available: bool,
-    pub mean: Option<f64>,
-    pub peak: Option<f64>,
-    pub observed_ms: u64,
-    pub coverage: f64,
-}
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-pub struct HistorySummary {
-    pub window_start_ms: u64,
-    pub window_end_ms: u64,
-    pub revision: String,
-    pub weighting: String,
-    pub metrics: BTreeMap<String, MetricSummary>,
-}
 pub(super) fn availability(point: &ResourceHistoryPoint) -> ResourceAvailability {
     point
         .resources
@@ -131,7 +114,7 @@ pub(super) fn summarize(
     }
 }
 
-impl MetricSummary {
+impl crate::model::MetricSummary {
     fn observe(&mut self, (valid, value, peak): (bool, f64, f64), weight: u64, window_ms: u64) {
         if !valid || weight == 0 || !value.is_finite() || value < 0.0 {
             return;

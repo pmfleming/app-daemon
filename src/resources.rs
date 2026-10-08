@@ -4,9 +4,11 @@ use std::{
     time::Instant,
 };
 
+use shelllist_daemon_tokio::ResumeDetector;
+
 use crate::{
     metrics::{add_counter, available_label, finite_nonnegative, rate, rounded},
-    model::{ComputeUsage, EnergyUsage, NetworkUsage, ResourceUsage, StorageUsage},
+    model::{EnergyUsage, NetworkUsage, ResourceUsage},
     process::{descendants, process_children},
 };
 
@@ -68,7 +70,7 @@ const OPEN_FILE_REFRESH_INTERVAL: std::time::Duration = std::time::Duration::fro
 #[derive(Debug, Clone, Default)]
 pub struct ResourceSnapshot {
     target_roots: HashMap<String, Vec<u32>>,
-    target_owners: HashMap<u32, String>,
+    target_owners: HashMap<u32, Arc<str>>,
     processes: HashMap<u32, ProcessUsage>,
     children: HashMap<u32, Vec<u32>>,
     cgroup_members_by_root: HashMap<u32, HashSet<u32>>,
@@ -172,7 +174,7 @@ impl ResourceSnapshot {
             attribution.pids.retain(|pid| {
                 self.target_owners
                     .get(pid)
-                    .is_none_or(|owner| owner == target)
+                    .is_none_or(|owner| owner.as_ref() == target)
             });
             // Cgroup totals include nested subgroups: when another application's
             // members were excluded, use process counters rather than double charge.
@@ -232,7 +234,7 @@ impl ResourceSnapshot {
         let mut aggregate = ProcessAggregation::default();
         let mut gpu_engines = HashMap::<&str, f64>::new();
         for process in pids.iter().filter_map(|pid| self.processes.get(pid)) {
-            aggregate.usage.add_process(process);
+            process.add_to(&mut aggregate.usage);
             aggregate.covered_processes += 1;
             aggregate.memory_processes += u64::from(process.memory.rss_available);
             aggregate.pss_processes += u64::from(process.memory.pss_available);
@@ -371,8 +373,8 @@ impl ResourceSnapshot {
             2,
         );
         usage.compute.normalize_cpu(self.logical_cpus);
-        usage.storage.normalize_rates(self.interval_seconds);
-        usage.network.normalize_rates(self.interval_seconds);
+        usage.storage = usage.storage.with_rates(self.interval_seconds);
+        usage.network = usage.network.with_rates(self.interval_seconds);
         usage.energy = self.estimated_energy(energy_cpu_percent, self.total_process_cpu_percent);
         usage
     }
@@ -449,11 +451,11 @@ fn memory_source(aggregate: &ProcessAggregation) -> String {
     .into()
 }
 
-impl ResourceUsage {
-    fn add_process(&mut self, process: &ProcessUsage) {
-        let compute = &mut self.compute;
-        compute.cpu_percent += process.cpu_percent;
-        let memory = &process.memory;
+impl ProcessUsage {
+    fn add_to(&self, usage: &mut ResourceUsage) {
+        let compute = &mut usage.compute;
+        compute.cpu_percent += self.cpu_percent;
+        let memory = &self.memory;
         add_counter(
             &mut compute.memory_bytes,
             if memory.pss_available {
@@ -467,75 +469,34 @@ impl ResourceUsage {
         add_counter(&mut compute.memory_private_bytes, memory.private_bytes);
         add_counter(&mut compute.memory_swap_bytes, memory.swap_bytes);
         add_counter(&mut compute.process_count, 1);
-        add_counter(&mut compute.thread_count, process.thread_count);
-        compute.major_faults_per_second += process.major_faults as f64;
-        compute.gpu_percent += process.gpu_engine_percent.values().sum::<f64>();
+        add_counter(&mut compute.thread_count, self.thread_count);
+        compute.major_faults_per_second += self.major_faults as f64;
+        compute.gpu_percent += self.gpu_engine_percent.values().sum::<f64>();
         add_counter(
             &mut compute.gpu_memory_resident_bytes,
-            process.gpu_memory_resident_bytes,
+            self.gpu_memory_resident_bytes,
         );
         add_counter(
             &mut compute.gpu_memory_allocated_bytes,
-            process.gpu_memory_allocated_bytes,
+            self.gpu_memory_allocated_bytes,
         );
         add_counter(
             &mut compute.gpu_memory_bytes,
-            match process.gpu_memory_resident_bytes {
-                0 => process.gpu_memory_allocated_bytes,
+            match self.gpu_memory_resident_bytes {
+                0 => self.gpu_memory_allocated_bytes,
                 resident => resident,
             },
         );
 
-        let storage = &mut self.storage;
-        add_counter(&mut storage.disk_read_bytes, process.io.physical_read_bytes);
-        add_counter(
-            &mut storage.disk_write_bytes,
-            process.io.physical_write_bytes,
-        );
-        add_counter(
-            &mut storage.logical_read_bytes,
-            process.io.logical_read_bytes,
-        );
-        add_counter(
-            &mut storage.logical_write_bytes,
-            process.io.logical_write_bytes,
-        );
-        add_counter(&mut storage.read_operations, process.io.read_operations);
-        add_counter(&mut storage.write_operations, process.io.write_operations);
-        add_counter(
-            &mut storage.cancelled_write_bytes,
-            process.io.cancelled_write_bytes,
-        );
-    }
-}
-
-impl ComputeUsage {
-    fn normalize_cpu(&mut self, logical_cpus: usize) {
-        let raw_cpu = self.cpu_percent.max(0.0);
-        self.cpu_percent = rounded(raw_cpu, 1);
-        self.cpu_percent_of_machine =
-            rounded((raw_cpu / logical_cpus.max(1) as f64).clamp(0.0, 100.0), 1);
-        self.gpu_percent = rounded(self.gpu_percent, 1);
-        self.gpu_busy_percent = rounded(self.gpu_busy_percent.clamp(0.0, 100.0), 1);
-    }
-}
-
-impl StorageUsage {
-    fn normalize_rates(&mut self, seconds: f64) {
-        self.disk_read_bytes_per_second = rate(self.disk_read_bytes as f64, seconds, 1);
-        self.disk_write_bytes_per_second = rate(self.disk_write_bytes as f64, seconds, 1);
-        self.logical_read_bytes_per_second = rate(self.logical_read_bytes as f64, seconds, 1);
-        self.logical_write_bytes_per_second = rate(self.logical_write_bytes as f64, seconds, 1);
-        self.read_operations_per_second = rate(self.read_operations as f64, seconds, 1);
-        self.write_operations_per_second = rate(self.write_operations as f64, seconds, 1);
-    }
-}
-
-impl crate::model::NetworkUsage {
-    fn normalize_rates(&mut self, seconds: f64) {
-        self.network_receive_bytes_per_second = rate(self.network_receive_bytes as f64, seconds, 1);
-        self.network_transmit_bytes_per_second =
-            rate(self.network_transmit_bytes as f64, seconds, 1);
+        let storage = &mut usage.storage;
+        let io = &self.io;
+        add_counter(&mut storage.disk_read_bytes, io.physical_read_bytes);
+        add_counter(&mut storage.disk_write_bytes, io.physical_write_bytes);
+        add_counter(&mut storage.logical_read_bytes, io.logical_read_bytes);
+        add_counter(&mut storage.logical_write_bytes, io.logical_write_bytes);
+        add_counter(&mut storage.read_operations, io.read_operations);
+        add_counter(&mut storage.write_operations, io.write_operations);
+        add_counter(&mut storage.cancelled_write_bytes, io.cancelled_write_bytes);
     }
 }
 
@@ -551,7 +512,7 @@ pub struct ResourceSampler {
     previous_sockets_by_pid: HashMap<u32, Arc<HashSet<u64>>>,
     previous_network_available: bool,
     previous_sample: Option<Instant>,
-    resume_clock: crate::resume::ResumeClock,
+    resume_clock: ResumeDetector,
     memory: ProcessCache<MemoryUsage>,
     open_files: ProcessCache<Arc<ProcessFiles>>,
     app_disk: AppDiskCache,
@@ -571,7 +532,7 @@ impl Default for ResourceSampler {
             previous_sockets_by_pid: HashMap::new(),
             previous_network_available: false,
             previous_sample: None,
-            resume_clock: crate::resume::ResumeClock::default(),
+            resume_clock: ResumeDetector::default(),
             memory: ProcessCache::default(),
             open_files: ProcessCache::default(),
             app_disk: AppDiskCache::default(),
@@ -968,7 +929,7 @@ impl ResourceSampler {
             } else {
                 0.0
             };
-            *engines.entry(gpu::engine_scope(client_engine)).or_default() += percent;
+            *engines.entry(engine_scope(client_engine)).or_default() += percent;
         }
         engines
     }
@@ -994,6 +955,16 @@ impl ResourceSampler {
             })
             .collect();
     }
+}
+
+/// Counters use device/client/engine keys; occupancy is summed by device/engine.
+/// Keep the device in the key so separate GPUs are not treated as one engine.
+fn engine_scope(client_engine: &str) -> String {
+    let (client, engine) = client_engine
+        .rsplit_once('/')
+        .unwrap_or(("unknown/unknown", client_engine));
+    let (device, _) = client.rsplit_once('/').unwrap_or((client, "unknown"));
+    format!("{device}/{engine}")
 }
 
 /// Lightweight identity/topology discovery is separate from detailed sampling.

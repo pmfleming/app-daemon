@@ -68,7 +68,7 @@ impl<W> WatchRecovery<W> {
 pub(super) async fn track_state(service: std::sync::Weak<ApplicationService>) {
     let (window_sender, mut window_events) = mpsc::channel(64);
     let events_task = tokio::spawn(hyprland::watch_window_events(window_sender));
-    let _events = crate::platform::AbortOnDrop(events_task.abort_handle());
+    let _events = shelllist_daemon_tokio::AbortOnDrop(events_task.abort_handle());
     let (catalog_sender, mut catalog_events) = mpsc::channel(64);
     let mut catalog_watch = WatchRecovery::new(Instant::now());
     let mut window_events_open = true;

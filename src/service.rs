@@ -113,7 +113,7 @@ impl ApplicationService {
         if trackers && tokio::runtime::Handle::try_current().is_ok() {
             let tasks = vec![
                 tokio::spawn(until_shutdown(
-                    crate::resume::monitor(resume_sender),
+                    shelllist_daemon_tokio::monitor_resumes(resume_sender),
                     service.stop.subscribe(),
                 )),
                 tokio::spawn(until_shutdown(
@@ -229,7 +229,7 @@ impl ApplicationService {
         let _ = self.state_changes.send(self.revisions().await);
     }
 
-    fn ownership_snapshot(&self) -> crate::ownership::Snapshot {
+    fn ownership_snapshot(&self) -> Arc<crate::ownership::Snapshot> {
         self.ownership
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -589,13 +589,10 @@ async fn track_resources(service: std::sync::Weak<ApplicationService>) {
     let mut resumes = initial.resume_events.clone();
     let mut resume_generation = *resumes.borrow_and_update();
     drop(initial);
-    loop {
-        let Some(service) = service.upgrade() else {
-            return;
-        };
-        if service.stopping.load(Ordering::Acquire) {
-            return;
-        }
+    while let Some(service) = service
+        .upgrade()
+        .filter(|s| !s.stopping.load(Ordering::Acquire))
+    {
         if !resource_sample_due(&service, last_sample, &mut resumes).await {
             continue;
         }
@@ -622,10 +619,7 @@ async fn resource_sample_due(
     resumes: &mut watch::Receiver<u64>,
 ) -> bool {
     let now = Instant::now();
-    let Some(last_sample) = last_sample else {
-        return true;
-    };
-    let deadline = last_sample + service.resource_sample_interval(now);
+    let deadline = last_sample.map_or(now, |last| last + service.resource_sample_interval(now));
     if now >= deadline {
         return true;
     }

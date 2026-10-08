@@ -14,6 +14,5 @@ mod platform;
 mod process;
 pub mod protocol;
 pub mod resources;
-mod resume;
 pub mod service;
 pub mod settings;

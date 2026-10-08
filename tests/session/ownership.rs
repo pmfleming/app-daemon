@@ -206,13 +206,21 @@ async fn generated_wayland_identity_is_grouped_placed_and_recovered_after_daemon
     let proxy = session.proxy().await?;
     let mut stream = events(&proxy).await?;
     for action in ["activate", "close"] {
-        let page = call(&proxy, "applications.query", json!({})).await?;
-        let accepted = call(
-            &proxy,
-            "applications.execute",
-            json!({"target_id":"ok.desktop","action":action,"expected_revision":page["data"]["applications"]["revision"]}),
-        )
-        .await?;
+        // Reconciliation can advance the revision between these requests. Only
+        // retry a rejected stale request, never an accepted operation or other error.
+        let accepted = tokio::time::timeout(DEADLINE, async {
+            loop {
+                let page = call(&proxy, "applications.query", json!({})).await?;
+                let accepted = call(
+                    &proxy,
+                    "applications.execute",
+                    json!({"target_id":"ok.desktop","action":action,"expected_revision":page["data"]["applications"]["revision"]}),
+                ).await?;
+                if accepted["ok"] != false || accepted["error"]["message"] != "application state changed; refresh and retry" {
+                    return Result::<_>::Ok(accepted);
+                }
+            }
+        }).await.context("application state did not settle")??;
         assert_eq!(accepted["ok"], true, "{accepted}");
         operation(
             &mut stream,

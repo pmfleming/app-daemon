@@ -1,5 +1,9 @@
 # RustQualityLens baseline
 
+The latest [ownership/resource refactor review](ownership-refactor-review.md)
+records complexity, Halstead effort, locality/leverage, cloning, source-evidence
+completeness and verification, including the integration-fixture race fix.
+
 The latest [five follow-up improvements](five-improvements.md) record receipt,
 provider, disk, watcher, and source-inventory changes, including metric tradeoffs.
 The preceding [process/launch/watcher review](process-launch-review.md) records

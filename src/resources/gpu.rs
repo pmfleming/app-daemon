@@ -5,7 +5,7 @@ use std::{
 
 use super::provider::GpuProcessStat;
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Default)]
 struct GpuClientStat {
     engine_nanoseconds: HashMap<String, u64>,
     resident_regions: HashMap<String, u64>,
@@ -87,16 +87,6 @@ fn aggregate_gpu_clients(clients: HashMap<String, GpuClientStat>) -> GpuProcessS
     process
 }
 
-/// Counters use device/client/engine keys; occupancy is summed by device/engine.
-/// Keep the device in the key so separate GPUs are not treated as one engine.
-pub(super) fn engine_scope(client_engine: &str) -> String {
-    let (client, engine) = client_engine
-        .rsplit_once('/')
-        .unwrap_or(("unknown/unknown", client_engine));
-    let (device, _) = client.rsplit_once('/').unwrap_or((client, "unknown"));
-    format!("{device}/{engine}")
-}
-
 fn parse_gpu_fdinfo(value: &str) -> Option<(String, GpuClientStat)> {
     let mut client_id = None;
     let mut device = None;
@@ -123,31 +113,19 @@ fn drm_fields(value: &str) -> impl Iterator<Item = (&str, &str)> {
 
 impl GpuClientStat {
     fn record(&mut self, key: &str, value: &str) {
-        if record_metric(
-            &mut self.engine_nanoseconds,
-            key,
-            value,
-            "drm-engine-",
-            parse_duration_nanoseconds,
-        ) {
-            return;
+        for (prefix, metrics, parse) in [
+            (
+                "drm-engine-",
+                &mut self.engine_nanoseconds,
+                parse_duration_nanoseconds as fn(&str) -> Option<u64>,
+            ),
+            ("drm-resident-", &mut self.resident_regions, parse_bytes),
+            ("drm-memory-", &mut self.allocated_regions, parse_bytes),
+        ] {
+            if record_metric(metrics, key, value, prefix, parse) {
+                return;
+            }
         }
-        if record_metric(
-            &mut self.resident_regions,
-            key,
-            value,
-            "drm-resident-",
-            parse_bytes,
-        ) {
-            return;
-        }
-        record_metric(
-            &mut self.allocated_regions,
-            key,
-            value,
-            "drm-memory-",
-            parse_bytes,
-        );
     }
 
     fn merge(&mut self, other: Self) {

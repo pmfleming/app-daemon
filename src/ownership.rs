@@ -1,42 +1,22 @@
 //! Verified launch ownership, independent of a process's current cgroup.
 //! No process control, browser heuristics, or persisted PID-only identities.
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::{
+    collections::{HashMap, HashSet, VecDeque},
+    sync::Arc,
+};
 
 use crate::{
     catalog::Catalog,
-    process::{process_cgroup, process_children, process_stat_fields, read_processes},
+    process::{
+        Identity, Process, live_process_children, parse_process, process_cgroup, process_identity,
+        read_processes,
+    },
 };
 
 mod systemd;
 #[cfg(test)]
 mod tests;
 pub(crate) use systemd::recover;
-
-pub(crate) type Identity = (u32, u64);
-
-#[derive(Clone, Debug)]
-pub(crate) struct Process {
-    pub(crate) parent: u32,
-    pub(crate) start: u64,
-    pub(crate) cgroup: Option<String>,
-}
-
-pub(crate) fn process_identity(pid: u32) -> Option<Identity> {
-    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
-    Some((pid, parse_process(&stat)?.start))
-}
-
-fn parse_process(stat: &str) -> Option<Process> {
-    let fields = process_stat_fields(stat)?;
-    if matches!(*fields.first()?, "Z" | "X") {
-        return None;
-    }
-    Some(Process {
-        parent: fields.get(1)?.parse().ok()?,
-        start: fields.get(19)?.parse().ok()?,
-        cgroup: None,
-    })
-}
 
 pub(crate) fn processes() -> HashMap<u32, Process> {
     use std::os::unix::fs::MetadataExt;
@@ -54,7 +34,7 @@ pub(crate) fn processes() -> HashMap<u32, Process> {
     processes
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 struct Owner {
     // None is conflicting verified evidence: never fall back to a guessed owner.
     target: Option<String>,
@@ -63,9 +43,9 @@ struct Owner {
     scope: Option<String>,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Debug, Default, PartialEq, Eq)]
 pub(crate) struct Snapshot {
-    owners: HashMap<Identity, Owner>,
+    owners: HashMap<Identity, Arc<Owner>>,
 }
 
 impl Snapshot {
@@ -98,7 +78,7 @@ impl Snapshot {
 #[derive(Default)]
 pub(crate) struct Ownership {
     anchors: HashMap<Identity, HashSet<String>>,
-    snapshot: Snapshot,
+    snapshot: Arc<Snapshot>,
 }
 
 impl Ownership {
@@ -115,8 +95,8 @@ impl Ownership {
         }
     }
 
-    pub(crate) fn snapshot(&self) -> Snapshot {
-        self.snapshot.clone()
+    pub(crate) fn snapshot(&self) -> Arc<Snapshot> {
+        Arc::clone(&self.snapshot)
     }
 
     pub(crate) fn reconcile(
@@ -139,15 +119,19 @@ impl Ownership {
         for (&identity, targets) in &self.anchors {
             next.owners.insert(
                 identity,
-                Owner {
-                    target: (targets.len() == 1).then(|| targets.iter().next().unwrap().clone()),
+                Arc::new(Owner {
+                    target: targets
+                        .iter()
+                        .next()
+                        .filter(|_| targets.len() == 1)
+                        .cloned(),
                     scope: processes[&identity.0].cgroup.as_deref().map(|path| {
                         catalog
                             .application_cgroup(path)
                             .map_or(path, |(_, path)| path)
                             .to_owned()
                     }),
-                },
+                }),
             );
         }
         // Keep already observed descendants across reparenting, but not a new
@@ -157,23 +141,36 @@ impl Ownership {
                 && owner.target.as_deref().is_none_or(eligible)
                 && can_retain(catalog, processes, &self.anchors, identity, owner)
             {
-                next.owners.entry(identity).or_insert_with(|| owner.clone());
+                next.owners
+                    .entry(identity)
+                    .or_insert_with(|| Arc::clone(owner));
             }
         }
-        let children = process_children(processes.iter().filter_map(|(&pid, p)| {
-            let parent = processes.get(&p.parent)?;
-            (p.start >= parent.start).then_some((pid, p.parent))
-        }));
+        next.inherit(catalog, processes, &self.anchors);
+        let changed = *self.snapshot != next;
+        self.snapshot = Arc::new(next);
+        changed
+    }
+}
+
+impl Snapshot {
+    fn inherit(
+        &mut self,
+        catalog: &Catalog,
+        processes: &HashMap<u32, Process>,
+        anchors: &HashMap<Identity, HashSet<String>>,
+    ) {
+        let children = live_process_children(processes);
         // Ancestors before descendants. Explicit anchors always win; retained
         // descendants are refreshed by their live parent, not traversal order.
         let mut pending = VecDeque::from_iter(
-            next.owners
+            self.owners
                 .keys()
                 .filter(|identity| {
                     let process = &processes[&identity.0];
-                    self.anchors.contains_key(identity)
+                    anchors.contains_key(identity)
                         || !processes.get(&process.parent).is_some_and(|parent| {
-                            next.owners
+                            self.owners
                                 .get(&(process.parent, parent.start))
                                 .is_some_and(|owner| accepts(catalog, process, owner))
                         })
@@ -186,34 +183,34 @@ impl Ownership {
                 continue;
             }
             let identity = (pid, processes[&pid].start);
-            let owner = next.owners[&identity].clone();
+            let owner = Arc::clone(&self.owners[&identity]);
             for &child in children.get(&pid).into_iter().flatten() {
                 let identity = (child, processes[&child].start);
-                if self.anchors.contains_key(&identity)
-                    || !accepts(catalog, &processes[&child], &owner)
+                if anchors.contains_key(&identity) || !accepts(catalog, &processes[&child], &owner)
                 {
                     continue;
                 }
-                if let Some(existing) = next.owners.get(&identity)
-                    && existing.target != owner.target
-                {
-                    // Conflicting lineage is not a reason to choose a winner.
-                    next.owners.insert(
-                        identity,
-                        Owner {
-                            target: None,
-                            scope: owner.scope.clone(),
-                        },
-                    );
-                } else {
-                    next.owners.insert(identity, owner.clone());
-                }
+                self.owners
+                    .insert(identity, self.inherited_owner(identity, &owner));
                 pending.push_back(child);
             }
         }
-        let changed = self.snapshot != next;
-        self.snapshot = next;
-        changed
+    }
+
+    fn inherited_owner(&self, identity: Identity, owner: &Arc<Owner>) -> Arc<Owner> {
+        if self
+            .owners
+            .get(&identity)
+            .is_some_and(|existing| existing.target != owner.target)
+        {
+            // Conflicting lineage is not a reason to choose a winner.
+            Arc::new(Owner {
+                target: None,
+                scope: owner.scope.clone(),
+            })
+        } else {
+            Arc::clone(owner)
+        }
     }
 }
 

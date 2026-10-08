@@ -49,7 +49,7 @@ pub struct LaunchReceipt {
 }
 
 impl LaunchReceipt {
-    pub(crate) fn ownership_roots(&self) -> Vec<crate::ownership::Identity> {
+    pub(crate) fn ownership_roots(&self) -> Vec<crate::process::Identity> {
         self.provenance.roots()
     }
 

@@ -1,5 +1,5 @@
 use super::{HistoryStore, persist_snapshot};
-use crate::model::{ComputeUsage, EnergyUsage, ResourceUsage, StorageUsage};
+use crate::model::{ComputeUsage, EnergyUsage, NetworkUsage, ResourceUsage, StorageUsage};
 
 #[test]
 fn persists_resource_buckets_and_retains_energy_for_seven_days() -> anyhow::Result<()> {
@@ -20,8 +20,15 @@ fn persists_resource_buckets_and_retains_energy_for_seven_days() -> anyhow::Resu
             disk_write_bytes: 200,
             disk_read_bytes_per_second: 20.0,
             disk_write_bytes_per_second: 40.0,
+            logical_read_bytes: 51,
+            read_operations: 13,
             open_file_disk_bytes: 4096,
             ..StorageUsage::default()
+        },
+        network: NetworkUsage {
+            network_receive_bytes: 71,
+            network_transmit_bytes: 83,
+            ..NetworkUsage::default()
         },
         energy: EnergyUsage {
             energy_mwh: 2.0,
@@ -58,6 +65,10 @@ fn persists_resource_buckets_and_retains_energy_for_seven_days() -> anyhow::Resu
     assert_eq!(point.storage.disk_read_bytes_per_second, 20.0);
     assert_eq!(point.storage.disk_write_bytes_per_second, 40.0);
     assert_eq!(point.storage.open_file_disk_bytes, 4096);
+    assert_eq!(point.storage.logical_read_bytes_per_second, 10.2);
+    assert_eq!(point.storage.read_operations_per_second, 2.6);
+    assert_eq!(point.network.network_receive_bytes_per_second, 14.2);
+    assert_eq!(point.network.network_transmit_bytes_per_second, 16.6);
     assert_eq!(point.energy_mwh, 6.0);
     let until = bucket + 2 * super::ENERGY_BUCKET_MILLISECONDS;
     assert_eq!(

@@ -301,7 +301,7 @@ fn verified_migrated_ownership_unifies_resources_without_borrowing_whole_host_sc
                 .map(|(&pid, stat)| {
                     (
                         pid,
-                        crate::ownership::Process {
+                        crate::process::Process {
                             parent: stat.parent_pid,
                             start: stat.start_ticks,
                             cgroup: state.cgroups.get(&pid).cloned(),

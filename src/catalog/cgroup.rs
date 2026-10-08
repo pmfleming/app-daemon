@@ -1,8 +1,6 @@
 use std::borrow::Cow;
 
-use super::Catalog;
-
-impl Catalog {
+impl super::Catalog {
     /// Resolve only explicitly application-named units, including nested cgroups.
     /// Prefer the most specific desktop ID; never guess from a generic service.
     pub(crate) fn target_for_cgroup(&self, path: &str) -> Option<&str> {

@@ -45,7 +45,7 @@ struct EnergyHistoryPoint {
     energy_confidence: String,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Default)]
 struct PendingEnergy {
     timestamp_ms: u64,
     energy_mwh: f64,

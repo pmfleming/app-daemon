@@ -247,11 +247,8 @@ fn target_processes(
     children: &HashMap<u32, Vec<u32>>,
     cgroups: &HashMap<u32, HashSet<u32>>,
 ) -> HashSet<u32> {
-    let mut pids = HashSet::new();
-    for root in roots {
-        pids.extend(descendants([*root], children));
-        pids.extend(cgroups.get(root).into_iter().flatten());
-    }
+    let mut pids = descendants(roots.iter().copied(), children);
+    pids.extend(roots.iter().filter_map(|root| cgroups.get(root)).flatten());
     pids
 }
 

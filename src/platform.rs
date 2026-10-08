@@ -1,7 +1,5 @@
 use std::{env, os::unix::fs::PermissionsExt, path::Path};
 
-pub(crate) use shelllist_daemon_tokio::AbortOnDrop;
-
 /// Returns whether a command can be executed directly or found on `PATH`.
 pub(crate) fn command_available(command: &str) -> bool {
     let command = Path::new(command);

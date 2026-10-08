@@ -4,6 +4,43 @@ use std::{
     fs,
 };
 
+pub(crate) type Identity = (u32, u64);
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct Process {
+    pub(crate) parent: u32,
+    pub(crate) start: u64,
+    pub(crate) cgroup: Option<String>,
+}
+
+pub(crate) fn process_identity(pid: u32) -> Option<Identity> {
+    Some((pid, read_process(pid)?.start))
+}
+
+pub(crate) fn read_process(pid: u32) -> Option<Process> {
+    parse_process(&fs::read_to_string(format!("/proc/{pid}/stat")).ok()?)
+}
+
+pub(crate) fn parse_process(stat: &str) -> Option<Process> {
+    let fields = process_stat_fields(stat)?;
+    if matches!(*fields.first()?, "Z" | "X") {
+        return None;
+    }
+    Some(Process {
+        parent: fields.get(1)?.parse().ok()?,
+        start: fields.get(19)?.parse().ok()?,
+        cgroup: None,
+    })
+}
+
+/// Exclude impossible ancestry edges caused by PID reuse during a procfs scan.
+pub(crate) fn live_process_children(processes: &HashMap<u32, Process>) -> HashMap<u32, Vec<u32>> {
+    process_children(processes.iter().filter_map(|(&pid, process)| {
+        let parent = processes.get(&process.parent)?;
+        (process.start >= parent.start).then_some((pid, process.parent))
+    }))
+}
+
 pub(crate) fn process_cgroup(pid: u32) -> Option<String> {
     fs::read_to_string(format!("/proc/{pid}/cgroup"))
         .ok()?

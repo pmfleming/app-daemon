@@ -169,7 +169,7 @@ impl PendingPoint {
     }
 }
 
-impl ResourcePeaks {
+impl crate::model::ResourcePeaks {
     fn merge(&mut self, other: &Self) {
         self.cpu_percent = self.cpu_percent.max(other.cpu_percent);
         self.cpu_percent_of_machine = self
@@ -196,7 +196,7 @@ impl ResourcePeaks {
     }
 }
 
-impl ResourceAvailability {
+impl crate::model::ResourceAvailability {
     fn for_usage(usage: &ResourceUsage) -> Self {
         let measurement = &usage.measurement;
         Self {
@@ -291,16 +291,13 @@ impl WeightedStorage {
         StorageUsage {
             disk_read_bytes: self.read_bytes,
             disk_write_bytes: self.write_bytes,
-            disk_read_bytes_per_second: per_second(self.read_bytes, duration),
-            disk_write_bytes_per_second: per_second(self.write_bytes, duration),
+
             logical_read_bytes: self.logical_read_bytes,
             logical_write_bytes: self.logical_write_bytes,
-            logical_read_bytes_per_second: per_second(self.logical_read_bytes, duration),
-            logical_write_bytes_per_second: per_second(self.logical_write_bytes, duration),
+
             read_operations: self.read_operations,
             write_operations: self.write_operations,
-            read_operations_per_second: per_second(self.read_operations, duration),
-            write_operations_per_second: per_second(self.write_operations, duration),
+
             cancelled_write_bytes: self.cancelled_write_bytes,
             open_file_disk_bytes: average(self.open_file_bytes, duration),
             referenced_file_disk_bytes: average(self.referenced_file_disk, duration),
@@ -309,18 +306,16 @@ impl WeightedStorage {
             disk_space_total_bytes: average(self.disk_space_total, duration),
             disk_space_temporary_bytes: average(self.disk_space_temporary, duration),
             disk_space_permanent_bytes: average(self.disk_space_permanent, duration),
+            ..Default::default()
         }
+        .with_rates(duration / 1_000.0)
     }
 }
 
 impl WeightedNetwork {
     fn add(&mut self, duration_ms: u64, usage: &NetworkUsage) {
-        self.receive_bytes = self
-            .receive_bytes
-            .saturating_add(usage.network_receive_bytes);
-        self.transmit_bytes = self
-            .transmit_bytes
-            .saturating_add(usage.network_transmit_bytes);
+        add_counter(&mut self.receive_bytes, usage.network_receive_bytes);
+        add_counter(&mut self.transmit_bytes, usage.network_transmit_bytes);
         self.connection_count += usage.network_connection_count as f64 * duration_ms as f64;
     }
 
@@ -328,17 +323,13 @@ impl WeightedNetwork {
         NetworkUsage {
             network_receive_bytes: self.receive_bytes,
             network_transmit_bytes: self.transmit_bytes,
-            network_receive_bytes_per_second: per_second(self.receive_bytes, duration),
-            network_transmit_bytes_per_second: per_second(self.transmit_bytes, duration),
-            network_connection_count: (self.connection_count / duration).round() as u64,
+            network_connection_count: average(self.connection_count, duration),
+            ..Default::default()
         }
+        .with_rates(duration / 1_000.0)
     }
 }
 
 fn average(weighted: f64, duration: f64) -> u64 {
     (weighted / duration).round() as u64
-}
-
-fn per_second(total: u64, duration_ms: f64) -> f64 {
-    rounded(total as f64 * 1_000.0 / duration_ms, 1)
 }
