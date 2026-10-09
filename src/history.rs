@@ -140,18 +140,31 @@ impl HistoryStore {
         self.flush_expired(timestamp_ms);
         self.record_energy(target_id, timestamp_ms, usage);
         let duration_ms = (duration_seconds * 1000.0).round().max(1.0) as u64;
-        let bucket_start = timestamp_ms - timestamp_ms % BUCKET_MILLISECONDS;
-        if self
-            .pending
-            .get(target_id)
-            .is_some_and(|pending| pending.timestamp_ms != bucket_start)
-            && let Some(pending) = self.pending.remove(target_id)
-        {
-            self.finish_pending(target_id.to_owned(), pending);
+        let sample_start = timestamp_ms.saturating_sub(duration_ms);
+        // Only retain intervals that can still be queried. This also bounds the
+        // work for a very long sample after suspend or a clock discontinuity.
+        let mut start = sample_start.max(timestamp_ms.saturating_sub(RETENTION_MILLISECONDS));
+        while start < timestamp_ms {
+            let bucket_start = start - start % BUCKET_MILLISECONDS;
+            let end = timestamp_ms.min(bucket_start.saturating_add(BUCKET_MILLISECONDS));
+            if self.pending.get(target_id).is_some_and(|pending| {
+                pending.timestamp_ms != bucket_start || pending.end_ms != start
+            }) && let Some(pending) = self.pending.remove(target_id)
+            {
+                self.finish_pending(target_id.to_owned(), pending);
+            }
+            let part = aggregate::sample_portion(
+                usage,
+                start - sample_start,
+                end - sample_start,
+                duration_ms,
+            );
+            let pending = self.pending.entry(target_id.to_owned()).or_default();
+            pending.timestamp_ms = bucket_start;
+            pending.add(end - start, &part);
+            pending.end_ms = end;
+            start = end;
         }
-        let pending = self.pending.entry(target_id.to_owned()).or_default();
-        pending.timestamp_ms = bucket_start;
-        pending.add(duration_ms, usage);
         self.prune(timestamp_ms);
     }
 
@@ -355,7 +368,18 @@ impl HistoryStore {
     }
 
     fn finish_pending(&mut self, id: String, pending: PendingPoint) {
-        if let Some(point) = pending.finish() {
+        if let Some(mut point) = pending.finish() {
+            if let Some(points) = self.points.get_mut(&id)
+                && let Ok(index) = points.binary_search_by_key(
+                    &point.timestamp_ms.saturating_sub(point.duration_ms),
+                    |p| p.timestamp_ms,
+                )
+                && aggregate::adjacent_in_bucket(&points[index], &point)
+            {
+                let previous = points.remove(index).expect("existing adjacent point");
+                point = PendingPoint::merge_finished(&previous, &point);
+                self.cursor_epochs.insert(id.clone(), new_cursor_epoch());
+            }
             self.insert_point(id, point);
         }
     }
@@ -548,3 +572,5 @@ mod availability_tests;
 mod recovery_tests;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod timing_tests;

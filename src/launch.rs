@@ -1,8 +1,8 @@
-use std::{process::Stdio, time::Duration};
+use std::{os::unix::fs::FileExt, process::Stdio, time::Duration};
 
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
-use tokio::{io::AsyncReadExt, process::Command};
+use tokio::process::Command;
 
 use crate::platform::command_available;
 
@@ -208,58 +208,28 @@ async fn checked_handoff_with_timeout(
     description: &str,
     timeout: Duration,
 ) -> anyhow::Result<()> {
+    // An unlinked file stays writable through inherited descriptors even after
+    // daemon shutdown. A pipe drainer would still expose descendants to SIGPIPE.
+    let diagnostics = tempfile::tempfile().context("create launcher diagnostic sink")?;
     let mut child = command
         .kill_on_drop(true)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::piped())
+        .stderr(Stdio::from(diagnostics.try_clone()?))
         .spawn()
         .with_context(|| format!("start {description}"))?;
-    let mut stderr = child
-        .stderr
-        .take()
-        .context("capture launcher diagnostics")?;
-    let mut detail = Vec::new();
-    let mut buffer = [0_u8; 4096];
-    let mut open = true;
-    let status = tokio::time::timeout(timeout, async {
-        loop {
-            tokio::select! {
-                status = child.wait() => return status,
-                read = stderr.read(&mut buffer), if open => {
-                    match read {
-                        Ok(0) | Err(_) => open = false,
-                        Ok(count) => capture_diagnostic(&mut detail, &buffer[..count]),
-                    }
-                }
-            }
-        }
-    })
-    .await
-    .with_context(|| format!("{description} launch handoff timed out"))?
-    .with_context(|| format!("wait for {description} launcher"))?;
-    // GTK may pass stderr to an application. Observe the launcher's exit, not
-    // descendant EOF, and never retain unbounded diagnostics from a noisy helper.
-    let _ = tokio::time::timeout(Duration::from_millis(20), async {
-        while let Ok(count) = stderr.read(&mut buffer).await {
-            if count == 0 {
-                break;
-            }
-            capture_diagnostic(&mut detail, &buffer[..count]);
-        }
-    })
-    .await;
+    let status = tokio::time::timeout(timeout, child.wait())
+        .await
+        .with_context(|| format!("{description} launch handoff timed out"))?
+        .with_context(|| format!("wait for {description} launcher"))?;
     if status.success() {
         return Ok(());
     }
-    let detail = String::from_utf8_lossy(&detail).trim().to_owned();
+    // Do not change the shared write offset, or wait for descendant EOF.
+    let mut detail = [0_u8; 8192];
+    let count = diagnostics.read_at(&mut detail, 0).unwrap_or(0);
+    let detail = String::from_utf8_lossy(&detail[..count]).trim().to_owned();
     anyhow::bail!("{description} launch failed ({status}): {detail}")
-}
-
-fn capture_diagnostic(detail: &mut Vec<u8>, bytes: &[u8]) {
-    const MAX_DIAGNOSTIC: usize = 8192;
-    detail
-        .extend_from_slice(&bytes[..bytes.len().min(MAX_DIAGNOSTIC.saturating_sub(detail.len()))]);
 }
 
 pub async fn spawn(

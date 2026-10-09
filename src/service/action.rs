@@ -336,7 +336,10 @@ async fn place_launched_window(
     };
     if let Some(workspace) = params.workspace_id.as_deref() {
         hyprland::move_to_workspace(&window.address, workspace).await?;
-        verify_placement(&window, workspace, launch).await?;
+        verify_placement(&window, workspace, |current| {
+            launch.owns_process(current.pid)
+        })
+        .await?;
         set_placement(launch, PlacementStatus::Placed, None);
     }
     if focus {
@@ -375,25 +378,26 @@ async fn wait_for_new_window(
 async fn verify_placement(
     window: &Client,
     workspace: &str,
-    launch: &LaunchReceipt,
+    belongs: impl Fn(&Client) -> bool,
 ) -> anyhow::Result<()> {
-    let deadline = Instant::now() + Duration::from_secs(2);
-    loop {
-        let snapshot = Snapshot::load().await;
-        let current = snapshot.clients.iter().find(|current| {
-            current.address == window.address
-                && current.pid == window.pid
-                && launch.owns_process(current.pid)
-        });
-        if current.is_some_and(|current| workspace_matches(current, workspace)) {
-            return Ok(());
+    time::timeout(Duration::from_secs(2), async {
+        loop {
+            let snapshot = Snapshot::load().await;
+            if snapshot.available
+                && snapshot.clients.iter().any(|current| {
+                    current.address == window.address
+                        && current.pid == window.pid
+                        && belongs(current)
+                        && workspace_matches(current, workspace)
+                })
+            {
+                return;
+            }
+            time::sleep(Duration::from_millis(100)).await;
         }
-        anyhow::ensure!(
-            Instant::now() < deadline,
-            "workspace move was not confirmed by the compositor"
-        );
-        time::sleep(Duration::from_millis(100)).await;
-    }
+    })
+    .await
+    .context("workspace move was not confirmed by the compositor")
 }
 
 fn workspace_matches(window: &Client, workspace: &str) -> bool {
@@ -429,7 +433,16 @@ async fn move_to_workspace(
         .workspace_id
         .as_deref()
         .context("workspace_id is required")?;
-    hyprland::move_to_workspace(address, workspace).await
+    let window = windows
+        .clients
+        .iter()
+        .find(|window| window.address == address)
+        .context("window is no longer available")?;
+    hyprland::move_to_workspace(address, workspace).await?;
+    verify_placement(window, workspace, |current| {
+        resolve_target(catalog, current, ownership) == params.target_id
+    })
+    .await
 }
 
 async fn close_application(

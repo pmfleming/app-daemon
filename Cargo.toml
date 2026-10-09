@@ -7,11 +7,11 @@ description = "Application catalog and activation daemon for Shelllist"
 repository = "https://github.com/pmfleming/app-daemon"
 
 [features]
-benchmarks = ["dep:allocation-counter", "dep:tempfile"]
+benchmarks = ["dep:allocation-counter"]
 
 [dependencies]
 allocation-counter = { version = "0.8.1", optional = true }
-tempfile = { version = "3", optional = true }
+tempfile = "3"
 anyhow = "1"
 base64 = "0.22"
 clap = { version = "4", features = ["derive"] }
@@ -39,5 +39,4 @@ harness = false
 required-features = ["benchmarks"]
 
 [dev-dependencies]
-tempfile = "3"
 rustix = { version = "1", features = ["process"] }

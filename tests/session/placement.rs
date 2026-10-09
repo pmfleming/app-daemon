@@ -252,6 +252,49 @@ async fn rejected_and_unconfirmed_moves_preserve_launch_receipt_and_report_parti
 }
 
 #[tokio::test]
+async fn explicit_moves_require_snapshot_confirmation() -> Result<()> {
+    let mut session = Session::start(true).await?;
+    let proxy = session.proxy().await?;
+    let mut stream = events(&proxy).await?;
+    for (accept, apply, terminal) in [
+        (false, false, "failed"),
+        (true, false, "failed"),
+        (true, true, "completed"),
+    ] {
+        session
+            .compositor
+            .set(&json!([window("0x123", "ok", std::process::id(), 9)]).to_string());
+        session.compositor.moves(accept, apply);
+        let accepted = call(
+            &proxy,
+            "applications.execute",
+            json!({
+                "target_id":"ok.desktop", "action":"move-to-workspace",
+                "window_id":"window-123", "workspace_id":"3"
+            }),
+        )
+        .await?;
+        let id = accepted["data"]["operation"]["id"]
+            .as_str()
+            .context("operation id")?;
+        let result = operation(&mut stream, id, terminal).await?;
+        let message = result["message"].as_str().unwrap();
+        assert!(
+            message.contains(if apply {
+                "Moved"
+            } else if accept {
+                "not confirmed"
+            } else {
+                "rejected"
+            }),
+            "{result}"
+        );
+    }
+    drop(proxy);
+    session.shutdown().await
+}
+
+#[tokio::test]
 async fn unrelated_same_class_and_ambiguous_windows_are_never_moved() -> Result<()> {
     let mut session = Session::start(true).await?;
     let _manager = manager(&session).await?;

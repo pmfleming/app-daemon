@@ -11,6 +11,7 @@ use super::BUCKET_MILLISECONDS;
 #[derive(Debug, Default)]
 pub(super) struct PendingPoint {
     pub(super) timestamp_ms: u64,
+    pub(super) end_ms: u64,
     duration_ms: u64,
     compute: WeightedCompute,
     storage: WeightedStorage,
@@ -72,13 +73,52 @@ struct WeightedNetwork {
     connection_count: f64,
 }
 
+pub(super) fn adjacent_in_bucket(
+    first: &ResourceHistoryPoint,
+    second: &ResourceHistoryPoint,
+) -> bool {
+    first.timestamp_ms == second.timestamp_ms.saturating_sub(second.duration_ms)
+        && first.timestamp_ms.saturating_sub(1) / BUCKET_MILLISECONDS
+            == second.timestamp_ms.saturating_sub(1) / BUCKET_MILLISECONDS
+}
+
+/// Split interval totals, not gauges or rates. Cumulative integer allocation
+/// preserves every byte/operation even when a sample spans many buckets.
+pub(super) fn sample_portion(
+    usage: &ResourceUsage,
+    start: u64,
+    end: u64,
+    duration: u64,
+) -> ResourceUsage {
+    let mut part = usage.clone();
+    let fraction = (end - start) as f64 / duration as f64;
+    part.energy.energy_mwh *= fraction;
+    part.energy.battery_percent *= fraction;
+    for counter in [
+        &mut part.storage.disk_read_bytes,
+        &mut part.storage.disk_write_bytes,
+        &mut part.storage.logical_read_bytes,
+        &mut part.storage.logical_write_bytes,
+        &mut part.storage.read_operations,
+        &mut part.storage.write_operations,
+        &mut part.storage.cancelled_write_bytes,
+        &mut part.network.network_receive_bytes,
+        &mut part.network.network_transmit_bytes,
+    ] {
+        let total = u128::from(*counter);
+        *counter = (total * u128::from(end) / u128::from(duration)
+            - total * u128::from(start) / u128::from(duration)) as u64;
+    }
+    part
+}
+
 impl PendingPoint {
     pub(super) fn merge_finished(
         first: &ResourceHistoryPoint,
         second: &ResourceHistoryPoint,
     ) -> ResourceHistoryPoint {
         let mut merged = Self {
-            timestamp_ms: first.timestamp_ms.saturating_sub(BUCKET_MILLISECONDS),
+            end_ms: first.timestamp_ms.max(second.timestamp_ms),
             availability: first.resources.availability.clone(),
             ..Self::default()
         };
@@ -104,7 +144,15 @@ impl PendingPoint {
             merge_label(&mut merged.energy_confidence, &resource.energy_confidence);
             merged.peaks.merge(&resource.peaks);
         }
-        merged.finish().unwrap_or_else(|| second.clone())
+        let start = first
+            .timestamp_ms
+            .saturating_sub(first.duration_ms)
+            .min(second.timestamp_ms.saturating_sub(second.duration_ms));
+        let mut point = merged.finish().unwrap_or_else(|| second.clone());
+        // Equal-endpoint backfills can overlap. Do not turn duplicated weight
+        // into an observation of time before either sample began.
+        point.duration_ms = point.timestamp_ms.saturating_sub(start);
+        point
     }
 
     pub(super) fn add(&mut self, duration_ms: u64, usage: &ResourceUsage) {
@@ -115,6 +163,7 @@ impl PendingPoint {
             self.availability = Some(available);
         }
         self.duration_ms = self.duration_ms.saturating_add(duration_ms);
+        self.end_ms = self.end_ms.saturating_add(duration_ms);
         self.compute.add(duration_ms, &usage.compute);
         self.storage.add(duration_ms, &usage.storage);
         self.network.add(duration_ms, &usage.network);
@@ -147,7 +196,7 @@ impl PendingPoint {
         }
         let duration = self.duration_ms as f64;
         Some(ResourceHistoryPoint {
-            timestamp_ms: self.timestamp_ms.saturating_add(BUCKET_MILLISECONDS),
+            timestamp_ms: self.end_ms,
             duration_ms: self.duration_ms,
             resources: HistoricalResourceUsage {
                 availability: self.availability,

@@ -30,7 +30,7 @@ fn restart_merges_partial_buckets_and_invalidates_pre_rewrite_cursors() -> anyho
             .is_empty(),
         "normal restart preserves cursor validity"
     );
-    restarted.record("app", t + 2000, 2.0, &usage(40.0, 2.0));
+    restarted.record("app", t + 3000, 2.0, &usage(40.0, 2.0));
     restarted.snapshot(true);
     assert!(
         restarted.query("app", None, cursor.as_deref(), 1).is_err(),

@@ -44,7 +44,7 @@ fn persists_resource_buckets_and_retains_energy_for_seven_days() -> anyhow::Resu
     };
     let now = super::now_milliseconds();
     let bucket = now - now % super::BUCKET_MILLISECONDS;
-    for timestamp in [bucket + 2_000, bucket + 7_000, bucket + 12_000] {
+    for timestamp in [bucket + 5_000, bucket + 10_000, bucket + 15_000] {
         store.record("example.desktop", timestamp, 5.0, &usage);
     }
     store.record(
