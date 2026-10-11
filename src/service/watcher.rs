@@ -178,8 +178,16 @@ fn observe_window_event(event: shelllist_hyprland::Event, connected: &mut bool) 
             *connected = true;
             true
         }
-        shelllist_hyprland::Event::Disconnected => {
+        shelllist_hyprland::Event::Disconnected(cause) => {
             *connected = false;
+            if let Some(cause) = cause {
+                tracing::warn!(%cause, "window event stream failed; continuing reconciliation");
+            }
+            true
+        }
+        shelllist_hyprland::Event::ConnectFailed(cause) => {
+            *connected = false;
+            tracing::warn!(%cause, "window event connection failed; continuing reconciliation");
             true
         }
         shelllist_hyprland::Event::Message(line) => hyprland::window_event_relevant(&line),
@@ -197,6 +205,44 @@ async fn wait_for_watcher_retry(deadline: Option<Instant>) {
 mod tests {
     use super::{MAX_RETRY, MIN_RETRY, WatchRecovery};
     use std::time::Instant;
+    #[test]
+    fn window_connection_failures_restore_recovery_polling_and_reconnect_recovers() {
+        use shelllist_hyprland::Event;
+
+        let mut connected = false;
+        for failure in [
+            Event::ConnectFailed("no compositor at startup".into()),
+            Event::Disconnected(None),
+            Event::Disconnected(Some("invalid UTF-8".into())),
+            Event::ConnectFailed("connection refused".into()),
+        ] {
+            assert!(super::observe_window_event(failure, &mut connected));
+            assert!(!connected);
+            assert_eq!(
+                super::reconciliation_intervals(connected, true).0,
+                super::WINDOW_RECOVERY_INTERVAL
+            );
+            assert!(super::observe_window_event(
+                Event::Connected,
+                &mut connected
+            ));
+            assert!(connected);
+            assert_eq!(
+                super::reconciliation_intervals(connected, true).0,
+                super::HEALTHY_WINDOW_INTERVAL
+            );
+        }
+        assert!(!super::observe_window_event(
+            Event::Message("openlayer>>panel".into()),
+            &mut connected
+        ));
+        assert!(connected);
+        assert!(super::observe_window_event(
+            Event::Message("openwindow>>fixture".into()),
+            &mut connected
+        ));
+    }
+
     #[test]
     fn failed_initialization_retries_with_bounded_backoff_and_recovers() {
         let start = Instant::now();

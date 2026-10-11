@@ -175,8 +175,13 @@ fn workspace_selector(workspace: &str) -> anyhow::Result<&str> {
 }
 
 async fn dispatch(arguments: &[&str]) -> bool {
-    shelllist_hyprland::Client::default()
-        .request(&arguments.join(" "))
+    dispatch_with(&shelllist_hyprland::Client::default(), arguments).await
+}
+
+async fn dispatch_with(client: &shelllist_hyprland::Client, arguments: &[&str]) -> bool {
+    // A stale session must not redirect window mutations to another compositor.
+    client
+        .request_exact(&arguments.join(" "))
         .await
         .is_ok_and(|response| response.trim() == "ok")
 }
@@ -190,6 +195,52 @@ fn valid_address(address: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{address_selector, workspace_selector};
+
+    #[tokio::test]
+    async fn dispatches_only_to_the_configured_instance() -> anyhow::Result<()> {
+        use tokio::{
+            io::{AsyncReadExt, AsyncWriteExt},
+            net::UnixListener,
+            time::{Duration, timeout},
+        };
+
+        let root = tempfile::tempdir()?;
+        let signature = root.path().file_name().unwrap().to_str().unwrap();
+        let instance = root.path().join("hypr").join(signature);
+        std::fs::create_dir_all(&instance)?;
+        let socket = instance.join(".socket.sock");
+        let listener = UnixListener::bind(&socket)?;
+        let client = shelllist_hyprland::Client::new(root.path().into(), Some(signature.into()));
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = String::new();
+            stream.read_to_string(&mut request).await.unwrap();
+            assert_eq!(request, "dispatch focuswindow address:0x123");
+            stream.write_all(b"ok").await.unwrap();
+        });
+        let arguments = ["dispatch", "focuswindow", "address:0x123"];
+        assert!(super::dispatch_with(&client, &arguments).await);
+        server.await?; // leaves the configured socket stale
+
+        let fallback = root.path().join("hypr/fallback");
+        std::fs::create_dir_all(&fallback)?;
+        let fallback = UnixListener::bind(fallback.join(".socket.sock"))?;
+        for signature in [
+            None,
+            Some(signature.into()),
+            Some(format!("{signature}-missing")),
+            Some("../invalid".into()),
+        ] {
+            let client = shelllist_hyprland::Client::new(root.path().into(), signature);
+            assert!(!super::dispatch_with(&client, &arguments).await);
+        }
+        assert!(
+            timeout(Duration::from_millis(50), fallback.accept())
+                .await
+                .is_err()
+        );
+        Ok(())
+    }
 
     #[test]
     fn validates_ipc_events_and_window_dispatch_selectors() -> anyhow::Result<()> {
