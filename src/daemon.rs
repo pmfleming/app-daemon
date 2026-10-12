@@ -12,6 +12,8 @@ use crate::{
     service::{ApplicationService, StateRevision},
 };
 
+pub(crate) mod events;
+
 pub struct AppDaemon {
     api: ApiService,
     applications: Arc<ApplicationService>,
@@ -189,19 +191,11 @@ async fn forward_events(
             operation = operations.recv(), if selected.2 => {
                 match operation {
                     Ok(operation) => {
-                        emit_event(
-                            &emitter,
-                            protocol::stream::OPERATION,
-                            &operation.status,
-                            &subscription_id,
-                            json!({ "operation": operation }),
-                        )
-                        .await;
+                        events::emit(&emitter, events::operation(&subscription_id, &operation)).await;
                     }
                     Err(broadcast::error::RecvError::Lagged(count)) => {
                         tracing::warn!(count, "application operation subscriber lagged");
-                        emit_event(&emitter, protocol::stream::OPERATION, "resync-required", &subscription_id,
-                            json!({ "dropped_events": count, "recovery_method": "applications.operation.status" })).await;
+                        events::emit(&emitter, events::operation_gap(&subscription_id, count)).await;
                     }
                     Err(broadcast::error::RecvError::Closed) => return,
                 }

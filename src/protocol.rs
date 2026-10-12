@@ -30,6 +30,33 @@ pub fn resource_contract_fixture() -> serde_json::Result<Value> {
     shelllist_daemon_core::load_fixture(include_str!("../test_support/app-resource-v1.json"))
 }
 
+/// Offline examples built with the same operation-event constructors as live subscriptions.
+pub fn event_contract_fixture() -> Value {
+    let mut fixture = serde_json::Map::new();
+    for status in ["completed", "failed", "cancelled"] {
+        let operation = crate::model::OperationResult {
+            id: "operation-example".into(),
+            action: "activate".into(),
+            target_id: "Alpha".into(),
+            status: status.into(),
+            message: format!("Application action {status}"),
+            close: None,
+            launch_backend: None,
+            launch_scope: None,
+            placement: None,
+        };
+        fixture.insert(
+            status.into(),
+            crate::daemon::events::operation("subscription-example", &operation),
+        );
+    }
+    fixture.insert(
+        "gap".into(),
+        crate::daemon::events::operation_gap("subscription-example", 4),
+    );
+    Value::Object(fixture)
+}
+
 pub fn registry() -> serde_json::Result<Value> {
     Ok(contract_fixture()?["registry"].take())
 }

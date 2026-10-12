@@ -30,6 +30,7 @@ enum DebugCommand {
     ProtocolRegistry,
     ContractFixture,
     ResourceContractFixture,
+    EventContractFixture,
 }
 
 #[tokio::main]
@@ -50,6 +51,7 @@ async fn main() -> Result<()> {
                 DebugCommand::ProtocolRegistry => protocol::registry()?,
                 DebugCommand::ContractFixture => protocol::contract_fixture()?,
                 DebugCommand::ResourceContractFixture => protocol::resource_contract_fixture()?,
+                DebugCommand::EventContractFixture => protocol::event_contract_fixture(),
             };
             println!("{}", serde_json::to_string_pretty(&value)?);
             Ok(())
