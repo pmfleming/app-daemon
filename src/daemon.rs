@@ -1,14 +1,17 @@
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use serde_json::{Value, json};
+use serde_json::Value;
 use shelllist_daemon_tokio::{OwnedTaskRegistry, directed_emitter};
 use tokio::sync::broadcast;
 use zbus::{connection, message::Header, object_server::SignalEmitter};
 
 use crate::{
     api::{self, ApiService, BUS_NAME, OBJECT_PATH},
-    protocol,
+    protocol::{
+        self,
+        replies::{ErrorCode, Reply, RequestKind, Subscription},
+    },
     service::{ApplicationService, StateRevision},
 };
 
@@ -31,8 +34,11 @@ impl AppDaemon {
         let params: Value = match serde_json::from_str(params_json) {
             Ok(value) => value,
             Err(error) => {
-                return api::error("validation-error", format!("invalid params JSON: {error}"))
-                    .to_string();
+                return api::error(
+                    ErrorCode::ValidationError,
+                    format!("invalid params JSON: {error}"),
+                )
+                .to_string();
             }
         };
         self.api
@@ -49,13 +55,15 @@ impl AppDaemon {
     ) -> String {
         let _permit = match self.applications.request_permit().await {
             Ok(permit) => permit,
-            Err(error) => return api::error("daemon-unavailable", error.to_string()).to_string(),
+            Err(error) => {
+                return api::error(ErrorCode::DaemonUnavailable, error.to_string()).to_string();
+            }
         };
         let selected = match selected_streams(&streams) {
             Ok(selected) => selected,
             Err(stream) => {
                 return api::error(
-                    "unsupported-stream",
+                    ErrorCode::UnsupportedStream,
                     format!("Unsupported app-api stream: {stream}"),
                 )
                 .to_string();
@@ -82,9 +90,12 @@ impl AppDaemon {
             &connection,
             events,
         ) {
-            return api::error("subscription-unavailable", error.to_string()).to_string();
+            return api::error(ErrorCode::SubscriptionUnavailable, error.to_string()).to_string();
         }
-        api::success(json!({ "subscription": { "id": id } })).to_string()
+        api::success(Reply::Subscription {
+            subscription: Subscription { id },
+        })
+        .to_string()
     }
 
     async fn cancel(&self, request_id: &str, #[zbus(header)] header: Header<'_>) -> String {
@@ -94,8 +105,11 @@ impl AppDaemon {
             .cancel_owned(request_id, owner.as_deref())
             .await
         {
-            return api::success(json!({ "cancelled": request_id, "kind": "subscription" }))
-                .to_string();
+            return api::success(Reply::Cancelled {
+                cancelled: request_id.into(),
+                kind: RequestKind::Subscription,
+            })
+            .to_string();
         }
         if self
             .applications
@@ -103,11 +117,14 @@ impl AppDaemon {
             .await
             .is_some()
         {
-            return api::success(json!({ "cancelled": request_id, "kind": "operation" }))
-                .to_string();
+            return api::success(Reply::Cancelled {
+                cancelled: request_id.into(),
+                kind: RequestKind::Operation,
+            })
+            .to_string();
         }
         api::error(
-            "request-not-found",
+            ErrorCode::RequestNotFound,
             format!("No active request named {request_id}"),
         )
         .to_string()
@@ -153,17 +170,9 @@ async fn forward_events(
         (protocol::stream::OPERATION, selected.2),
     ] {
         if enabled {
-            emit_event(
+            events::emit(
                 &emitter,
-                stream,
-                "subscribed",
-                &subscription_id,
-                json!({
-                    "catalog_revision": previous.catalog,
-                    "window_revision": previous.windows,
-                    "settings_revision": previous.settings,
-                    "runtime_revision": previous.runtime
-                }),
+                events::subscribed(stream, &subscription_id, previous),
             )
             .await;
         }
@@ -177,12 +186,9 @@ async fn forward_events(
                     Err(broadcast::error::RecvError::Closed) => return,
                 };
                 for (stream, revision) in revision_changes(selected, previous, current) {
-                    emit_event(
+                    events::emit(
                         &emitter,
-                        stream,
-                        "changed",
-                        &subscription_id,
-                        json!({ "revision": revision }),
+                        events::changed(stream, &subscription_id, revision),
                     )
                     .await;
                 }
@@ -226,28 +232,6 @@ fn revision_changes(
     ]
     .into_iter()
     .filter_map(|(changed, stream, revision)| changed.then_some((stream, revision)))
-}
-
-async fn emit_event(
-    emitter: &SignalEmitter<'_>,
-    stream: &str,
-    event: &str,
-    subscription_id: &str,
-    fields: Value,
-) {
-    let result = shelllist_daemon_tokio::emit_json_event(
-        emitter,
-        api::INTERFACE,
-        shelllist_daemon_core::ApiIdentity::new(api::PROTOCOL, api::VERSION as u32),
-        stream,
-        event,
-        shelllist_daemon_core::Correlation::Subscription(subscription_id),
-        fields,
-    )
-    .await;
-    if let Err(error) = result {
-        tracing::warn!(%stream, %error, "app-api event could not be emitted");
-    }
 }
 
 pub async fn run() -> Result<()> {

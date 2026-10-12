@@ -52,7 +52,7 @@ impl CorrelationPolicy for AppCorrelation {
 
 fn call_failure(_method: &str, _error: &anyhow::Error) -> CallFailure {
     CallFailure::Api(api::error(
-        "daemon-unavailable",
+        protocol::replies::ErrorCode::DaemonUnavailable,
         "app-daemon session service is unavailable".into(),
     ))
 }

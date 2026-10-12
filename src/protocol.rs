@@ -1,5 +1,8 @@
 use serde_json::Value;
 
+mod fixtures;
+pub mod replies;
+
 pub const NAME: &str = "app-api";
 pub const VERSION: u8 = 1;
 
@@ -30,30 +33,47 @@ pub fn resource_contract_fixture() -> serde_json::Result<Value> {
     shelllist_daemon_core::load_fixture(include_str!("../test_support/app-resource-v1.json"))
 }
 
-/// Offline examples built with the same operation-event constructors as live subscriptions.
+/// Offline replies built with the same typed bodies and envelopes as live dispatch.
+pub fn reply_contract_fixture() -> Value {
+    fixtures::replies()
+}
+
+/// Offline examples built with the same event constructors as live subscriptions.
 pub fn event_contract_fixture() -> Value {
     let mut fixture = serde_json::Map::new();
     for status in ["completed", "failed", "cancelled"] {
-        let operation = crate::model::OperationResult {
-            id: "operation-example".into(),
-            action: "activate".into(),
-            target_id: "Alpha".into(),
-            status: status.into(),
-            message: format!("Application action {status}"),
-            close: None,
-            launch_backend: None,
-            launch_scope: None,
-            placement: None,
-        };
+        let operation = fixtures::operation(status);
         fixture.insert(
             status.into(),
-            crate::daemon::events::operation("subscription-example", &operation),
+            crate::daemon::events::operation("subscription-example", &operation).into_value(),
         );
     }
     fixture.insert(
         "gap".into(),
-        crate::daemon::events::operation_gap("subscription-example", 4),
+        crate::daemon::events::operation_gap("subscription-example", 4).into_value(),
     );
+    for stream in STREAMS {
+        fixture.insert(
+            format!("{stream}.subscribed"),
+            crate::daemon::events::subscribed(
+                stream,
+                "subscription-example",
+                crate::service::StateRevision {
+                    catalog: 1,
+                    windows: 2,
+                    settings: 3,
+                    runtime: 4,
+                },
+            )
+            .into_value(),
+        );
+    }
+    for stream in [stream::APPLICATIONS, stream::WINDOWS] {
+        fixture.insert(
+            stream.into(),
+            crate::daemon::events::changed(stream, "subscription-example", 42).into_value(),
+        );
+    }
     Value::Object(fixture)
 }
 

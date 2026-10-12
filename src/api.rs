@@ -1,11 +1,14 @@
 use std::sync::Arc;
 
-use serde::{Deserialize, de::DeserializeOwned};
-use serde_json::{Value, json};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use serde_json::Value;
 use shelllist_daemon_core::{ApiError as EnvelopeError, ApiIdentity, error as error_envelope};
 
 use crate::{
-    protocol,
+    protocol::{
+        self,
+        replies::{ErrorCode, Reply, Settings},
+    },
     service::{
         ApplicationService, EnergyOverviewParams, ExecuteParams, ResourceHistoryParams,
         UpdateSettingsParams,
@@ -41,7 +44,7 @@ impl ApiService {
     ) -> Value {
         let _permit = match self.applications.request_permit().await {
             Ok(permit) => permit,
-            Err(error) => return self::error("daemon-unavailable", error.to_string()),
+            Err(error) => return self::error(ErrorCode::DaemonUnavailable, error.to_string()),
         };
         tracing::debug!(%method, "app-api request started");
         self.request(method, params, owner)
@@ -54,7 +57,7 @@ impl ApiService {
         method: &str,
         params: Value,
         owner: Option<String>,
-    ) -> Result<Value, ApiError> {
+    ) -> Result<Reply, ApiError> {
         match method {
             "applications.query" => self.query(params).await,
             "applications.revision" => self.revision().await,
@@ -67,101 +70,113 @@ impl ApiService {
             }
             "applications.settings.update" => self.update_settings(params).await,
             _ => Err((
-                "unsupported-method",
+                ErrorCode::UnsupportedMethod,
                 format!("Unsupported app-api method: {method}"),
             )),
         }
     }
 
-    async fn query(&self, params: Value) -> Result<Value, ApiError> {
-        Ok(json!({ "applications": self.applications.query(decode(params)?).await }))
+    async fn query(&self, params: Value) -> Result<Reply, ApiError> {
+        Ok(Reply::Applications {
+            applications: self.applications.query(decode(params)?).await,
+        })
     }
 
-    async fn revision(&self) -> Result<Value, ApiError> {
-        Ok(json!({ "revision": self.applications.revision().await }))
+    async fn revision(&self) -> Result<Reply, ApiError> {
+        Ok(Reply::Revision {
+            revision: self.applications.revision().await,
+        })
     }
 
-    async fn history(&self, params: Value) -> Result<Value, ApiError> {
+    async fn history(&self, params: Value) -> Result<Reply, ApiError> {
         let query: ResourceHistoryParams = decode(params)?;
         self.applications
             .resource_history(query)
             .await
-            .map(|history| json!({ "history": history }))
-            .map_err(|error| ("validation-error", error.to_string()))
+            .map(|history| Reply::History { history })
+            .map_err(|error| (ErrorCode::ValidationError, error.to_string()))
     }
 
-    async fn energy_overview(&self, params: Value) -> Result<Value, ApiError> {
-        Ok(json!({
-            "energy_overview": self
+    async fn energy_overview(&self, params: Value) -> Result<Reply, ApiError> {
+        Ok(Reply::EnergyOverview {
+            energy_overview: self
                 .applications
                 .energy_overview(decode::<EnergyOverviewParams>(params)?)
-                .await
-        }))
+                .await,
+        })
     }
 
-    async fn refresh(&self, params: Value) -> Result<Value, ApiError> {
+    async fn refresh(&self, params: Value) -> Result<Reply, ApiError> {
         let query = decode(params)?;
         self.applications.refresh().await;
-        Ok(json!({ "applications": self.applications.query(query).await }))
+        Ok(Reply::Applications {
+            applications: self.applications.query(query).await,
+        })
     }
 
-    async fn update_settings(&self, params: Value) -> Result<Value, ApiError> {
+    async fn update_settings(&self, params: Value) -> Result<Reply, ApiError> {
         let params: UpdateSettingsParams = decode(params)?;
         let target_id = params.target_id.clone();
         self.applications
             .update_settings(params)
             .await
-            .map(|settings| {
-                json!({ "settings": {
-                    "target_id": target_id,
-                    "category": settings.category,
-                    "workspace_id": settings.workspace_id
-                }})
+            .map(|settings| Reply::Settings {
+                settings: Settings {
+                    target_id,
+                    category: settings.category,
+                    workspace_id: settings.workspace_id,
+                },
             })
-            .map_err(|error| ("validation-error", error.to_string()))
+            .map_err(|error| (ErrorCode::ValidationError, error.to_string()))
     }
 
     async fn operation_status(
         &self,
         params: Value,
         owner: Option<&str>,
-    ) -> Result<Value, ApiError> {
+    ) -> Result<Reply, ApiError> {
         let params: OperationStatusParams = decode(params)?;
         self.applications
             .operation_status_owned(&params.operation_id, owner)
             .await
-            .map(|operation| json!({ "operation_status": operation }))
+            .map(|operation_status| Reply::OperationStatus { operation_status })
             .ok_or_else(|| {
                 (
-                    "request-not-found",
+                    ErrorCode::RequestNotFound,
                     "Operation is unknown, expired, or belongs to another client".into(),
                 )
             })
     }
 
-    async fn execute(&self, params: Value, owner: Option<String>) -> Result<Value, ApiError> {
+    async fn execute(&self, params: Value, owner: Option<String>) -> Result<Reply, ApiError> {
         self.applications
             .execute_owned(decode::<ExecuteParams>(params)?, owner)
             .await
-            .map(|operation| json!({ "operation": operation }))
-            .map_err(|error| ("operation-failed", error.to_string()))
+            .map(|operation| Reply::Operation { operation })
+            .map_err(|error| (ErrorCode::OperationFailed, error.to_string()))
     }
 }
 
-type ApiError = (&'static str, String);
+type ApiError = (ErrorCode, String);
 
 fn decode<T: DeserializeOwned>(value: Value) -> Result<T, ApiError> {
-    serde_json::from_value(value).map_err(|error| ("validation-error", error.to_string()))
+    serde_json::from_value(value).map_err(|error| (ErrorCode::ValidationError, error.to_string()))
 }
 
-pub fn success(data: Value) -> Value {
-    shelllist_daemon_core::success(API, data)
+pub fn success(data: impl Serialize) -> Value {
+    shelllist_daemon_core::success(
+        API,
+        serde_json::to_value(data).expect("serializable app-api reply"),
+    )
 }
 
 fn error_response((code, message): ApiError) -> Value {
-    error_envelope(API, EnvelopeError::new(code, message).with_retryable(false))
+    error_envelope(
+        API,
+        EnvelopeError::new(code.as_str(), message).with_retryable(false),
+    )
 }
 
-pub fn error(code: &'static str, message: String) -> Value {
+pub fn error(code: ErrorCode, message: String) -> Value {
     error_response((code, message))
 }
