@@ -1,6 +1,8 @@
 use super::{
     CgroupUsage, ProcessUsage, ResourceSnapshot,
-    provider::{CgroupIo, DiskFile, DiskFileId, MemoryUsage, ProcessFiles, ProcessIo},
+    provider::{
+        CgroupIo, DiskBreakdown, DiskFile, DiskFileId, MemoryUsage, ProcessFiles, ProcessIo,
+    },
     system::parse_process_stat,
 };
 use anyhow::Context;
@@ -51,11 +53,11 @@ fn totals_resources_without_double_counting_roots_in_either_attribution_mode() {
             physical_write_bytes: disk_write_bytes,
             ..ProcessIo::default()
         },
-        files: Arc::new(ProcessFiles {
+        files: Some(Arc::new(ProcessFiles {
             referenced: open_files.clone(),
             open: open_files,
             fd_available: true,
-        }),
+        })),
         storage_available: true,
         ..ProcessUsage::default()
     };
@@ -100,6 +102,27 @@ fn totals_resources_without_double_counting_roots_in_either_attribution_mode() {
     assert_eq!(usage.storage.referenced_file_permanent_bytes, 3072);
     assert_eq!(usage.energy.energy_mwh, 2.75);
     assert_eq!(usage.energy.energy_source, "rapl");
+    assert!(usage.metric_availability.0["cpu_percent"]);
+    assert!(usage.metric_availability.0["energy_mwh"]);
+    assert!(!usage.metric_availability.0["disk_space_total_bytes"]);
+    snapshot.app_disk_by_target.insert(
+        "cached".into(),
+        DiskBreakdown {
+            total_bytes: 7,
+            temporary_bytes: 2,
+            permanent_bytes: 5,
+        },
+    );
+    for (target, available, bytes) in [("cached", true, 7), ("missing", false, 0)] {
+        let usage = snapshot.usage_for_target(target, [10]);
+        assert_eq!(
+            usage.metric_availability.0["disk_space_total_bytes"],
+            available
+        );
+        assert_eq!(usage.storage.disk_space_total_bytes, bytes);
+        assert!(usage.metric_availability.0["cpu_percent"]);
+        assert!(usage.metric_availability.0["energy_mwh"]);
+    }
 
     let path = "/user.slice/app-example.scope".to_owned();
     snapshot

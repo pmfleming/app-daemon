@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::{cmp::Reverse, collections::HashMap};
 
 use serde::{Deserialize, Serialize};
 
@@ -91,17 +91,12 @@ pub(crate) fn page(
         (params.category.is_empty() || application.identity.category == params.category)
             && rank(application, &query)
     });
-    applications.sort_by(|left, right| {
-        right
-            .score
-            .cmp(&left.score)
-            .then_with(|| {
-                left.identity
-                    .name
-                    .to_lowercase()
-                    .cmp(&right.identity.name.to_lowercase())
-            })
-            .then_with(|| left.identity.id.cmp(&right.identity.id))
+    applications.sort_by_cached_key(|app| {
+        (
+            Reverse(app.score),
+            app.identity.name.to_lowercase(),
+            app.identity.id.clone(),
+        )
     });
     let limit = params.limit.clamp(1, 1000);
     let has_more = applications.len() > limit;
@@ -283,32 +278,32 @@ fn search_match(application: &ApplicationSummary, query: &str) -> Option<SearchM
 
     let name = application.identity.name.to_lowercase();
     let id = application.identity.id.to_lowercase();
-    let id_stem = id.trim_end_matches(".desktop");
+    let name_penalty = name.len().min(500) as i64;
+    let id_penalty = id.len().min(500) as i64;
+    // A contiguous name/ID match already contains every query term. Do not
+    // allocate the metadata corpus or acronym for these higher-priority tiers.
+    if let Some(matched) = direct_match(&name, &id, id.trim_end_matches(".desktop"), query)
+        .or_else(|| substring_match(&name, query, 9_500, 10, name_penalty, "name-substring"))
+        .or_else(|| substring_match(&id, query, 9_000, 10, id_penalty, "id-substring"))
+    {
+        return Some(matched);
+    }
     let values = search_values(application);
     let searchable = values.join(" ").to_lowercase();
     let acronym = search_acronym(&values);
-    let tokens = query.split_whitespace().collect::<Vec<_>>();
-    if !all_terms_match(&tokens, &searchable, &acronym) {
+    let tokens = query.split_whitespace();
+    if !tokens
+        .clone()
+        .all(|token| searchable.contains(token) || (token.len() <= 5 && acronym.contains(token)))
+    {
         return None;
     }
-
-    let name_penalty = name.len().min(500) as i64;
-    let id_penalty = id.len().min(500) as i64;
-    direct_match(&name, &id, id_stem, query)
-        .or_else(|| substring_match(&name, query, 9_500, 10, name_penalty, "name-substring"))
-        .or_else(|| substring_match(&id, query, 9_000, 10, id_penalty, "id-substring"))
-        .or_else(|| substring_match(&searchable, query, 7_500, 1, 0, "metadata"))
+    substring_match(&searchable, query, 7_500, 1, 0, "metadata")
         .or_else(|| acronym_match(query, &acronym))
         .or(Some(SearchMatch {
-            score: 5_000 - tokens.len() as i64,
+            score: 5_000 - tokens.count() as i64,
             kind: "terms",
         }))
-}
-
-fn all_terms_match(tokens: &[&str], searchable: &str, acronym: &str) -> bool {
-    tokens
-        .iter()
-        .all(|token| searchable.contains(token) || (token.len() <= 5 && acronym.contains(token)))
 }
 
 fn acronym_match(query: &str, acronym: &str) -> Option<SearchMatch> {

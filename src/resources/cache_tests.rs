@@ -101,4 +101,9 @@ fn pid_reuse_refreshes_resources_without_charging_previous_process_work() {
     let returned = sampler.sample_for_targets(&targets).usage_for_roots([42]);
     assert_eq!(returned.storage.disk_read_bytes, 0);
     assert_eq!(returned.compute.cpu_percent, 0.0);
+    let inactive = sampler
+        .sample_for_targets(&HashMap::new())
+        .usage_for_roots([42]);
+    assert!(!inactive.measurement.referenced_files_available);
+    assert_eq!(inactive.storage.open_file_disk_bytes, 0);
 }

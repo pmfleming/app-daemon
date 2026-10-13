@@ -59,7 +59,7 @@ struct ProcessUsage {
     gpu_memory_resident_bytes: u64,
     gpu_memory_allocated_bytes: u64,
     io: ProcessIo,
-    files: Arc<ProcessFiles>,
+    files: Option<Arc<ProcessFiles>>,
     sockets: Option<Arc<HashSet<u64>>>,
     storage_available: bool,
 }
@@ -156,12 +156,12 @@ impl ResourceSnapshot {
         } else {
             usage.measurement.disk_space_scope = "unavailable".into();
         }
-        usage.metric_availability = crate::model::ResourceAvailability::for_usage(&usage).project();
-        usage
+        usage.with_availability()
     }
 
     pub fn usage_for_roots(&self, roots: impl IntoIterator<Item = u32>) -> ResourceUsage {
         self.usage_for_roots_filtered(roots, None)
+            .with_availability()
     }
 
     fn usage_for_roots_filtered(
@@ -245,10 +245,10 @@ impl ResourceSnapshot {
             }
             aggregate.network_processes += u64::from(process.sockets.is_some());
             aggregate.storage_processes += u64::from(process.storage_available);
-            if process.files.fd_available {
+            if let Some(files) = process.files.as_ref().filter(|files| files.fd_available) {
                 aggregate.file_processes += 1;
-                merge_disk_files(&mut aggregate.open_files, &process.files.open);
-                merge_disk_files(&mut aggregate.referenced_files, &process.files.referenced);
+                merge_disk_files(&mut aggregate.open_files, &files.open);
+                merge_disk_files(&mut aggregate.referenced_files, &files.referenced);
             }
             aggregate
                 .network_sockets
@@ -270,34 +270,24 @@ impl ResourceSnapshot {
     }
 
     fn apply_cgroup_usage(&self, usage: &mut ResourceUsage, paths: &HashSet<&str>) {
-        let groups = paths
-            .iter()
-            .filter_map(|path| self.cgroup_usage.get(*path))
-            .collect::<Vec<_>>();
-        if let Some(cpu) = groups
-            .iter()
-            .map(|group| group.cpu_percent)
-            .sum::<Option<f64>>()
-        {
+        let groups = || paths.iter().filter_map(|path| self.cgroup_usage.get(*path));
+        if let Some(cpu) = groups().map(|group| group.cpu_percent).sum::<Option<f64>>() {
             usage.compute.cpu_percent = cpu;
         }
-        if let Some(memory) = groups.iter().try_fold(0_u64, |total, group| {
+        if let Some(memory) = groups().try_fold(0_u64, |total, group| {
             Some(total.saturating_add(group.memory_bytes?))
         }) {
             usage.compute.memory_cgroup_bytes = memory;
         }
         // A missing controller must not replace valid procfs counters with zero.
-        if let Some(io) = groups
-            .iter()
-            .try_fold(CgroupIo::default(), |mut total, group| {
-                let current = group.io?;
-                add_counter(&mut total.read_bytes, current.read_bytes);
-                add_counter(&mut total.write_bytes, current.write_bytes);
-                add_counter(&mut total.read_operations, current.read_operations);
-                add_counter(&mut total.write_operations, current.write_operations);
-                Some(total)
-            })
-        {
+        if let Some(io) = groups().try_fold(CgroupIo::default(), |mut total, group| {
+            let current = group.io?;
+            add_counter(&mut total.read_bytes, current.read_bytes);
+            add_counter(&mut total.write_bytes, current.write_bytes);
+            add_counter(&mut total.read_operations, current.read_operations);
+            add_counter(&mut total.write_operations, current.write_operations);
+            Some(total)
+        }) {
             usage.storage.disk_read_bytes = io.read_bytes;
             usage.storage.disk_write_bytes = io.write_bytes;
             usage.storage.read_operations = io.read_operations;
@@ -377,7 +367,6 @@ impl ResourceSnapshot {
         usage.storage = usage.storage.with_rates(self.interval_seconds);
         usage.network = usage.network.with_rates(self.interval_seconds);
         usage.energy = self.estimated_energy(energy_cpu_percent, self.total_process_cpu_percent);
-        usage.metric_availability = crate::model::ResourceAvailability::for_usage(&usage).project();
         usage
     }
 
@@ -714,12 +703,7 @@ impl ResourceSampler {
                 interval_seconds,
                 &mut next_gpu_engines,
             );
-            let files = self
-                .open_files
-                .samples
-                .get(&identity)
-                .cloned()
-                .unwrap_or_default();
+            let files = self.open_files.samples.get(&identity).cloned();
             snapshot.total_process_cpu_percent += cpu_percent;
             snapshot.processes.insert(
                 pid,

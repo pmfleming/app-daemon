@@ -4,7 +4,7 @@ use crate::{
     hyprland::{self, Client, Snapshot},
     model::CloseObservation,
 };
-use std::{future::Future, time::Duration};
+use std::{collections::HashSet, future::Future, time::Duration};
 
 pub(super) trait Backend {
     async fn close(&self, address: &str) -> anyhow::Result<()>;
@@ -61,14 +61,14 @@ where
             result.status = "unknown".into();
             return result;
         }
+        let live = snapshot
+            .clients
+            .iter()
+            .map(|window| (window.address.as_str(), window.pid))
+            .collect::<HashSet<_>>();
         result.remaining_window_ids = targets
             .iter()
-            .filter(|target| {
-                snapshot
-                    .clients
-                    .iter()
-                    .any(|window| window.address == target.address && window.pid == target.pid)
-            })
+            .filter(|target| live.contains(&(target.address.as_str(), target.pid)))
             .map(|v| hyprland::window_id(&v.address))
             .collect();
         if result.remaining_window_ids.is_empty() {
@@ -110,13 +110,38 @@ mod tests {
     }
     #[tokio::test]
     async fn observes_only_captured_targets_and_never_confuses_unavailable_with_closed() {
-        let targets = [window("0xabc", 1)];
-        for (remaining, available, fail, expected) in [
-            (vec![window("0xdef", 2)], true, false, "closed"),
-            (vec![window("0xabc", 2)], true, false, "closed"),
-            (targets.to_vec(), true, false, "still-open"),
-            (vec![], false, false, "unknown"),
-            (targets.to_vec(), true, true, "still-open"),
+        let targets = [window("0xabc", 1), window("0xdef", 2)];
+        for (remaining, available, fail, expected, remaining_ids) in [
+            (vec![window("0xaaa", 2)], true, false, "closed", vec![]),
+            (vec![window("0xabc", 2)], true, false, "closed", vec![]),
+            (
+                vec![window("0xdef", 2), window("0xdef", 2)],
+                true,
+                false,
+                "still-open",
+                vec!["window-def"],
+            ),
+            (
+                targets.to_vec(),
+                true,
+                false,
+                "still-open",
+                vec!["window-abc", "window-def"],
+            ),
+            (
+                vec![],
+                false,
+                false,
+                "unknown",
+                vec!["window-abc", "window-def"],
+            ),
+            (
+                targets.to_vec(),
+                true,
+                true,
+                "still-open",
+                vec!["window-abc", "window-def"],
+            ),
         ] {
             let result = observe(
                 &Fake {
@@ -130,7 +155,8 @@ mod tests {
             )
             .await;
             assert_eq!(result.status, expected);
-            assert_eq!(result.targeted_window_ids, ["window-abc"]);
+            assert_eq!(result.targeted_window_ids, ["window-abc", "window-def"]);
+            assert_eq!(result.remaining_window_ids, remaining_ids);
             assert_eq!(result.dispatch_error.is_some(), fail);
             assert_eq!(result.dispatched_window_ids.is_empty(), fail);
         }

@@ -152,6 +152,14 @@ pub struct ResourceUsage {
     pub measurement: ResourceMeasurement,
 }
 
+impl ResourceUsage {
+    /// Project only after acquisition metadata and target-specific storage are final.
+    pub(crate) fn with_availability(mut self) -> Self {
+        self.metric_availability = ResourceAvailability::for_usage(&self).project();
+        self
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct DesktopActionSummary {
     pub id: String,

@@ -1,5 +1,9 @@
 # RustQualityLens baseline
 
+The latest [query/sampling allocation review](query-allocation-review.md) records
+production refactors, benchmark allocation reductions, fresh RQLens measurements,
+and unchanged test counts, alongside explicit metric tradeoffs.
+
 The subsequent [test-pruning review](test-pruning-review.md) records the current
 97 → 65 registered-test reduction, retained regressions and measured coverage
 tradeoffs. Historical metric baselines below describe their earlier snapshots.

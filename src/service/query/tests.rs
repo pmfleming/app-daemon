@@ -21,6 +21,10 @@ fn ranks_prefix_acronym_and_metadata_matches() -> anyhow::Result<()> {
         directory.path().join("calculator.desktop"),
         "[Desktop Entry]\nType=Application\nName=Calculator\nComment=Perform arithmetic\nExec=true\n",
     )?;
+    fs::write(
+        directory.path().join("calculator-alt.desktop"),
+        "[Desktop Entry]\nType=Application\nName=CALCULATOR\nExec=true\n",
+    )?;
     let catalog = Catalog::from_paths(vec![directory.path().into()]);
     let resources = ResourceSnapshot::default();
     let windows = Snapshot {
@@ -52,9 +56,24 @@ fn ranks_prefix_acronym_and_metadata_matches() -> anyhow::Result<()> {
         ("ontact", "name-substring"),
         ("gle-con", "id-substring"),
         ("friends book", "terms"),
+        ("friends gc", "terms"),
     ] {
         assert_eq!(search(query).applications[0].match_kind, kind, "{query}");
     }
+    assert!(search("calculator missing").applications.is_empty());
+    assert_eq!(
+        search("")
+            .applications
+            .iter()
+            .map(|app| app.identity.id.as_str())
+            .collect::<Vec<_>>(),
+        [
+            "calculator-alt.desktop",
+            "calculator.desktop",
+            "google-contacts.desktop"
+        ],
+        "case-insensitive name ties must retain the ID tie-breaker"
+    );
     let acronym = search("gc");
     assert!(acronym.revision < (1_u64 << 53));
     assert_eq!(acronym.revision as f64 as u64, acronym.revision);
