@@ -1,3 +1,5 @@
+#[path = "session/bridge.rs"]
+mod bridge;
 #[path = "session/extra.rs"]
 mod extra;
 #[path = "session/ownership.rs"]

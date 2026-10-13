@@ -194,6 +194,21 @@ impl Session {
         Ok(())
     }
 
+    pub fn bridge(&self) -> Result<Child> {
+        Ok(Command::new(env!("CARGO_BIN_EXE_app-daemon"))
+            .arg("client")
+            .env_clear()
+            .env("DBUS_SESSION_BUS_ADDRESS", &self.address)
+            .env("HOME", self.root.path())
+            .env("XDG_RUNTIME_DIR", self.root.path().join("run"))
+            .env("RUST_LOG", "error")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .kill_on_drop(true)
+            .spawn()?)
+    }
+
     pub async fn proxy(&self) -> Result<Proxy<'_>> {
         Ok(Proxy::new(&self.connection, BUS_NAME, OBJECT_PATH, INTERFACE).await?)
     }
