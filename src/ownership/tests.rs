@@ -1,6 +1,6 @@
 use super::{Ownership, Process, process_identity};
 use crate::catalog::Catalog;
-use std::{collections::HashMap, sync::Arc};
+use std::collections::HashMap;
 
 fn catalog() -> (tempfile::TempDir, Catalog) {
     let dir = tempfile::tempdir().unwrap();
@@ -22,77 +22,40 @@ fn process(parent: u32, start: u64, cgroup: &str) -> Process {
 }
 
 #[test]
-fn migrated_instances_keep_early_and_late_helpers_without_claiming_browser_siblings() {
-    let (_dir, catalog) = catalog();
-    let mut tracker = Ownership::default();
-    let mut processes = HashMap::from([
-        (10, process(1, 100, "/app-pocket@123.service")),
-        (11, process(10, 101, "/app-pocket@123.service")),
-        (20, process(1, 200, "/app-chrome-20.scope")),
-        (21, process(20, 201, "/app-chrome-20.scope")),
-        (30, process(1, 300, "/app-audible@123.service")),
-    ]);
-    tracker.remember("pocket.desktop", [(10, 100)]);
-    tracker.remember("audible.desktop", [(30, 300)]);
-    tracker.reconcile(&catalog, &processes);
-    processes.get_mut(&10).unwrap().cgroup = Some("/app-chrome-10.scope".into());
-    processes.get_mut(&30).unwrap().cgroup = Some("/app-chrome-30.scope".into());
-    processes.insert(12, process(10, 102, "/app-chrome-10.scope/helpers"));
-    processes.insert(
-        13,
-        process(10, 103, "/app-chrome-10.scope/app-other@456.service"),
-    );
-    processes.insert(31, process(30, 301, "/app-chrome-30.scope"));
-    // Even a same-scope sibling is not owned by ancestry.
-    processes.insert(99, process(1, 999, "/app-chrome-10.scope"));
-    assert!(tracker.reconcile(&catalog, &processes));
-    let snapshot = tracker.snapshot();
-    for pid in [10, 11, 12] {
-        assert_eq!(
-            snapshot.target((pid, processes[&pid].start)),
-            Some(Some("pocket.desktop"))
-        );
-    }
-    for pid in [30, 31] {
-        assert_eq!(
-            snapshot.target((pid, processes[&pid].start)),
-            Some(Some("audible.desktop"))
-        );
-    }
-    for pid in [13, 20, 21, 99] {
-        assert_eq!(snapshot.target((pid, processes[&pid].start)), None);
-    }
-    assert!(!tracker.reconcile(&catalog, &processes));
-    assert_eq!(snapshot, tracker.snapshot());
-    assert!(Arc::ptr_eq(&tracker.snapshot(), &tracker.snapshot()));
-    tracker.anchors.clear();
-    tracker.reconcile(&catalog, &HashMap::new());
-    assert_eq!(tracker.snapshot().entries().count(), 0);
-    assert_eq!(snapshot.target((10, 100)), Some(Some("pocket.desktop")));
-}
-
-#[test]
 fn ownership_survives_reparenting_but_expires_on_pid_reuse_and_catalog_removal() {
     let (_dir, mut catalog) = catalog();
     let mut tracker = Ownership::default();
+    let (pid, start) = process_identity(std::process::id()).unwrap();
+    let (root, child) = (pid + 1, pid + 2);
     let mut processes = HashMap::from([
-        (10, process(1, 100, "/app-chrome-10.scope")),
-        (11, process(10, 101, "/app-chrome-10.scope")),
+        (root, process(0, 0, "/app-chrome-10.scope")),
+        (pid, process(root, start, "/app-chrome-10.scope")),
     ]);
-    tracker.remember("pocket.desktop", [(10, 100)]);
+    tracker.remember("pocket.desktop", [(root, 0)]);
     tracker.reconcile(&catalog, &processes);
-    processes.remove(&10);
-    processes.get_mut(&11).unwrap().parent = 1;
-    processes.insert(12, process(11, 102, "/app-chrome-10.scope"));
+    processes.remove(&root);
+    processes.get_mut(&pid).unwrap().parent = 0;
+    processes.insert(child, process(pid, start + 1, "/app-chrome-10.scope"));
     tracker.reconcile(&catalog, &processes);
     assert_eq!(
-        tracker.snapshot().target((12, 102)),
+        tracker.snapshot().live_target(pid),
         Some(Some("pocket.desktop"))
     );
-    processes.get_mut(&11).unwrap().start = 999;
+    assert_eq!(
+        tracker.snapshot().target((child, start + 1)),
+        Some(Some("pocket.desktop"))
+    );
+    processes.get_mut(&pid).unwrap().start = start + 2;
     tracker.reconcile(&catalog, &processes);
-    assert_eq!(tracker.snapshot().target((11, 999)), None);
-    assert_eq!(tracker.snapshot().target((11, 101)), None);
+    assert_eq!(tracker.snapshot().target((pid, start + 2)), None);
+    // Even a newly verified cached claim cannot authorize a different live identity.
+    tracker.remember("pocket.desktop", [(pid, start + 2)]);
+    tracker.reconcile(&catalog, &processes);
+    assert_eq!(
+        tracker.snapshot().target((pid, start + 2)),
+        Some(Some("pocket.desktop"))
+    );
+    assert_eq!(tracker.snapshot().live_target(pid), None);
     catalog.entries.retain(|entry| entry.id != "pocket.desktop");
     tracker.reconcile(&catalog, &processes);
     assert_eq!(tracker.snapshot().entries().count(), 0);
@@ -183,29 +146,4 @@ fn retained_grandchildren_cannot_bypass_a_new_ancestor_application_boundary() {
     tracker.reconcile(&catalog, &processes);
     assert_eq!(tracker.snapshot().target((12, 102)), None);
     assert_eq!(tracker.snapshot().target((13, 103)), None);
-}
-
-#[test]
-fn cached_window_ownership_requires_a_live_pid_identity() {
-    let (_dir, catalog) = catalog();
-    let pid = std::process::id();
-    let identity = process_identity(pid).unwrap();
-    let mut tracker = Ownership::default();
-    tracker.remember("pocket.desktop", [identity]);
-    tracker.reconcile(
-        &catalog,
-        &HashMap::from([(pid, process(1, identity.1, "/app-chrome-10.scope"))]),
-    );
-    assert_eq!(
-        tracker.snapshot().live_target(pid),
-        Some(Some("pocket.desktop"))
-    );
-    tracker.anchors.clear();
-    tracker.snapshot = Arc::default();
-    tracker.remember("pocket.desktop", [(pid, identity.1 + 1)]);
-    tracker.reconcile(
-        &catalog,
-        &HashMap::from([(pid, process(1, identity.1 + 1, "/app-chrome-10.scope"))]),
-    );
-    assert_eq!(tracker.snapshot().live_target(pid), None);
 }

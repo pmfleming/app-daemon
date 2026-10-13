@@ -390,8 +390,7 @@ fn apply_move(response: &mut String, request: &str) {
     if let Ok(mut windows) = serde_json::from_str::<Vec<Value>>(response) {
         for window in &mut windows {
             if window["address"] == address {
-                window["workspace"] =
-                    json!({"id": workspace.parse::<i64>().unwrap_or(-1), "name": workspace});
+                window["workspace"] = json!({"id": workspace.parse::<i64>().unwrap_or(-1), "name": workspace.strip_prefix("name:").unwrap_or(workspace)});
             }
         }
         *response = serde_json::to_string(&windows).unwrap();
@@ -426,9 +425,19 @@ pub async fn events(proxy: &Proxy<'_>) -> Result<SignalStream<'static>> {
 pub async fn operation(events: &mut SignalStream<'_>, id: &str, status: &str) -> Result<Value> {
     timeout(DEADLINE, async {
         while let Some(message) = events.next().await {
-            let (_, body): (String, String) = message.body().deserialize()?;
+            let (stream, body): (String, String) = message.body().deserialize()?;
             let event: Value = serde_json::from_str(&body)?;
             if event["operation"]["id"] == id && event["operation"]["status"] == status {
+                assert_eq!(stream, "applications.operation");
+                assert_eq!(event["stream"], stream);
+                assert_eq!(event["protocol"], "app-api");
+                assert_eq!(event["version"], 1);
+                assert_eq!(event["event"], status);
+                assert!(event["subscription_id"].is_string());
+                assert!(event.get("data").is_none());
+                for private in ["unit", "provenance"] {
+                    assert!(event["operation"].get(private).is_none());
+                }
                 return Ok(event["operation"].clone());
             }
         }

@@ -505,12 +505,8 @@ impl ApplicationService {
                 "Operation running".into(),
                 None,
             );
-            {
-                let mut operations = service.operations.lock().await;
-                if !operations.running(running.clone()) {
-                    return;
-                }
-                let _ = service.operation_changes.send(running);
+            if !service.publish_running(running).await {
+                return;
             }
             let lock = service.launch_lock(&params.target_id);
             let _launch = lock.lock().await;
@@ -534,6 +530,15 @@ impl ApplicationService {
         operations.insert(owner, task.abort_handle(), accepted.clone())?;
         let _ = start_sender.send(());
         Ok(accepted)
+    }
+
+    async fn publish_running(&self, result: OperationResult) -> bool {
+        let mut operations = self.operations.lock().await;
+        if !operations.running(result.clone()) {
+            return false;
+        }
+        let _ = self.operation_changes.send(result);
+        true
     }
 
     pub async fn cancel_operation_owned(

@@ -114,12 +114,20 @@ fn windowless_apps_are_discovered_published_and_added_to_history() -> anyhow::Re
             &snapshot.usage_for_target(id, roots.iter().copied()),
         );
     }
+    let points = history
+        .query("org.example.App.desktop", None, None, 100)?
+        .points;
+    // A sample can straddle a history bucket boundary. Verify the complete
+    // recorded interval and attribution rather than a wall-clock-dependent count.
+    assert!(!points.is_empty());
     assert_eq!(
-        history
-            .query("org.example.App.desktop", None, None, 100)?
-            .points
-            .len(),
-        1
+        points.iter().map(|point| point.duration_ms).sum::<u64>(),
+        (snapshot.interval_seconds() * 1000.0).round() as u64
+    );
+    assert!(
+        points
+            .iter()
+            .all(|point| point.resources.compute.process_count == 2)
     );
     Ok(())
 }

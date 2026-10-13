@@ -36,6 +36,8 @@ async fn dbus_requests_are_validated_and_connection_owned_results_are_recoverabl
         let response = raw_call(&proxy, method, params).await?;
         assert_eq!(response["ok"], false, "{response}");
         assert_eq!(response["error"]["code"], code);
+        assert_eq!(response["error"]["retryable"], false);
+        assert!(response.get("data").is_none());
     }
     let invalid: String = proxy.call("Subscribe", &(vec!["unknown.stream"],)).await?;
     assert_eq!(
@@ -189,8 +191,19 @@ async fn uwsm_handoffs_report_receipts_failures_timeouts_and_owned_cancellation(
         cancel(&proxy, id).await?["error"]["code"],
         "request-not-found"
     );
+    // Shutdown must terminate a still-pending handoff, not just explicit cancellations.
+    std::fs::remove_file(session.state_path("handoff.pid"))?;
+    let accepted = call(
+        &proxy,
+        "applications.execute",
+        json!({"target_id":"slow.desktop", "action":"launch"}),
+    )
+    .await?;
+    assert_eq!(accepted["ok"], true);
+    let pending = session.pid("handoff.pid").await?;
     drop(proxy);
-    session.shutdown().await
+    session.shutdown().await?;
+    stopped(pending).await
 }
 
 #[tokio::test]
@@ -240,21 +253,4 @@ async fn fallback_handoff_reports_failures_and_survives_daemon_shutdown() -> Res
         "shutdown must leave a launched application running"
     );
     Ok(())
-}
-
-#[tokio::test]
-async fn shutdown_terminates_pending_handoffs_and_persists_history() -> Result<()> {
-    let mut session = Session::start(true).await?;
-    let proxy = session.proxy().await?;
-    let accepted = call(
-        &proxy,
-        "applications.execute",
-        json!({"target_id":"slow.desktop","action":"launch"}),
-    )
-    .await?;
-    assert_eq!(accepted["ok"], true);
-    let pid = session.pid("handoff.pid").await?;
-    drop(proxy);
-    session.shutdown().await?;
-    stopped(pid).await
 }

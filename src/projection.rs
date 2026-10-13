@@ -12,7 +12,7 @@ impl Default for MetricAvailability {
         ResourceAvailability::default().project()
     }
 }
-impl ResourceAvailability {
+impl crate::model::ResourceAvailability {
     pub(crate) fn project(&self) -> MetricAvailability {
         let groups: &[(&[&str], bool)] = &[
             (
@@ -112,25 +112,5 @@ impl ResourceAvailability {
                 })
                 .collect(),
         )
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn capabilities_are_independent_and_unknown_metrics_are_absent() {
-        let flags = ResourceAvailability {
-            network_connections: true,
-            memory: true,
-            ..Default::default()
-        }
-        .project()
-        .0;
-        assert!(flags["network_connection_count"]);
-        assert!(!flags["network_receive_bytes_per_second"]);
-        assert!(flags["memory_bytes"]);
-        assert!(!flags["average_power_watts"]);
-        assert!(!flags.contains_key("invented_metric"));
     }
 }

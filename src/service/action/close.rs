@@ -22,7 +22,7 @@ impl Backend for Compositor {
 
 pub(super) async fn observe<B, P, F>(
     backend: &B,
-    targets: &[Client],
+    targets: &[&Client],
     mut publish: P,
     budget: Duration,
 ) -> CloseObservation
@@ -86,7 +86,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{Backend, Client, Duration, Snapshot, observe};
     struct Fake {
         remaining: Vec<Client>,
         available: bool,
@@ -124,7 +124,7 @@ mod tests {
                     available,
                     fail,
                 },
-                &targets,
+                &targets.iter().collect::<Vec<_>>(),
                 |_| async {},
                 Duration::ZERO,
             )

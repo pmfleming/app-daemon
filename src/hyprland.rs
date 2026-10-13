@@ -4,7 +4,6 @@ use std::{
 };
 
 use serde::Deserialize;
-use tokio::sync::mpsc;
 
 #[derive(Debug, Clone, Default, Deserialize, Hash)]
 pub struct Workspace {
@@ -86,10 +85,6 @@ pub fn window_id(address: &str) -> String {
         "window-{}",
         address.trim_start_matches("0x").to_ascii_lowercase()
     )
-}
-
-pub(crate) async fn watch_window_events(sender: mpsc::Sender<shelllist_hyprland::Event>) {
-    shelllist_hyprland::watch_events_detailed(sender).await;
 }
 
 pub(crate) fn window_event_relevant(line: &str) -> bool {

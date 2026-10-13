@@ -162,24 +162,28 @@ async fn singleton_new_window_is_placed_but_existing_window_and_activation_stay_
     session.shutdown().await
 }
 
-struct BusApplication;
+struct BusApplication(std::sync::Arc<std::sync::Mutex<Vec<String>>>);
 #[zbus::interface(name = "org.freedesktop.Application")]
 impl BusApplication {
-    fn activate(&self, _platform: std::collections::HashMap<String, zbus::zvariant::OwnedValue>) {}
+    fn activate(&self, _platform: std::collections::HashMap<String, zbus::zvariant::OwnedValue>) {
+        self.0.lock().unwrap().push("activate".into());
+    }
     fn activate_action(
         &self,
-        _action: &str,
+        action: &str,
         _parameters: Vec<zbus::zvariant::OwnedValue>,
         _platform: std::collections::HashMap<String, zbus::zvariant::OwnedValue>,
     ) {
+        self.0.lock().unwrap().push(action.into());
     }
 }
 #[tokio::test]
 async fn dbus_owner_proves_new_window_ownership_for_launch_and_desktop_action() -> Result<()> {
     let mut session = Session::start(true).await?;
     let app = session.other_connection().await?;
+    let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
     app.object_server()
-        .at("/org/example/Bus_Only", BusApplication)
+        .at("/org/example/Bus_Only", BusApplication(calls.clone()))
         .await?;
     app.request_name("org.example.Bus-Only").await?;
     let proxy = session.proxy().await?;
@@ -211,6 +215,10 @@ async fn dbus_owner_proves_new_window_ownership_for_launch_and_desktop_action() 
         assert_eq!(result["placement"]["status"], "placed", "{result}");
         assert_eq!(result["placement"]["workspace_id"], "5");
     }
+    assert_eq!(
+        &*calls.lock().unwrap(),
+        &["activate", "activate", "inspect"]
+    );
     assert!(!session.state_path("arguments").exists());
     drop(proxy);
     session.shutdown().await
@@ -256,21 +264,25 @@ async fn explicit_moves_require_snapshot_confirmation() -> Result<()> {
     let mut session = Session::start(true).await?;
     let proxy = session.proxy().await?;
     let mut stream = events(&proxy).await?;
-    for (accept, apply, terminal) in [
-        (false, false, "failed"),
-        (true, false, "failed"),
-        (true, true, "completed"),
+    for (accept, apply, workspace, terminal) in [
+        (false, false, "3", "failed"),
+        (true, false, "3", "failed"),
+        (true, true, "3", "completed"),
+        (true, true, "name:code", "completed"),
+        (true, true, "special:scratchpad", "completed"),
+        (true, true, "name:2", "completed"),
     ] {
-        session
-            .compositor
-            .set(&json!([window("0x123", "ok", std::process::id(), 9)]).to_string());
+        let mut initial = window("0x123", "ok", std::process::id(), 9);
+        // A numeric name is not proof of having moved to that numeric workspace ID.
+        initial["workspace"]["name"] = json!("3");
+        session.compositor.set(&json!([initial]).to_string());
         session.compositor.moves(accept, apply);
         let accepted = call(
             &proxy,
             "applications.execute",
             json!({
                 "target_id":"ok.desktop", "action":"move-to-workspace",
-                "window_id":"window-123", "workspace_id":"3"
+                "window_id":"window-123", "workspace_id":workspace
             }),
         )
         .await?;

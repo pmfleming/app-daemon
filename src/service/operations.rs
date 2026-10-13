@@ -122,40 +122,28 @@ mod tests {
         )
     }
     #[tokio::test]
-    async fn close_cancellation_retains_targets_and_never_claims_rollback() {
-        let mut registry = OperationRegistry::default();
-        let task = tokio::spawn(std::future::pending::<()>());
-        let mut value = result(0, "running");
-        value.close = Some(crate::model::CloseObservation {
-            targeted_window_ids: vec!["window-a".into()],
-            dispatched_window_ids: vec!["window-a".into()],
-            status: "observing".into(),
-            ..Default::default()
-        });
-        registry.insert(None, task.abort_handle(), value).unwrap();
-        let cancelled = registry.cancel("operation-0", None).unwrap();
-        assert_eq!(cancelled.close.as_ref().unwrap().status, "unknown");
-        assert_eq!(cancelled.close.unwrap().dispatched_window_ids, ["window-a"]);
-        assert!(cancelled.message.contains("may still take effect"));
-        assert!(!registry.finish(result(0, "completed")));
-    }
-
-    #[tokio::test]
     async fn cancellation_is_terminal_and_admission_is_bounded() {
         let mut registry = OperationRegistry::default();
         for id in 0..MAX_ACTIVE_PER_OWNER {
             let task = tokio::spawn(std::future::pending::<()>());
-            registry
-                .insert(None, task.abort_handle(), result(id, "accepted"))
-                .unwrap();
+            let mut value = result(id, "accepted");
+            value.close = Some(crate::model::CloseObservation {
+                targeted_window_ids: vec!["window-a".into()],
+                dispatched_window_ids: vec!["window-a".into()],
+                status: "observing".into(),
+                ..Default::default()
+            });
+            registry.insert(None, task.abort_handle(), value).unwrap();
         }
         assert!(registry.admit(None).is_err());
         assert!(registry.admit(Some(":1.2")).is_ok());
         assert!(registry.cancel("operation-0", Some(":1.2")).is_none());
-        assert_eq!(
-            registry.cancel("operation-0", None).unwrap().status,
-            "cancelled"
-        );
+        let cancelled = registry.cancel("operation-0", None).unwrap();
+        assert_eq!(cancelled.status, "cancelled");
+        let close = cancelled.close.unwrap();
+        assert_eq!(close.status, "unknown");
+        assert_eq!(close.dispatched_window_ids, ["window-a"]);
+        assert!(cancelled.message.contains("may still take effect"));
         assert!(!registry.running(result(0, "running")));
         assert!(!registry.finish(result(0, "completed")));
         assert_eq!(

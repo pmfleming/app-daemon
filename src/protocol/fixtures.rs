@@ -5,7 +5,14 @@ use super::{
     methods::{self, Method},
     replies::{ErrorCode, Reply, RequestKind, Settings, Subscription},
 };
-use crate::{api, model::*};
+use crate::{
+    api,
+    model::{
+        ApplicationEnergyOverview, ApplicationIdentity, ApplicationPage,
+        ApplicationResourceHistory, ApplicationRuntime, ApplicationSummary, HistorySummary,
+        OperationResult, ResourceUsage,
+    },
+};
 
 pub(super) fn operation(status: &str) -> OperationResult {
     OperationResult {
@@ -137,44 +144,4 @@ pub(super) fn replies() -> Value {
         ),
     );
     Value::Object(fixture)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn every_method_has_a_producer_reply_and_error_envelopes_keep_v1_shape() {
-        let fixture = replies();
-        for method in super::super::METHODS {
-            let reply = &fixture[method];
-            assert_eq!(reply["protocol"], "app-api", "{method}");
-            assert_eq!(reply["version"], 1);
-            assert_eq!(reply["ok"], true);
-            assert!(reply["data"].is_object());
-            assert!(reply.get("error").is_none());
-        }
-        for code in ErrorCode::ALL {
-            let reply = &fixture["errors"][code.as_str()];
-            assert_eq!(reply["ok"], false);
-            assert_eq!(reply["error"]["code"], code.as_str());
-            assert_eq!(reply["error"]["retryable"], false);
-            assert!(reply.get("data").is_none());
-        }
-        assert!(
-            fixture["applications.execute"]["data"]["operation"]
-                .get("placement")
-                .is_none()
-        );
-        assert!(fixture["applications.history"]["data"]["history"]["next_cursor"].is_null());
-        assert_eq!(fixture["cancel-operation"]["data"]["kind"], "operation");
-        assert_eq!(
-            fixture["cancel-subscription"]["data"]["kind"],
-            "subscription"
-        );
-        assert_eq!(
-            fixture["subscribe"]["data"]["subscription"]["id"],
-            "subscription-example"
-        );
-    }
 }

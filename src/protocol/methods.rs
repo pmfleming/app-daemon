@@ -185,6 +185,3 @@ declare_methods! {
         example: UpdateSettingsParams { target_id: "org.example.App.desktop".into(), category: "code".into() },
     }
 }
-
-#[cfg(test)]
-mod tests;

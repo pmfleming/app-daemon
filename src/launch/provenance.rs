@@ -160,11 +160,16 @@ pub(super) async fn bus_owner_pid(connection: &zbus::Connection, name: &str) -> 
 
 #[cfg(test)]
 mod tests {
-    use super::{Process, Provenance, parse_process};
+    use super::{Process, Provenance};
     use std::collections::HashMap;
 
     #[test]
     fn retains_migrated_processes_and_observed_descendants_but_rejects_pid_reuse() {
+        let mut receipt = crate::launch::LaunchReceipt::from(crate::launch::LaunchBackend::Systemd);
+        receipt.unit = Some("app-example@123.service".into());
+        assert!(receipt.owns_cgroup("/user.slice/app-example@123.service/child"));
+        assert!(!receipt.owns_cgroup("/app-example@123.service-extra"));
+        assert!(!receipt.owns_cgroup("/app-other@123.service"));
         let mut owner = Provenance::default();
         let mut processes = [
             (10, 1, 100),
@@ -212,27 +217,5 @@ mod tests {
         // Broken/cyclic ancestry and duplicate or missing roots still terminate.
         owner.observe_processes(&processes, &[30, 30, 999]);
         assert_eq!(owner.identities, HashMap::from([(30, 300), (31, 300)]));
-    }
-
-    #[test]
-    fn parses_process_identity_without_trusting_comm_or_zombies() {
-        let stat = format!(
-            "42 (name with ) spaces) S 1 {} 1234",
-            vec!["0"; 17].join(" ")
-        );
-        assert_eq!(
-            parse_process(&stat),
-            Some(Process {
-                parent: 1,
-                start: 1234,
-                cgroup: None,
-            })
-        );
-        assert!(parse_process(&stat.replace(") S", ") Z")).is_none());
-        assert!(parse_process("malformed").is_none());
-        let mut owner = Provenance::default();
-        owner.remember(std::process::id());
-        assert!(owner.owns(std::process::id()));
-        assert!(!owner.owns(0));
     }
 }

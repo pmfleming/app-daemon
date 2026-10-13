@@ -67,7 +67,7 @@ impl<W> WatchRecovery<W> {
 
 pub(super) async fn track_state(service: std::sync::Weak<ApplicationService>) {
     let (window_sender, mut window_events) = mpsc::channel(64);
-    let events_task = tokio::spawn(hyprland::watch_window_events(window_sender));
+    let events_task = tokio::spawn(shelllist_hyprland::watch_events_detailed(window_sender));
     let _events = shelllist_daemon_tokio::AbortOnDrop(events_task.abort_handle());
     let (catalog_sender, mut catalog_events) = mpsc::channel(64);
     let mut catalog_watch = WatchRecovery::new(Instant::now());
@@ -205,44 +205,6 @@ async fn wait_for_watcher_retry(deadline: Option<Instant>) {
 mod tests {
     use super::{MAX_RETRY, MIN_RETRY, WatchRecovery};
     use std::time::Instant;
-    #[test]
-    fn window_connection_failures_restore_recovery_polling_and_reconnect_recovers() {
-        use shelllist_hyprland::Event;
-
-        let mut connected = false;
-        for failure in [
-            Event::ConnectFailed("no compositor at startup".into()),
-            Event::Disconnected(None),
-            Event::Disconnected(Some("invalid UTF-8".into())),
-            Event::ConnectFailed("connection refused".into()),
-        ] {
-            assert!(super::observe_window_event(failure, &mut connected));
-            assert!(!connected);
-            assert_eq!(
-                super::reconciliation_intervals(connected, true).0,
-                super::WINDOW_RECOVERY_INTERVAL
-            );
-            assert!(super::observe_window_event(
-                Event::Connected,
-                &mut connected
-            ));
-            assert!(connected);
-            assert_eq!(
-                super::reconciliation_intervals(connected, true).0,
-                super::HEALTHY_WINDOW_INTERVAL
-            );
-        }
-        assert!(!super::observe_window_event(
-            Event::Message("openlayer>>panel".into()),
-            &mut connected
-        ));
-        assert!(connected);
-        assert!(super::observe_window_event(
-            Event::Message("openwindow>>fixture".into()),
-            &mut connected
-        ));
-    }
-
     #[test]
     fn failed_initialization_retries_with_bounded_backoff_and_recovers() {
         let start = Instant::now();

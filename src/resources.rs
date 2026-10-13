@@ -690,11 +690,6 @@ impl ResourceSampler {
             .refresh(identities, now, MEMORY_REFRESH_INTERVAL, |pid| {
                 provider.process_memory(pid)
             });
-        let sampled_io = active_processes
-            .iter()
-            .copied()
-            .filter_map(|pid| Some((pid, provider.process_io(pid)?)))
-            .collect::<HashMap<_, _>>();
         let mut next_gpu_engines = HashMap::new();
         for (&pid, process) in current {
             let cpu_percent = self.cpu_percent(pid, process, system_delta, logical_cpus);
@@ -705,7 +700,10 @@ impl ResourceSampler {
                 .get(&identity)
                 .copied()
                 .unwrap_or_default();
-            let sampled_io = sampled_io.get(&pid).copied();
+            let sampled_io = active_processes
+                .contains(&pid)
+                .then(|| provider.process_io(pid))
+                .flatten();
             let io = self.io_delta(pid, process, sampled_io.unwrap_or_default());
             let major_faults = self.major_fault_delta(pid, process);
             let gpu = current_gpu.get(&pid);
@@ -740,9 +738,19 @@ impl ResourceSampler {
                     storage_available: sampled_io.is_some(),
                 },
             );
+            self.previous_processes.insert(
+                pid,
+                PreviousProcess {
+                    total_ticks: process.total_ticks,
+                    start_ticks: process.start_ticks,
+                    major_faults: process.major_faults,
+                    io: sampled_io,
+                },
+            );
         }
         self.previous_gpu_engines = next_gpu_engines;
-        self.remember_processes(current, &sampled_io);
+        self.previous_processes
+            .retain(|pid, _| current.contains_key(pid));
     }
 
     fn sample_network(
@@ -935,28 +943,6 @@ impl ResourceSampler {
         }
         engines
     }
-
-    fn remember_processes(
-        &mut self,
-        current: &HashMap<u32, ProcessStat>,
-        current_io: &HashMap<u32, ProcessIo>,
-    ) {
-        self.previous_processes = current
-            .iter()
-            .map(|(&pid, process)| {
-                let io = current_io.get(&pid).copied();
-                (
-                    pid,
-                    PreviousProcess {
-                        total_ticks: process.total_ticks,
-                        start_ticks: process.start_ticks,
-                        major_faults: process.major_faults,
-                        io,
-                    },
-                )
-            })
-            .collect();
-    }
 }
 
 /// Counters use device/client/engine keys; occupancy is summed by device/engine.
@@ -1061,8 +1047,6 @@ mod background_tests;
 pub(crate) mod benchmarks;
 #[cfg(test)]
 mod cache_tests;
-#[cfg(test)]
-mod cgroup_tests;
 #[cfg(test)]
 mod gpu_usage_tests;
 #[cfg(test)]

@@ -82,36 +82,6 @@ pub(super) fn adjacent_in_bucket(
             == second.timestamp_ms.saturating_sub(1) / BUCKET_MILLISECONDS
 }
 
-/// Split interval totals, not gauges or rates. Cumulative integer allocation
-/// preserves every byte/operation even when a sample spans many buckets.
-pub(super) fn sample_portion(
-    usage: &ResourceUsage,
-    start: u64,
-    end: u64,
-    duration: u64,
-) -> ResourceUsage {
-    let mut part = usage.clone();
-    let fraction = (end - start) as f64 / duration as f64;
-    part.energy.energy_mwh *= fraction;
-    part.energy.battery_percent *= fraction;
-    for counter in [
-        &mut part.storage.disk_read_bytes,
-        &mut part.storage.disk_write_bytes,
-        &mut part.storage.logical_read_bytes,
-        &mut part.storage.logical_write_bytes,
-        &mut part.storage.read_operations,
-        &mut part.storage.write_operations,
-        &mut part.storage.cancelled_write_bytes,
-        &mut part.network.network_receive_bytes,
-        &mut part.network.network_transmit_bytes,
-    ] {
-        let total = u128::from(*counter);
-        *counter = (total * u128::from(end) / u128::from(duration)
-            - total * u128::from(start) / u128::from(duration)) as u64;
-    }
-    part
-}
-
 impl PendingPoint {
     pub(super) fn merge_finished(
         first: &ResourceHistoryPoint,
@@ -119,7 +89,7 @@ impl PendingPoint {
     ) -> ResourceHistoryPoint {
         let mut merged = Self {
             end_ms: first.timestamp_ms.max(second.timestamp_ms),
-            availability: first.resources.availability.clone(),
+            availability: first.resources.availability,
             ..Self::default()
         };
         match (&mut merged.availability, &second.resources.availability) {
@@ -132,8 +102,12 @@ impl PendingPoint {
             let weight = duration as f64;
             merged.duration_ms = merged.duration_ms.saturating_add(duration);
             merged.compute.add(duration, &resource.compute);
-            merged.storage.add(duration, &resource.storage);
-            merged.network.add(duration, &resource.network);
+            merged
+                .storage
+                .add(duration, &resource.storage, |value| value);
+            merged
+                .network
+                .add(duration, &resource.network, |value| value);
             merged.energy_mwh += resource.energy_mwh;
             merged.battery_percent += resource.battery_percent;
             merged.system_power += resource.system_power_watts * weight;
@@ -155,7 +129,21 @@ impl PendingPoint {
         point
     }
 
-    pub(super) fn add(&mut self, duration_ms: u64, usage: &ResourceUsage) {
+    pub(super) fn add(
+        &mut self,
+        usage: &ResourceUsage,
+        range: std::ops::Range<u64>,
+        sample_ms: u64,
+    ) {
+        let duration_ms = range.end - range.start;
+        let fraction = duration_ms as f64 / sample_ms as f64;
+        // Split totals, not gauges or rates. Cumulative integer allocation
+        // preserves every byte/operation without cloning the resource payload.
+        let portion = |total: u64| {
+            let total = u128::from(total);
+            (total * u128::from(range.end) / u128::from(sample_ms)
+                - total * u128::from(range.start) / u128::from(sample_ms)) as u64
+        };
         let available = ResourceAvailability::for_usage(usage);
         if let Some(previous) = &mut self.availability {
             previous.intersect(&available);
@@ -165,10 +153,10 @@ impl PendingPoint {
         self.duration_ms = self.duration_ms.saturating_add(duration_ms);
         self.end_ms = self.end_ms.saturating_add(duration_ms);
         self.compute.add(duration_ms, &usage.compute);
-        self.storage.add(duration_ms, &usage.storage);
-        self.network.add(duration_ms, &usage.network);
-        self.energy_mwh += usage.energy.energy_mwh;
-        self.battery_percent += usage.energy.battery_percent;
+        self.storage.add(duration_ms, &usage.storage, portion);
+        self.network.add(duration_ms, &usage.network, portion);
+        self.energy_mwh += usage.energy.energy_mwh * fraction;
+        self.battery_percent += usage.energy.battery_percent * fraction;
         let weight = duration_ms as f64;
         self.system_power += usage.energy.system_power_watts * weight;
         self.attributed_fraction += usage.energy.attributed_fraction * weight;
@@ -246,35 +234,6 @@ impl crate::model::ResourcePeaks {
     }
 }
 
-impl crate::model::ResourceAvailability {
-    pub(crate) fn for_usage(usage: &ResourceUsage) -> Self {
-        let measurement = &usage.measurement;
-        Self {
-            cpu: measurement.coverage > 0.0,
-            memory: matches!(measurement.memory_source.as_str(), "pss" | "rss-fallback"),
-            gpu: measurement.gpu_available,
-            storage: measurement.storage_available,
-            referenced_files: measurement.referenced_files_available,
-            disk_space: measurement.disk_space_scope == "identified-app-directories",
-            network_bytes: measurement.network_bytes_available,
-            network_connections: measurement.network_connections_available,
-            energy: usage.energy.energy_source == "rapl",
-        }
-    }
-
-    fn intersect(&mut self, other: &Self) {
-        self.cpu &= other.cpu;
-        self.memory &= other.memory;
-        self.gpu &= other.gpu;
-        self.storage &= other.storage;
-        self.referenced_files &= other.referenced_files;
-        self.disk_space &= other.disk_space;
-        self.network_bytes &= other.network_bytes;
-        self.network_connections &= other.network_connections;
-        self.energy &= other.energy;
-    }
-}
-
 impl WeightedCompute {
     fn add(&mut self, duration_ms: u64, usage: &ComputeUsage) {
         let weight = duration_ms as f64;
@@ -300,33 +259,42 @@ impl WeightedCompute {
         ComputeUsage {
             cpu_percent: rounded(self.cpu / duration, 1),
             cpu_percent_of_machine: rounded(self.machine_cpu / duration, 1),
-            memory_bytes: (self.memory / duration).round() as u64,
-            memory_rss_bytes: (self.memory_rss / duration).round() as u64,
-            memory_pss_bytes: (self.memory_pss / duration).round() as u64,
-            memory_private_bytes: (self.memory_private / duration).round() as u64,
-            memory_swap_bytes: (self.memory_swap / duration).round() as u64,
-            memory_cgroup_bytes: (self.memory_cgroup / duration).round() as u64,
-            process_count: (self.process_count / duration).round() as u64,
-            thread_count: (self.thread_count / duration).round() as u64,
+            memory_bytes: average(self.memory, duration),
+            memory_rss_bytes: average(self.memory_rss, duration),
+            memory_pss_bytes: average(self.memory_pss, duration),
+            memory_private_bytes: average(self.memory_private, duration),
+            memory_swap_bytes: average(self.memory_swap, duration),
+            memory_cgroup_bytes: average(self.memory_cgroup, duration),
+            process_count: average(self.process_count, duration),
+            thread_count: average(self.thread_count, duration),
             major_faults_per_second: rounded(self.major_faults / duration, 2),
             gpu_percent: rounded(self.gpu / duration, 1),
             gpu_busy_percent: rounded(self.gpu_busy / duration, 1),
-            gpu_memory_bytes: (self.gpu_memory / duration).round() as u64,
-            gpu_memory_resident_bytes: (self.gpu_memory_resident / duration).round() as u64,
-            gpu_memory_allocated_bytes: (self.gpu_memory_allocated / duration).round() as u64,
+            gpu_memory_bytes: average(self.gpu_memory, duration),
+            gpu_memory_resident_bytes: average(self.gpu_memory_resident, duration),
+            gpu_memory_allocated_bytes: average(self.gpu_memory_allocated, duration),
         }
     }
 }
 
 impl WeightedStorage {
-    fn add(&mut self, duration_ms: u64, usage: &StorageUsage) {
-        add_counter(&mut self.read_bytes, usage.disk_read_bytes);
-        add_counter(&mut self.write_bytes, usage.disk_write_bytes);
-        add_counter(&mut self.logical_read_bytes, usage.logical_read_bytes);
-        add_counter(&mut self.logical_write_bytes, usage.logical_write_bytes);
-        add_counter(&mut self.read_operations, usage.read_operations);
-        add_counter(&mut self.write_operations, usage.write_operations);
-        add_counter(&mut self.cancelled_write_bytes, usage.cancelled_write_bytes);
+    fn add(&mut self, duration_ms: u64, usage: &StorageUsage, portion: impl Fn(u64) -> u64) {
+        add_counter(&mut self.read_bytes, portion(usage.disk_read_bytes));
+        add_counter(&mut self.write_bytes, portion(usage.disk_write_bytes));
+        add_counter(
+            &mut self.logical_read_bytes,
+            portion(usage.logical_read_bytes),
+        );
+        add_counter(
+            &mut self.logical_write_bytes,
+            portion(usage.logical_write_bytes),
+        );
+        add_counter(&mut self.read_operations, portion(usage.read_operations));
+        add_counter(&mut self.write_operations, portion(usage.write_operations));
+        add_counter(
+            &mut self.cancelled_write_bytes,
+            portion(usage.cancelled_write_bytes),
+        );
         let weight = duration_ms as f64;
         self.open_file_bytes += usage.open_file_disk_bytes as f64 * weight;
         self.referenced_file_disk += usage.referenced_file_disk_bytes as f64 * weight;
@@ -363,9 +331,15 @@ impl WeightedStorage {
 }
 
 impl WeightedNetwork {
-    fn add(&mut self, duration_ms: u64, usage: &NetworkUsage) {
-        add_counter(&mut self.receive_bytes, usage.network_receive_bytes);
-        add_counter(&mut self.transmit_bytes, usage.network_transmit_bytes);
+    fn add(&mut self, duration_ms: u64, usage: &NetworkUsage, portion: impl Fn(u64) -> u64) {
+        add_counter(
+            &mut self.receive_bytes,
+            portion(usage.network_receive_bytes),
+        );
+        add_counter(
+            &mut self.transmit_bytes,
+            portion(usage.network_transmit_bytes),
+        );
         self.connection_count += usage.network_connection_count as f64 * duration_ms as f64;
     }
 

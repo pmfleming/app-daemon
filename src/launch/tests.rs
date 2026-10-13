@@ -1,18 +1,4 @@
-use super::{Command, Duration, LaunchBackend, LaunchReceipt, checked_handoff_with_timeout};
-
-#[test]
-fn launch_isolation_recognizes_service_boundaries_and_exact_unit_ownership() {
-    assert!(super::service_cgroup(
-        "/user.slice/app-daemon.service/child"
-    ));
-    assert!(!super::service_cgroup("/session-1.scope"));
-    let mut receipt = LaunchReceipt::from(LaunchBackend::Systemd);
-    assert!(!receipt.owns_cgroup("/app-example@123.service"));
-    receipt.unit = Some("app-example@123.service".into());
-    assert!(receipt.owns_cgroup("/user.slice/app-example@123.service/child"));
-    assert!(!receipt.owns_cgroup("/app-other@123.service"));
-    assert!(!receipt.owns_cgroup("/app-example@123.service-extra"));
-}
+use super::{Command, Duration, checked_handoff_with_timeout};
 
 #[test]
 fn descendant_can_log_after_handoff_host_exits() {

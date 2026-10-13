@@ -1,12 +1,13 @@
 use std::{
     collections::{BTreeMap, hash_map::DefaultHasher},
-    fs,
     hash::{Hash, Hasher},
     path::{Path, PathBuf},
 };
 
 use serde::{Deserialize, Serialize};
-use shelllist_daemon_core::{AtomicWritePolicy, XdgRoot, resolve_xdg_path, write_json_atomic};
+use shelllist_daemon_core::{
+    AtomicWritePolicy, XdgRoot, read_json, resolve_xdg_path, write_json_atomic,
+};
 
 const CATEGORY_WORKSPACES: &[(&str, &str)] = &[
     ("shell", "1"),
@@ -45,14 +46,17 @@ pub struct SettingsStore {
 
 impl SettingsStore {
     pub fn load_default() -> Self {
-        Self::load(settings_path())
+        Self::load(resolve_xdg_path(
+            XdgRoot::Config,
+            "app-daemon",
+            Path::new("application-settings-v1.json"),
+        ))
     }
 
     pub fn load(path: Option<PathBuf>) -> Self {
         let mut applications = path
             .as_ref()
-            .and_then(|path| fs::read(path).ok())
-            .and_then(|bytes| serde_json::from_slice::<SettingsFile>(&bytes).ok())
+            .and_then(|path| read_json::<SettingsFile>(path).ok().flatten())
             .filter(|file| file.version == 1)
             .map(|file| file.applications)
             .unwrap_or_default();
@@ -136,14 +140,6 @@ fn settings_revision(applications: &BTreeMap<String, ApplicationSettings>) -> u6
         settings.workspace_id.hash(&mut hasher);
     }
     hasher.finish()
-}
-
-fn settings_path() -> Option<PathBuf> {
-    resolve_xdg_path(
-        XdgRoot::Config,
-        "app-daemon",
-        Path::new("application-settings-v1.json"),
-    )
 }
 
 #[cfg(test)]

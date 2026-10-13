@@ -10,21 +10,13 @@ use std::{
 };
 
 #[test]
-fn descendant_traversal_prunes_rejected_branches_and_terminates_cycles() {
-    let children = HashMap::from([(1, vec![2, 3]), (2, vec![4]), (3, vec![1])]);
-    assert_eq!(
-        crate::process::descendants([0, 1], &children),
-        HashSet::from([1, 2, 3, 4])
-    );
-    assert_eq!(
-        crate::process::descendants_where([1, 1], &children, |pid| pid != 2),
-        HashSet::from([1, 3]),
-    );
-}
-
-#[test]
-fn parses_proc_stat_with_spaces_in_command() -> anyhow::Result<()> {
-    let stat = "42 (application helper) S 7 0 0 0 0 0 0 0 0 0 120 30 0 0 0 0 0 0 99 0 0";
+fn parses_proc_counters_and_live_identity_without_trusting_command_names() -> anyhow::Result<()> {
+    let stat = "42 (name with ) spaces) S 7 0 0 0 0 0 0 0 0 0 120 30 0 0 0 0 0 0 99 0 0";
+    let identity = crate::process::parse_process(stat).context("live identity")?;
+    assert_eq!((identity.parent, identity.start), (7, 99));
+    for invalid in [stat.replace(") S", ") Z"), "malformed".into()] {
+        assert!(crate::process::parse_process(&invalid).is_none());
+    }
     let process = parse_process_stat(stat).context("valid stat")?;
     assert_eq!(process.parent_pid, 7);
     assert_eq!(process.total_ticks, 150);

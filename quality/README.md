@@ -1,5 +1,13 @@
 # RustQualityLens baseline
 
+The subsequent [test-pruning review](test-pruning-review.md) records the current
+97 → 65 registered-test reduction, retained regressions and measured coverage
+tradeoffs. Historical metric baselines below describe their earlier snapshots.
+
+The latest [history/sampling quality review](history-sampling-review.md) records
+fresh before/after complexity, locality/leverage, copying, source size, and
+verification results, with explicit partial-inventory limits.
+
 The latest [ownership/resource refactor review](ownership-refactor-review.md)
 records complexity, Halstead effort, locality/leverage, cloning, source-evidence
 completeness and verification, including the integration-fixture race fix.

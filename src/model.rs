@@ -243,7 +243,7 @@ pub struct ResourcePeaks {
 
 /// A capability is true only when available throughout the observed bucket.
 /// Missing metadata in older history files means unknown, not measured zero.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ResourceAvailability {
     pub cpu: bool,
@@ -255,6 +255,35 @@ pub struct ResourceAvailability {
     pub network_bytes: bool,
     pub network_connections: bool,
     pub energy: bool,
+}
+
+impl ResourceAvailability {
+    pub(crate) fn for_usage(usage: &ResourceUsage) -> Self {
+        let measurement = &usage.measurement;
+        Self {
+            cpu: measurement.coverage > 0.0,
+            memory: matches!(measurement.memory_source.as_str(), "pss" | "rss-fallback"),
+            gpu: measurement.gpu_available,
+            storage: measurement.storage_available,
+            referenced_files: measurement.referenced_files_available,
+            disk_space: measurement.disk_space_scope == "identified-app-directories",
+            network_bytes: measurement.network_bytes_available,
+            network_connections: measurement.network_connections_available,
+            energy: usage.energy.energy_source == "rapl",
+        }
+    }
+
+    pub(crate) fn intersect(&mut self, other: &Self) {
+        self.cpu &= other.cpu;
+        self.memory &= other.memory;
+        self.gpu &= other.gpu;
+        self.storage &= other.storage;
+        self.referenced_files &= other.referenced_files;
+        self.disk_space &= other.disk_space;
+        self.network_bytes &= other.network_bytes;
+        self.network_connections &= other.network_connections;
+        self.energy &= other.energy;
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]

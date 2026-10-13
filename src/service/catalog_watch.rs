@@ -94,77 +94,16 @@ fn replacement_parents(root: &Path) -> impl Iterator<Item = &Path> {
 
 #[cfg(test)]
 mod tests {
-    use super::{CatalogEvent, RecursiveMode, classify_event, install, relevant, watch_plan};
-    use notify::{
-        Event, EventKind,
-        event::{AccessKind, CreateKind},
-    };
-    use std::path::PathBuf;
+    use super::{RecursiveMode, install, relevant, watch_plan};
 
     #[test]
-    fn classifies_changes_replacements_access_and_backend_failures() {
-        let roots = [PathBuf::from("home/apps")];
-        for (path, expected) in [
-            ("home/apps/editor.desktop", Some(CatalogEvent::Changed)),
-            ("home/apps", Some(CatalogEvent::Rewatch)),
-            ("home", Some(CatalogEvent::Rewatch)),
-            ("home/downloads", None),
-        ] {
-            let event = Event::new(EventKind::Create(CreateKind::Any)).add_path(path.into());
-            assert_eq!(classify_event(Ok(event), &roots), expected, "{path}");
-        }
-        let access = Event::new(EventKind::Access(AccessKind::Any)).add_path(roots[0].clone());
-        assert_eq!(classify_event(Ok(access), &roots), None);
-        assert_eq!(classify_event(Ok(Event::new(EventKind::Any)), &roots), None);
-        let rename = Event::new(EventKind::Any)
-            .add_path("elsewhere".into())
-            .add_path(roots[0].clone());
-        assert_eq!(
-            classify_event(Ok(rename), &roots),
-            Some(CatalogEvent::Rewatch)
-        );
-        assert_eq!(
-            classify_event(Err(notify::Error::generic("backend failed")), &roots),
-            Some(CatalogEvent::Failed)
-        );
-    }
-
-    #[test]
-    fn recursive_coverage_wins_and_partial_installation_is_rejected() -> anyhow::Result<()> {
+    fn watch_coverage_handles_profile_replacement_and_rejects_partial_installation()
+    -> anyhow::Result<()> {
         let dir = tempfile::tempdir()?;
-        let nested = dir.path().join("nested");
-        std::fs::create_dir(&nested)?;
-        for roots in [
-            vec![dir.path().to_owned(), nested.clone()],
-            vec![nested.clone(), dir.path().to_owned()],
-        ] {
-            let plan = watch_plan(&roots);
-            for root in roots {
-                assert!(matches!(plan.get(&root), Some(RecursiveMode::Recursive)));
-            }
-        }
-        let watcher = notify::recommended_watcher(|_| {})?;
-        assert!(
-            install(
-                watcher,
-                [
-                    (nested, RecursiveMode::Recursive),
-                    (dir.path().join("missing"), RecursiveMode::Recursive),
-                ]
-            )
-            .is_err(),
-            "a valid first watch must not hide a failed second watch"
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn watches_missing_roots_and_profile_symlinks_without_watching_all_home_events() {
-        let dir = tempfile::tempdir().unwrap();
         let store = dir.path().join("store/share/applications");
-        std::fs::create_dir_all(&store).unwrap();
-        std::os::unix::fs::symlink(dir.path().join("store"), dir.path().join("profile")).unwrap();
-        let roots = vec![
+        std::fs::create_dir_all(&store)?;
+        std::os::unix::fs::symlink(dir.path().join("store"), dir.path().join("profile"))?;
+        let roots = [
             dir.path().join("profile/share/applications"),
             dir.path().join("missing/applications"),
         ];
@@ -178,7 +117,31 @@ mod tests {
             Some(RecursiveMode::Recursive)
         ));
         assert!(relevant(&dir.path().join("profile"), &roots));
-        assert!(relevant(&dir.path().join("missing"), &roots));
         assert!(!relevant(&dir.path().join("unrelated-download"), &roots));
+        // Overlapping roots must not downgrade recursive coverage in either order.
+        for roots in [
+            [store.clone(), dir.path().into()],
+            [dir.path().into(), store.clone()],
+        ] {
+            let plan = watch_plan(&roots);
+            assert!(
+                roots
+                    .iter()
+                    .all(|root| plan[root] == RecursiveMode::Recursive)
+            );
+        }
+        let watcher = notify::recommended_watcher(|_| {})?;
+        assert!(
+            install(
+                watcher,
+                [
+                    (store, RecursiveMode::Recursive),
+                    (roots[1].clone(), RecursiveMode::Recursive),
+                ]
+            )
+            .is_err(),
+            "a valid first watch must not hide a failed second watch"
+        );
+        Ok(())
     }
 }

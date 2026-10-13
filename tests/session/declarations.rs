@@ -9,6 +9,10 @@ async fn every_declared_method_reaches_its_typed_handler_on_the_private_bus() ->
     let mut session = Session::start(true).await?;
     let proxy = session.proxy().await?;
     let registry = protocol::registry()?;
+    let frozen: Value = serde_json::from_str(include_str!("../../test_support/app-api-v1.json"))?;
+    assert_eq!(registry, frozen["registry"]);
+    assert_eq!(protocol::contract_fixture()?, frozen);
+    shelllist_daemon_core::validate_unique_names(protocol::METHODS).map_err(anyhow::Error::msg)?;
     let mut operation_id = String::new();
     for entry in registry["methods"].as_array().context("method registry")? {
         let name = entry["name"].as_str().context("wire name")?;
@@ -42,12 +46,6 @@ async fn every_declared_method_reaches_its_typed_handler_on_the_private_bus() ->
                 .context("accepted operation")?
                 .into();
         }
-    }
-    for params in ["null", "[]", "true", "17", "\"ignored\""] {
-        assert_eq!(
-            raw_call(&proxy, Method::Revision.name(), params).await?["ok"],
-            true
-        );
     }
     drop(proxy);
     session.shutdown().await

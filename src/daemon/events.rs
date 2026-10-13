@@ -112,37 +112,16 @@ pub(super) async fn emit(emitter: &SignalEmitter<'_>, event: Event) {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{StateRevision, changed, operation_gap, protocol, subscribed};
 
     #[test]
-    fn operation_fixture_preserves_live_v1_envelopes() -> anyhow::Result<()> {
-        let fixture = crate::protocol::event_contract_fixture();
-        for status in ["completed", "failed", "cancelled"] {
-            let event = &fixture[status];
-            let operation: OperationResult = serde_json::from_value(event["operation"].clone())?;
-            assert_eq!(operation.status, status);
-            assert_eq!(
-                event,
-                &super::operation("subscription-example", &operation).into_value()
-            );
-            assert_eq!(event["protocol"], protocol::NAME);
-            assert_eq!(event["version"], protocol::VERSION);
-            assert_eq!(event["stream"], protocol::stream::OPERATION);
-            assert_eq!(event["subscription_id"], "subscription-example");
-            assert_eq!(event["event"], status);
-            assert!(event.get("data").is_none(), "v1 payloads are top-level");
-        }
-        let gap = &fixture["gap"];
-        assert_eq!(gap, &operation_gap("subscription-example", 4).into_value());
+    fn event_payloads_remain_top_level_and_emission_uses_the_envelope_stream() {
+        let gap = operation_gap("sub", 4).into_value();
         assert_eq!(gap["event"], "resync-required");
         assert_eq!(gap["dropped_events"], 4);
+        assert_eq!(gap["subscription_id"], "sub");
         assert_eq!(gap["recovery_method"], "applications.operation.status");
         assert!(gap.get("data").is_none());
-        Ok(())
-    }
-
-    #[test]
-    fn state_event_payloads_remain_top_level_and_emission_uses_the_envelope_stream() {
         for stream in protocol::STREAMS {
             let subscribed = subscribed(
                 stream,

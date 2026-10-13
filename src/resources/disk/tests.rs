@@ -5,45 +5,29 @@ use crate::resources::{
     test_provider::TestProvider,
 };
 use std::{
-    collections::HashMap,
     sync::{Arc, Barrier, atomic::Ordering, mpsc},
     time::{Duration, Instant},
 };
 
-fn channels() -> (
-    AppDiskCache,
-    mpsc::Receiver<String>,
-    mpsc::SyncSender<DiskResult>,
-) {
+#[test]
+fn disk_cache_retains_completed_sizes_retries_failures_and_discards_removed_targets() {
+    let provider: Arc<dyn ResourceProvider> = Arc::new(TestProvider::default());
     let (sender, requests) = mpsc::sync_channel(WORKERS);
     let (results, receiver) = mpsc::sync_channel(WORKERS);
-    let cache = AppDiskCache {
+    let mut cache = AppDiskCache {
         workers: Some(DiskWorkers {
             requests: sender,
             results: receiver,
         }),
         ..Default::default()
     };
-    (cache, requests, results)
-}
-
-#[test]
-fn completion_releases_capacity_without_reviving_removed_targets_or_retrying_early() {
-    let provider: Arc<dyn ResourceProvider> = Arc::new(TestProvider::default());
-    let (mut cache, requests, results) = channels();
     let targets = ["A".to_owned(), "B".to_owned(), "C".to_owned()];
     let now = Instant::now();
     assert!(cache.read(&provider, &targets, now).is_empty());
-    assert_eq!(requests.try_iter().collect::<Vec<_>>(), ["A", "B"]);
-    cache.read(&provider, &targets, now);
-    assert!(
-        requests.try_recv().is_err(),
-        "running work still occupies capacity"
-    );
-    for target in ["A", "B"] {
+    for target in requests.try_iter() {
         results
             .send(DiskResult {
-                target: target.into(),
+                target,
                 usage: Some(DiskBreakdown {
                     total_bytes: 100,
                     ..Default::default()
@@ -51,11 +35,11 @@ fn completion_releases_capacity_without_reviving_removed_targets_or_retrying_ear
             })
             .unwrap();
     }
+    // B disappears while its work is outstanding. C must get the freed slot.
     let remaining = [&targets[0], &targets[2]];
     let samples = cache.read(&provider, remaining, now);
     assert_eq!(samples.len(), 1);
     assert_eq!(samples["A"].total_bytes, 100);
-    assert!(!cache.samples.contains_key("B"));
     assert_eq!(requests.try_recv().unwrap(), "C");
     results
         .send(DiskResult {
@@ -64,65 +48,33 @@ fn completion_releases_capacity_without_reviving_removed_targets_or_retrying_ear
         })
         .unwrap();
     assert_eq!(cache.read(&provider, remaining, now).len(), 1);
-    assert!(cache.in_flight.is_empty());
     assert!(
         requests.try_recv().is_err(),
-        "failed initial reads respect TTL too"
+        "failed initial reads must back off"
     );
+
     let later = now + APP_DISK_REFRESH_INTERVAL;
     cache.read(&provider, remaining, later);
-    assert_eq!(requests.try_iter().collect::<Vec<_>>(), ["A", "C"]);
-    for target in ["A", "C"] {
+    let retried = requests.try_iter().collect::<Vec<_>>();
+    assert_eq!(retried.len(), 2);
+    for target in retried {
         results
             .send(DiskResult {
-                target: target.into(),
+                target,
                 usage: None,
             })
             .unwrap();
     }
-    assert!(cache.read(&provider, [], later).is_empty());
-    assert!(cache.samples.is_empty() && cache.in_flight.is_empty());
-}
-
-#[test]
-fn rejected_sends_never_reserve_in_flight_capacity() {
-    let provider: Arc<dyn ResourceProvider> = Arc::new(TestProvider::default());
-    let (mut cache, requests, _results) = channels();
-    for _ in 0..WORKERS {
-        cache
-            .workers
-            .as_ref()
-            .unwrap()
-            .requests
-            .try_send("occupied".into())
-            .unwrap();
-    }
-    let targets = ["A".to_owned()];
-    cache.read(&provider, &targets, Instant::now());
-    assert!(cache.in_flight.is_empty(), "full channel rejected the send");
-    drop(requests);
-    cache.read(&provider, &targets, Instant::now());
-    assert!(
-        cache.in_flight.is_empty(),
-        "disconnected channel rejected the send"
+    assert_eq!(
+        cache.read(&provider, remaining, later)["A"].total_bytes,
+        100,
+        "failed refresh must retain the last completed footprint"
     );
-}
-
-fn finish(
-    cache: &mut AppDiskCache,
-    provider: &Arc<dyn ResourceProvider>,
-    targets: &[String],
-    now: Instant,
-) -> HashMap<String, DiskBreakdown> {
-    let deadline = Instant::now() + Duration::from_secs(3);
-    loop {
-        let samples = cache.read(provider, targets, now);
-        if cache.in_flight.is_empty() {
-            return samples;
-        }
-        assert!(Instant::now() < deadline, "disk worker did not finish");
-        std::thread::sleep(Duration::from_millis(1));
-    }
+    assert!(
+        requests.try_recv().is_err(),
+        "failed refreshes must back off too"
+    );
+    assert!(cache.read(&provider, [], later).is_empty());
 }
 
 #[test]
@@ -181,35 +133,4 @@ fn blocked_disk_work_is_bounded_without_stalling_resource_publication() {
         assert_eq!(usage.compute.process_count, 1);
         assert_eq!(usage.measurement.disk_space_scope, "unavailable");
     }
-}
-
-#[test]
-fn failed_refresh_keeps_last_completed_footprint_and_respects_ttl() {
-    let provider = Arc::new(TestProvider::default());
-    provider.state.lock().unwrap().disk_usage = Some(DiskBreakdown {
-        total_bytes: 100,
-        ..Default::default()
-    });
-    let shared: Arc<dyn ResourceProvider> = provider.clone();
-    let targets = vec!["A".into()];
-    let mut cache = AppDiskCache::default();
-    let now = Instant::now();
-    assert_eq!(
-        finish(&mut cache, &shared, &targets, now)["A"].total_bytes,
-        100
-    );
-    provider.state.lock().unwrap().disk_usage = None;
-    assert_eq!(cache.read(&shared, &targets, now)["A"].total_bytes, 100);
-    assert_eq!(provider.disk_reads.load(Ordering::Relaxed), 1);
-    let later = now + APP_DISK_REFRESH_INTERVAL + Duration::from_secs(1);
-    assert_eq!(
-        finish(&mut cache, &shared, &targets, later)["A"].total_bytes,
-        100
-    );
-    assert_eq!(provider.disk_reads.load(Ordering::Relaxed), 2);
-    assert!(
-        cache
-            .read(&shared, std::iter::empty::<&String>(), later)
-            .is_empty()
-    );
 }

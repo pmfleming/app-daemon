@@ -125,15 +125,7 @@ impl LaunchProgress<'_> {
             Some(receipt),
         );
         // Owned status reads retain the receipt if a subscriber misses the event.
-        if self
-            .service
-            .operations
-            .lock()
-            .await
-            .running(progress.clone())
-        {
-            let _ = self.service.operation_changes.send(progress);
-        }
+        self.service.publish_running(progress).await;
     }
 }
 
@@ -470,7 +462,6 @@ async fn close_application(
                 |address| window.address == address,
             )
         })
-        .cloned()
         .collect::<Vec<_>>();
     anyhow::ensure!(!targets.is_empty(), "application is no longer running");
     let close = close::observe(
@@ -485,15 +476,7 @@ async fn close_application(
                 None,
             );
             result.close = Some(close);
-            if progress
-                .service
-                .operations
-                .lock()
-                .await
-                .running(result.clone())
-            {
-                let _ = progress.service.operation_changes.send(result);
-            }
+            progress.service.publish_running(result).await;
         },
         Duration::from_secs(5),
     )

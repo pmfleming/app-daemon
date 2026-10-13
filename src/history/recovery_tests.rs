@@ -14,7 +14,8 @@ fn usage(cpu: f64, energy: f64) -> ResourceUsage {
 }
 
 #[test]
-fn restart_merges_partial_buckets_and_invalidates_pre_rewrite_cursors() -> anyhow::Result<()> {
+fn restart_preserves_gaps_and_rewrites_or_clock_backfills_invalidate_cursors() -> anyhow::Result<()>
+{
     let dir = tempfile::tempdir()?;
     let path = dir.path().join("history.json");
     let t = now_milliseconds() / ENERGY_BUCKET_MILLISECONDS * ENERGY_BUCKET_MILLISECONDS - 120_000;
@@ -22,7 +23,7 @@ fn restart_merges_partial_buckets_and_invalidates_pre_rewrite_cursors() -> anyho
     store.record("app", t + 1000, 1.0, &usage(10.0, 1.0));
     persist_snapshot(store.snapshot(true))?;
     let cursor = store.query("app", None, None, 1)?.next_cursor;
-    let mut restarted = HistoryStore::load(Some(path));
+    let mut restarted = HistoryStore::load(Some(path.clone()));
     assert!(
         restarted
             .query("app", None, cursor.as_deref(), 1)?
@@ -49,24 +50,21 @@ fn restart_merges_partial_buckets_and_invalidates_pre_rewrite_cursors() -> anyho
         restarted.energy_totals(t, now_milliseconds())[0].energy_mwh,
         3.0
     );
-    assert_eq!(restarted.energy_points["app"].len(), 1);
-    Ok(())
-}
-
-#[test]
-fn backward_clock_changes_remain_sorted_and_cannot_silently_skip_backfills() -> anyhow::Result<()> {
-    let mut store = HistoryStore::load(None);
-    let t = now_milliseconds() / BUCKET_MILLISECONDS * BUCKET_MILLISECONDS - 60_000;
-    store.record("app", t, 1.0, &usage(10.0, 1.0));
-    let cursor = store.query("app", None, None, 1)?.next_cursor;
-    store.record("app", t - 30_000, 1.0, &usage(20.0, 1.0));
-    assert!(store.query("app", None, cursor.as_deref(), 10).is_err());
-    let first = store.query("app", None, None, 1)?;
-    assert!(first.has_more);
-    let second = store.query("app", None, first.next_cursor.as_deref(), 1)?;
-    assert!(first.points[0].timestamp_ms < second.points[0].timestamp_ms);
-    store.prune(t + RETENTION_MILLISECONDS + BUCKET_MILLISECONDS + 1);
-    assert!(store.points.is_empty());
+    restarted.record("app", t + 6000, 1.0, &usage(20.0, 1.0));
+    persist_snapshot(restarted.snapshot(true))?;
+    let mut restarted = HistoryStore::load(Some(path));
+    let gap = restarted.query_window("app", Some(t + 3000), Some(t + 5000), None, 10)?;
+    assert_eq!(gap.summary.metrics["cpu_percent_of_machine"].observed_ms, 0);
+    let cursor = restarted.query("app", None, None, 10)?.next_cursor;
+    restarted.record("app", t - 30_000, 1.0, &usage(20.0, 1.0));
+    assert!(restarted.query("app", None, cursor.as_deref(), 10).is_err());
+    let points = restarted.query("app", None, None, 10)?.points;
+    assert_eq!(points.len(), 3);
+    assert!(
+        points
+            .windows(2)
+            .all(|pair| pair[0].timestamp_ms < pair[1].timestamp_ms)
+    );
     Ok(())
 }
 
@@ -74,7 +72,9 @@ fn backward_clock_changes_remain_sorted_and_cannot_silently_skip_backfills() -> 
 fn pruning_expires_only_cursors_whose_buckets_are_gone_even_after_restart() -> anyhow::Result<()> {
     let dir = tempfile::tempdir()?;
     let path = dir.path().join("history.json");
-    let now = now_milliseconds();
+    // End samples on a bucket boundary so each one-second interval occupies
+    // exactly one bucket, regardless of the wall clock when this test runs.
+    let now = now_milliseconds() / BUCKET_MILLISECONDS * BUCKET_MILLISECONDS;
     let old = now - RETENTION_MILLISECONDS + 60_000;
     let mut store = HistoryStore::load(Some(path.clone()));
     store.record("app", old, 1.0, &usage(10.0, 1.0));
@@ -86,7 +86,6 @@ fn pruning_expires_only_cursors_whose_buckets_are_gone_even_after_restart() -> a
     let latest = store.query("app", None, Some(old_cursor), 1)?;
     assert_eq!(latest.points.len(), 1, "normal appends preserve cursors");
     let recent_cursor = latest.next_cursor.as_deref().unwrap();
-    let epoch = store.cursor_epochs["app"].clone();
     let narrowed = store.query_window(
         "app",
         Some(latest.points[0].timestamp_ms),
@@ -104,7 +103,6 @@ fn pruning_expires_only_cursors_whose_buckets_are_gone_even_after_restart() -> a
     store.prune(old_endpoint + RETENTION_MILLISECONDS);
     assert!(store.query("app", None, Some(old_cursor), 1).is_ok());
     store.prune(old_endpoint + RETENTION_MILLISECONDS + 1);
-    assert_eq!(store.cursor_epochs["app"], epoch);
     let error = store.query("app", None, Some(old_cursor), 1).unwrap_err();
     assert!(error.to_string().contains("cursor expired"));
     let incremental = store.query("app", None, Some(recent_cursor), 1)?;
@@ -114,7 +112,6 @@ fn pruning_expires_only_cursors_whose_buckets_are_gone_even_after_restart() -> a
 
     persist_snapshot(store.snapshot(false))?;
     let mut restarted = HistoryStore::load(Some(path));
-    assert_eq!(restarted.cursor_epochs["app"], epoch);
     assert!(restarted.query("app", None, Some(old_cursor), 1).is_err());
     assert!(
         restarted

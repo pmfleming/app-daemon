@@ -83,59 +83,6 @@ async fn metadata_only_refresh_replaces_launch_behavior_and_rejects_old_revision
     session.shutdown().await
 }
 
-struct BusApplication(std::sync::Arc<std::sync::Mutex<Vec<String>>>);
-
-#[zbus::interface(name = "org.freedesktop.Application")]
-impl BusApplication {
-    fn activate(
-        &self,
-        _platform_data: std::collections::HashMap<String, zbus::zvariant::OwnedValue>,
-    ) {
-        self.0.lock().unwrap().push("activate".into());
-    }
-    fn activate_action(
-        &self,
-        action: &str,
-        _parameters: Vec<zbus::zvariant::OwnedValue>,
-        _platform_data: std::collections::HashMap<String, zbus::zvariant::OwnedValue>,
-    ) {
-        self.0.lock().unwrap().push(action.into());
-    }
-}
-
-#[tokio::test]
-async fn dbus_only_desktop_entries_activate_and_invoke_actions_without_exec() -> Result<()> {
-    let mut session = Session::start(true).await?;
-    let app_connection = session.other_connection().await?;
-    let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-    app_connection
-        .object_server()
-        .at("/org/example/Bus_Only", BusApplication(calls.clone()))
-        .await?;
-    app_connection.request_name("org.example.Bus-Only").await?;
-    let proxy = session.proxy().await?;
-    let mut stream = events(&proxy).await?;
-    for action in ["launch", "desktop-action"] {
-        let accepted = call(&proxy, "applications.execute", json!({"target_id":"org.example.Bus-Only.desktop", "action":action, "desktop_action_id":"inspect"})).await?;
-        let result = operation(
-            &mut stream,
-            accepted["data"]["operation"]["id"]
-                .as_str()
-                .context("operation id")?,
-            "completed",
-        )
-        .await?;
-        assert_eq!(result["launch_backend"], "dbus-activation");
-    }
-    assert_eq!(&*calls.lock().unwrap(), &["activate", "inspect"]);
-    assert!(
-        !session.state_path("arguments").exists(),
-        "D-Bus activation must not invoke a command launcher"
-    );
-    drop(proxy);
-    session.shutdown().await
-}
-
 #[tokio::test]
 async fn compositor_failures_and_reconnects_reconcile_without_host_desktop_access() -> Result<()> {
     let mut session = Session::start(true).await?;

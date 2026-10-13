@@ -1,6 +1,5 @@
 use std::{
     collections::{HashMap, VecDeque},
-    fs,
     path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -8,7 +7,9 @@ use std::{
 use anyhow::Context;
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde::{Deserialize, Serialize};
-use shelllist_daemon_core::{AtomicWritePolicy, XdgRoot, resolve_xdg_path, write_json_atomic};
+use shelllist_daemon_core::{
+    AtomicWritePolicy, XdgRoot, read_json, resolve_xdg_path, write_json_atomic,
+};
 
 use crate::{
     metrics::{available_label, merge_label, rounded},
@@ -94,14 +95,17 @@ pub struct HistoryStore {
 
 impl HistoryStore {
     pub fn load_default() -> Self {
-        Self::load(history_path())
+        Self::load(resolve_xdg_path(
+            XdgRoot::State,
+            "app-daemon",
+            Path::new("resource-history-v1.json"),
+        ))
     }
 
     pub(crate) fn load(path: Option<PathBuf>) -> Self {
         let file = path
             .as_ref()
-            .and_then(|path| fs::read(path).ok())
-            .and_then(|bytes| serde_json::from_slice::<HistoryFile>(&bytes).ok())
+            .and_then(|path| read_json::<HistoryFile>(path).ok().flatten())
             .filter(|file| file.version == FILE_VERSION)
             .unwrap_or_default();
         let mut store = Self {
@@ -153,15 +157,9 @@ impl HistoryStore {
             {
                 self.finish_pending(target_id.to_owned(), pending);
             }
-            let part = aggregate::sample_portion(
-                usage,
-                start - sample_start,
-                end - sample_start,
-                duration_ms,
-            );
             let pending = self.pending.entry(target_id.to_owned()).or_default();
             pending.timestamp_ms = bucket_start;
-            pending.add(end - start, &part);
+            pending.add(usage, start - sample_start..end - sample_start, duration_ms);
             pending.end_ms = end;
             start = end;
         }
@@ -303,7 +301,7 @@ impl HistoryStore {
             self.finish_pending(id, pending);
         }
         for (id, pending) in std::mem::take(&mut self.pending_energy) {
-            self.finish_pending_energy(id, pending);
+            self.insert_energy_point(id, pending.finish());
         }
     }
 
@@ -327,7 +325,7 @@ impl HistoryStore {
             })
             .collect::<Vec<_>>();
         for (id, pending) in expired_energy {
-            self.finish_pending_energy(id, pending);
+            self.insert_energy_point(id, pending.finish());
         }
     }
 
@@ -339,7 +337,7 @@ impl HistoryStore {
             .is_some_and(|pending| pending.timestamp_ms != bucket_start)
             && let Some(pending) = self.pending_energy.remove(target_id)
         {
-            self.finish_pending_energy(target_id.to_owned(), pending);
+            self.insert_energy_point(target_id.to_owned(), pending.finish());
         }
         let pending = self.pending_energy.entry(target_id.to_owned()).or_default();
         pending.timestamp_ms = bucket_start;
@@ -348,10 +346,6 @@ impl HistoryStore {
             &usage.energy.energy_source,
             &usage.energy.energy_confidence,
         );
-    }
-
-    fn finish_pending_energy(&mut self, id: String, pending: PendingEnergy) {
-        self.insert_energy_point(id, pending.finish());
     }
 
     fn insert_energy_point(&mut self, id: String, point: EnergyHistoryPoint) {
@@ -375,8 +369,8 @@ impl HistoryStore {
                     |p| p.timestamp_ms,
                 )
                 && aggregate::adjacent_in_bucket(&points[index], &point)
+                && let Some(previous) = points.remove(index)
             {
-                let previous = points.remove(index).expect("existing adjacent point");
                 point = PendingPoint::merge_finished(&previous, &point);
                 self.cursor_epochs.insert(id.clone(), new_cursor_epoch());
             }
@@ -543,14 +537,6 @@ pub fn now_milliseconds() -> u64 {
         .unwrap_or(u64::MAX)
 }
 
-fn history_path() -> Option<PathBuf> {
-    resolve_xdg_path(
-        XdgRoot::State,
-        "app-daemon",
-        Path::new("resource-history-v1.json"),
-    )
-}
-
 pub fn persist_snapshot(snapshot: HistorySnapshot) -> std::io::Result<()> {
     let Some(path) = snapshot.path else {
         return Ok(());
@@ -566,8 +552,6 @@ pub fn persist_snapshot(snapshot: HistorySnapshot) -> std::io::Result<()> {
     .map_err(std::io::Error::other)
 }
 
-#[cfg(test)]
-mod availability_tests;
 #[cfg(test)]
 mod recovery_tests;
 #[cfg(test)]

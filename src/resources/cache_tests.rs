@@ -93,4 +93,12 @@ fn pid_reuse_refreshes_resources_without_charging_previous_process_work() {
     assert_eq!(reused.storage.disk_read_bytes, 0);
     assert_eq!(reused.compute.major_faults_per_second, 0.0);
     assert_eq!(reused.network.network_receive_bytes, 0);
+
+    provider.state.lock().unwrap().processes.clear();
+    sampler.sample_for_targets(&targets);
+    assert!(sampler.previous_processes.is_empty());
+    set_process(&provider, 2, 1000, 20);
+    let returned = sampler.sample_for_targets(&targets).usage_for_roots([42]);
+    assert_eq!(returned.storage.disk_read_bytes, 0);
+    assert_eq!(returned.compute.cpu_percent, 0.0);
 }

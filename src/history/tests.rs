@@ -1,5 +1,7 @@
 use super::{HistoryStore, persist_snapshot};
-use crate::model::{ComputeUsage, EnergyUsage, NetworkUsage, ResourceUsage, StorageUsage};
+use crate::model::{
+    ComputeUsage, EnergyUsage, NetworkUsage, ResourceMeasurement, ResourceUsage, StorageUsage,
+};
 
 #[test]
 fn persists_resource_buckets_and_retains_energy_for_seven_days() -> anyhow::Result<()> {
@@ -40,6 +42,14 @@ fn persists_resource_buckets_and_retains_energy_for_seven_days() -> anyhow::Resu
             energy_confidence: "low".into(),
             ..EnergyUsage::default()
         },
+        measurement: ResourceMeasurement {
+            coverage: 1.0,
+            memory_source: "pss".into(),
+            gpu_available: true,
+            storage_available: true,
+            network_connections_available: true,
+            ..Default::default()
+        },
         ..ResourceUsage::default()
     };
     let now = super::now_milliseconds();
@@ -57,6 +67,13 @@ fn persists_resource_buckets_and_retains_energy_for_seven_days() -> anyhow::Resu
     assert!(!page.has_more);
     assert_eq!(page.points.len(), 1);
     let point = &page.points[0].resources;
+    assert_eq!(
+        page.summary.metrics["gpu_busy_percent"].mean,
+        Some(0.0),
+        "idle is available"
+    );
+    assert!(point.metric_availability.0["network_connection_count"]);
+    assert!(!point.metric_availability.0["network_receive_bytes_per_second"]);
     assert_eq!(point.compute.cpu_percent, 50.0);
     assert_eq!(point.compute.gpu_percent, 25.0);
     assert_eq!(point.compute.gpu_memory_bytes, 2048);
@@ -75,6 +92,13 @@ fn persists_resource_buckets_and_retains_energy_for_seven_days() -> anyhow::Resu
         store.energy_totals(bucket, bucket + 17_000)[0].energy_mwh,
         6.0
     );
+    // The partial bucket mixes an unavailable interval with a measured one.
+    store.record(
+        "example.desktop",
+        bucket + super::BUCKET_MILLISECONDS + 4_000,
+        2.0,
+        &usage,
+    );
     persist_snapshot(store.snapshot(true))?;
 
     let mut loaded = HistoryStore::load(Some(path));
@@ -85,11 +109,13 @@ fn persists_resource_buckets_and_retains_energy_for_seven_days() -> anyhow::Resu
         "final save includes the partial bucket"
     );
     assert_eq!(restored.points.first(), page.points.first());
+    let available = restored.points[1].resources.availability.unwrap();
+    assert!(!available.gpu && !available.memory && !available.network_connections);
     let totals = loaded.energy_totals(bucket, until);
     assert_eq!(totals.len(), 1);
-    assert_eq!(totals[0].energy_mwh, 6.0);
+    assert_eq!(totals[0].energy_mwh, 8.0);
     assert_eq!(totals[0].energy_source, "rapl");
-    for (days, expected_energy) in [(2, 6.0), (8, 0.0)] {
+    for (days, expected_energy) in [(2, 8.0), (8, 0.0)] {
         let timestamp = bucket + days * 24 * 60 * 60 * 1000;
         loaded.record("other.desktop", timestamp, 1.0, &ResourceUsage::default());
         assert!(
