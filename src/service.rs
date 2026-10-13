@@ -8,7 +8,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use tokio::{
     sync::{Mutex, Notify, RwLock, broadcast, oneshot, watch},
     time,
@@ -703,13 +703,13 @@ async fn sample_resources(service: &ApplicationService, sampler: &mut ResourceSa
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct UpdateSettingsParams {
     pub target_id: String,
     pub category: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct ResourceHistoryParams {
     pub target_id: String,
     #[serde(default)]
@@ -728,7 +728,7 @@ const fn default_history_limit() -> usize {
     1_000
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct EnergyOverviewParams {
     pub since_ms: u64,
     #[serde(default = "default_energy_limit")]

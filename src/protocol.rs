@@ -1,7 +1,10 @@
 use serde_json::Value;
 
 mod fixtures;
+pub mod methods;
 pub mod replies;
+
+pub use methods::METHODS;
 
 pub const NAME: &str = "app-api";
 pub const VERSION: u8 = 1;
@@ -12,20 +15,13 @@ pub mod stream {
     pub const OPERATION: &str = "applications.operation";
 }
 
-pub const METHODS: &[&str] = &[
-    "applications.query",
-    "applications.revision",
-    "applications.history",
-    "applications.energyOverview",
-    "applications.refresh",
-    "applications.execute",
-    "applications.operation.status",
-    "applications.settings.update",
-];
 pub const STREAMS: &[&str] = &[stream::APPLICATIONS, stream::WINDOWS, stream::OPERATION];
 
 pub fn contract_fixture() -> serde_json::Result<Value> {
-    shelllist_daemon_core::load_fixture(include_str!("../test_support/app-api-v1.json"))
+    let mut fixture =
+        shelllist_daemon_core::load_fixture(include_str!("../test_support/app-api-v1.json"))?;
+    fixture["registry"] = registry()?;
+    Ok(fixture)
 }
 
 /// Canonical serialized resource shapes consumed by Shelllist presentation.
@@ -78,7 +74,10 @@ pub fn event_contract_fixture() -> Value {
 }
 
 pub fn registry() -> serde_json::Result<Value> {
-    Ok(contract_fixture()?["registry"].take())
+    Ok(serde_json::json!({
+        "methods": methods::Method::ALL.iter().map(|method| method.registry_entry()).collect::<Vec<_>>(),
+        "streams": STREAMS.iter().map(|name| serde_json::json!({"name": name})).collect::<Vec<_>>()
+    }))
 }
 
 #[cfg(test)]

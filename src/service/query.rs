@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::{
     catalog::{Catalog, CatalogEntry},
@@ -14,7 +14,7 @@ use crate::{
 
 const JSON_SAFE_INTEGER_MASK: u64 = (1_u64 << 53) - 1;
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct QueryParams {
     #[serde(default)]
     pub query: String,

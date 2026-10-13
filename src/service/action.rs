@@ -2,7 +2,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::Context;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use tokio::time;
 
@@ -20,7 +20,7 @@ mod close;
 #[cfg(test)]
 mod tests;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum ApplicationAction {
     Activate,
@@ -32,7 +32,7 @@ pub enum ApplicationAction {
     DesktopAction,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ExecuteParams {
     pub target_id: String,
     pub action: ApplicationAction,

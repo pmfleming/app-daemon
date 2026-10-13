@@ -1,17 +1,21 @@
 use std::sync::Arc;
 
-use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use serde::{Serialize, de::DeserializeOwned};
 use serde_json::Value;
 use shelllist_daemon_core::{ApiError as EnvelopeError, ApiIdentity, error as error_envelope};
 
 use crate::{
+    model::{
+        ApplicationEnergyOverview, ApplicationPage, ApplicationResourceHistory, OperationResult,
+    },
     protocol::{
         self,
-        replies::{ErrorCode, Reply, Settings},
+        methods::{OperationStatusParams, Request},
+        replies::{ErrorCode, Settings},
     },
     service::{
-        ApplicationService, EnergyOverviewParams, ExecuteParams, ResourceHistoryParams,
-        UpdateSettingsParams,
+        ApplicationService, EnergyOverviewParams, ExecuteParams, QueryParams,
+        ResourceHistoryParams, UpdateSettingsParams,
     },
 };
 
@@ -24,11 +28,6 @@ const API: ApiIdentity = ApiIdentity::new(PROTOCOL, VERSION as u32);
 
 pub struct ApiService {
     applications: Arc<ApplicationService>,
-}
-
-#[derive(Deserialize)]
-struct OperationStatusParams {
-    operation_id: String,
 }
 
 impl ApiService {
@@ -47,99 +46,85 @@ impl ApiService {
             Err(error) => return self::error(ErrorCode::DaemonUnavailable, error.to_string()),
         };
         tracing::debug!(%method, "app-api request started");
-        self.request(method, params, owner)
+        let request = match Request::decode(method, params) {
+            Ok(request) => request,
+            Err(error) => return error_response(error),
+        };
+        request
+            .dispatch(self, owner)
             .await
             .map_or_else(error_response, success)
     }
 
-    async fn request(
+    pub(crate) async fn query(
         &self,
-        method: &str,
-        params: Value,
-        owner: Option<String>,
-    ) -> Result<Reply, ApiError> {
-        match method {
-            "applications.query" => self.query(params).await,
-            "applications.revision" => self.revision().await,
-            "applications.history" => self.history(params).await,
-            "applications.energyOverview" => self.energy_overview(params).await,
-            "applications.refresh" => self.refresh(params).await,
-            "applications.execute" => self.execute(params, owner).await,
-            "applications.operation.status" => {
-                self.operation_status(params, owner.as_deref()).await
-            }
-            "applications.settings.update" => self.update_settings(params).await,
-            _ => Err((
-                ErrorCode::UnsupportedMethod,
-                format!("Unsupported app-api method: {method}"),
-            )),
-        }
+        params: QueryParams,
+        _owner: Option<String>,
+    ) -> Result<ApplicationPage, ApiError> {
+        Ok(self.applications.query(params).await)
     }
 
-    async fn query(&self, params: Value) -> Result<Reply, ApiError> {
-        Ok(Reply::Applications {
-            applications: self.applications.query(decode(params)?).await,
-        })
+    pub(crate) async fn revision(
+        &self,
+        _params: Value,
+        _owner: Option<String>,
+    ) -> Result<u64, ApiError> {
+        Ok(self.applications.revision().await)
     }
 
-    async fn revision(&self) -> Result<Reply, ApiError> {
-        Ok(Reply::Revision {
-            revision: self.applications.revision().await,
-        })
-    }
-
-    async fn history(&self, params: Value) -> Result<Reply, ApiError> {
-        let query: ResourceHistoryParams = decode(params)?;
+    pub(crate) async fn history(
+        &self,
+        params: ResourceHistoryParams,
+        _owner: Option<String>,
+    ) -> Result<ApplicationResourceHistory, ApiError> {
         self.applications
-            .resource_history(query)
+            .resource_history(params)
             .await
-            .map(|history| Reply::History { history })
             .map_err(|error| (ErrorCode::ValidationError, error.to_string()))
     }
 
-    async fn energy_overview(&self, params: Value) -> Result<Reply, ApiError> {
-        Ok(Reply::EnergyOverview {
-            energy_overview: self
-                .applications
-                .energy_overview(decode::<EnergyOverviewParams>(params)?)
-                .await,
-        })
+    pub(crate) async fn energy_overview(
+        &self,
+        params: EnergyOverviewParams,
+        _owner: Option<String>,
+    ) -> Result<ApplicationEnergyOverview, ApiError> {
+        Ok(self.applications.energy_overview(params).await)
     }
 
-    async fn refresh(&self, params: Value) -> Result<Reply, ApiError> {
-        let query = decode(params)?;
+    pub(crate) async fn refresh(
+        &self,
+        params: QueryParams,
+        _owner: Option<String>,
+    ) -> Result<ApplicationPage, ApiError> {
         self.applications.refresh().await;
-        Ok(Reply::Applications {
-            applications: self.applications.query(query).await,
-        })
+        Ok(self.applications.query(params).await)
     }
 
-    async fn update_settings(&self, params: Value) -> Result<Reply, ApiError> {
-        let params: UpdateSettingsParams = decode(params)?;
+    pub(crate) async fn update_settings(
+        &self,
+        params: UpdateSettingsParams,
+        _owner: Option<String>,
+    ) -> Result<Settings, ApiError> {
         let target_id = params.target_id.clone();
         self.applications
             .update_settings(params)
             .await
-            .map(|settings| Reply::Settings {
-                settings: Settings {
-                    target_id,
-                    category: settings.category,
-                    workspace_id: settings.workspace_id,
-                },
+            .map(|settings| Settings {
+                target_id,
+                category: settings.category,
+                workspace_id: settings.workspace_id,
             })
             .map_err(|error| (ErrorCode::ValidationError, error.to_string()))
     }
 
-    async fn operation_status(
+    pub(crate) async fn operation_status(
         &self,
-        params: Value,
-        owner: Option<&str>,
-    ) -> Result<Reply, ApiError> {
-        let params: OperationStatusParams = decode(params)?;
+        params: OperationStatusParams,
+        owner: Option<String>,
+    ) -> Result<OperationResult, ApiError> {
         self.applications
-            .operation_status_owned(&params.operation_id, owner)
+            .operation_status_owned(&params.operation_id, owner.as_deref())
             .await
-            .map(|operation_status| Reply::OperationStatus { operation_status })
             .ok_or_else(|| {
                 (
                     ErrorCode::RequestNotFound,
@@ -148,18 +133,21 @@ impl ApiService {
             })
     }
 
-    async fn execute(&self, params: Value, owner: Option<String>) -> Result<Reply, ApiError> {
+    pub(crate) async fn execute(
+        &self,
+        params: ExecuteParams,
+        owner: Option<String>,
+    ) -> Result<OperationResult, ApiError> {
         self.applications
-            .execute_owned(decode::<ExecuteParams>(params)?, owner)
+            .execute_owned(params, owner)
             .await
-            .map(|operation| Reply::Operation { operation })
             .map_err(|error| (ErrorCode::OperationFailed, error.to_string()))
     }
 }
 
-type ApiError = (ErrorCode, String);
+pub(crate) type ApiError = (ErrorCode, String);
 
-fn decode<T: DeserializeOwned>(value: Value) -> Result<T, ApiError> {
+pub(crate) fn decode<T: DeserializeOwned>(value: Value) -> Result<T, ApiError> {
     serde_json::from_value(value).map_err(|error| (ErrorCode::ValidationError, error.to_string()))
 }
 

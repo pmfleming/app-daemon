@@ -1,7 +1,10 @@
 //! Offline examples use the same reply DTOs and envelope constructors as dispatch.
 use serde_json::Value;
 
-use super::replies::{ErrorCode, Reply, RequestKind, Settings, Subscription};
+use super::{
+    methods::{self, Method},
+    replies::{ErrorCode, Reply, RequestKind, Settings, Subscription},
+};
 use crate::{api, model::*};
 
 pub(super) fn operation(status: &str) -> OperationResult {
@@ -58,61 +61,41 @@ fn page() -> ApplicationPage {
 pub(super) fn replies() -> Value {
     let mut fixture = serde_json::Map::new();
     for (method, reply) in [
+        (Method::Query.name(), methods::Query::reply(page())),
+        (Method::Refresh.name(), methods::Refresh::reply(page())),
+        (Method::Revision.name(), methods::Revision::reply(41)),
         (
-            "applications.query",
-            Reply::Applications {
-                applications: page(),
-            },
-        ),
-        (
-            "applications.refresh",
-            Reply::Applications {
-                applications: page(),
-            },
-        ),
-        ("applications.revision", Reply::Revision { revision: 41 }),
-        (
-            "applications.history",
-            Reply::History {
-                history: ApplicationResourceHistory {
-                    target_id: "Alpha".into(),
-                    summary: HistorySummary {
-                        revision: "history-example".into(),
-                        ..Default::default()
-                    },
-                    points: vec![],
-                    has_more: false,
-                    next_cursor: None,
+            Method::History.name(),
+            methods::History::reply(ApplicationResourceHistory {
+                target_id: "Alpha".into(),
+                summary: HistorySummary {
+                    revision: "history-example".into(),
+                    ..Default::default()
                 },
-            },
+                points: vec![],
+                has_more: false,
+                next_cursor: None,
+            }),
         ),
         (
-            "applications.energyOverview",
-            Reply::EnergyOverview {
-                energy_overview: ApplicationEnergyOverview::default(),
-            },
+            Method::EnergyOverview.name(),
+            methods::EnergyOverview::reply(ApplicationEnergyOverview::default()),
         ),
         (
-            "applications.settings.update",
-            Reply::Settings {
-                settings: Settings {
-                    target_id: "Alpha".into(),
-                    category: "code".into(),
-                    workspace_id: Some("3".into()),
-                },
-            },
+            Method::UpdateSettings.name(),
+            methods::UpdateSettings::reply(Settings {
+                target_id: "Alpha".into(),
+                category: "code".into(),
+                workspace_id: Some("3".into()),
+            }),
         ),
         (
-            "applications.execute",
-            Reply::Operation {
-                operation: operation("accepted"),
-            },
+            Method::Execute.name(),
+            methods::Execute::reply(operation("accepted")),
         ),
         (
-            "applications.operation.status",
-            Reply::OperationStatus {
-                operation_status: operation("completed"),
-            },
+            Method::OperationStatus.name(),
+            methods::OperationStatus::reply(operation("completed")),
         ),
         (
             "subscribe",
