@@ -18,6 +18,7 @@ use crate::{
 pub(crate) mod events;
 
 pub struct AppDaemon {
+    boundary: shelllist_daemon_tokio::ServiceBoundary,
     api: ApiService,
     applications: Arc<ApplicationService>,
     subscriptions: Arc<OwnedTaskRegistry>,
@@ -31,6 +32,14 @@ impl AppDaemon {
         params_json: &str,
         #[zbus(header)] header: Header<'_>,
     ) -> String {
+        let admitted =
+            match self
+                .boundary
+                .call(header.sender().map(|s| s.as_str()), method, params_json)
+            {
+                Ok(admitted) => admitted,
+                Err(response) => return response,
+            };
         let params: Value = match serde_json::from_str(params_json) {
             Ok(value) => value,
             Err(error) => {
@@ -41,10 +50,12 @@ impl AppDaemon {
                 .to_string();
             }
         };
-        self.api
-            .dispatch_owned(method, params, header.sender().map(ToString::to_string))
-            .await
-            .to_string()
+        admitted.encode(
+            &self
+                .api
+                .dispatch_owned(method, params, header.sender().map(ToString::to_string))
+                .await,
+        )
     }
 
     async fn subscribe(
@@ -53,6 +64,13 @@ impl AppDaemon {
         #[zbus(header)] header: Header<'_>,
         #[zbus(signal_emitter)] emitter: SignalEmitter<'_>,
     ) -> String {
+        let _admitted = match self
+            .boundary
+            .subscribe(header.sender().map(|s| s.as_str()), &streams)
+        {
+            Ok(admitted) => admitted,
+            Err(response) => return response,
+        };
         let _permit = match self.applications.request_permit().await {
             Ok(permit) => permit,
             Err(error) => {
@@ -99,6 +117,13 @@ impl AppDaemon {
     }
 
     async fn cancel(&self, request_id: &str, #[zbus(header)] header: Header<'_>) -> String {
+        let _admitted = match self
+            .boundary
+            .cancel(header.sender().map(|s| s.as_str()), request_id)
+        {
+            Ok(admitted) => admitted,
+            Err(response) => return response,
+        };
         let owner = header.sender().map(ToString::to_string);
         if self
             .subscriptions
@@ -239,6 +264,9 @@ pub async fn run() -> Result<()> {
     let shutdown_applications = Arc::clone(&applications);
     let subscriptions = Arc::new(OwnedTaskRegistry::default());
     let daemon = AppDaemon {
+        boundary: shelllist_daemon_tokio::ServiceBoundary::new(
+            shelllist_daemon_core::ApiIdentity::new(api::PROTOCOL, api::VERSION as u32),
+        ),
         api: ApiService::new(Arc::clone(&applications)),
         applications,
         subscriptions: Arc::clone(&subscriptions),
