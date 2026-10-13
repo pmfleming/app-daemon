@@ -1,3 +1,7 @@
 /target
 .direnv
 /result
+
+# LLVM coverage artifacts
+*.profraw
+*.profdata
