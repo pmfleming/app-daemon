@@ -31,7 +31,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1", features = ["v4"] }
 walkdir = "2"
-zbus = { version = "5", features = ["tokio"] }
+zbus = { version = "5.18", features = ["tokio"] }
 
 [[bench]]
 name = "workloads"

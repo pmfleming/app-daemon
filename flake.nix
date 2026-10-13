@@ -16,7 +16,10 @@
       daemonFramework,
     }:
     let
-      systems = [ "x86_64-linux" ];
+      systems = [
+        "x86_64-linux"
+        "aarch64-linux"
+      ];
       forAllSystems = f: nixpkgs.lib.genAttrs systems (system: f system nixpkgs.legacyPackages.${system});
     in
     {
@@ -100,21 +103,19 @@
       devShells = forAllSystems (
         system: pkgs: {
           default = pkgs.mkShell {
-            packages = with pkgs; [
-              bash
-              coreutils
-              dbus
-              cargo
-              cargo-llvm-cov
-              cargo-machete
-              clippy
-              jq
-              python3
-              rust-analyzer
-              rustc
-              rustfmt
-              llvmPackages.llvm
-            ];
+            packages =
+              (daemonFramework.lib.toolchain pkgs).packages
+              ++ (with pkgs; [
+                bash
+                coreutils
+                dbus
+                cargo-llvm-cov
+                cargo-machete
+                jq
+                python3
+                rust-analyzer
+                llvmPackages.llvm
+              ]);
             RUST_BACKTRACE = "1";
             RUST_LOG = "app_daemon=debug";
           };
