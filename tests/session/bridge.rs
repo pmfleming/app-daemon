@@ -73,8 +73,8 @@ impl Bridge {
     async fn completed(&mut self, id: &str) -> Result<()> {
         self.until(|v| {
             v["kind"] == "event"
-                && v["event"]["operation"]["id"] == id
-                && v["event"]["operation"]["status"] == "completed"
+                && v["event"]["data"]["operation"]["id"] == id
+                && v["event"]["data"]["operation"]["status"] == "completed"
         })
         .await?;
         Ok(())
@@ -206,7 +206,7 @@ async fn oversized_effect_is_not_dispatched_and_two_bridges_remain_owned_and_usa
         assert!(
             !seen
                 .iter()
-                .any(|v| v["kind"] == "event" && v["event"]["operation"]["id"] == foreign)
+                .any(|v| v["kind"] == "event" && v["event"]["data"]["operation"]["id"] == foreign)
         );
     }
     session.shutdown().await

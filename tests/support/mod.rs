@@ -427,18 +427,20 @@ pub async fn operation(events: &mut SignalStream<'_>, id: &str, status: &str) ->
         while let Some(message) = events.next().await {
             let (stream, body): (String, String) = message.body().deserialize()?;
             let event: Value = serde_json::from_str(&body)?;
-            if event["operation"]["id"] == id && event["operation"]["status"] == status {
+            if event["data"]["operation"]["id"] == id
+                && event["data"]["operation"]["status"] == status
+            {
                 assert_eq!(stream, "applications.operation");
                 assert_eq!(event["stream"], stream);
                 assert_eq!(event["protocol"], "app-api");
-                assert_eq!(event["version"], 1);
+                assert_eq!(event["version"], 2);
                 assert_eq!(event["event"], status);
                 assert!(event["subscription_id"].is_string());
-                assert!(event.get("data").is_none());
+                assert!(event.get("operation").is_none());
                 for private in ["unit", "provenance"] {
-                    assert!(event["operation"].get(private).is_none());
+                    assert!(event["data"]["operation"].get(private).is_none());
                 }
-                return Ok(event["operation"].clone());
+                return Ok(event["data"]["operation"].clone());
             }
         }
         anyhow::bail!("event stream closed")

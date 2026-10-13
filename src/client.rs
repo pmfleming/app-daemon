@@ -1,12 +1,10 @@
 use anyhow::Result;
 use serde_json::Value;
 use shelllist_daemon_core::DaemonEndpoint;
-use shelllist_daemon_tokio::{
-    CallFailure, CancelMode, CorrelationPolicy, JsonlClientConfig, run_jsonl_client,
-};
+use shelllist_daemon_tokio::{CorrelationPolicy, JsonlClientConfig, run_jsonl_client};
 
 use crate::{
-    api::{self, BUS_NAME, INTERFACE, OBJECT_PATH},
+    api::{BUS_NAME, INTERFACE, OBJECT_PATH},
     protocol,
 };
 
@@ -50,19 +48,10 @@ impl CorrelationPolicy for AppCorrelation {
     }
 }
 
-fn call_failure(_method: &str, _error: &anyhow::Error) -> CallFailure {
-    CallFailure::Api(api::error(
-        protocol::replies::ErrorCode::DaemonUnavailable,
-        "app-daemon session service is unavailable".into(),
-    ))
-}
-
 pub async fn run() -> Result<()> {
     run_jsonl_client(JsonlClientConfig {
         endpoint: ENDPOINT,
         correlation: AppCorrelation,
-        cancel_mode: CancelMode::Json,
-        call_failure,
         pending_event_limit: 32,
         max_in_flight_requests: 64,
         shutdown_timeout: Some(std::time::Duration::from_secs(5)),
