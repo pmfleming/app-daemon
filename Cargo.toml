@@ -21,6 +21,7 @@ notify = "8"
 rustix = { version = "1", features = ["net"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+schemars = "1.2.3"
 # Co-development invariant: use the same live sibling framework as every daemon.
 # Never vendor or revision-pin these crates; test changes across all consumers.
 shelllist-daemon-core = { path = "../daemon-framework/crates/shelllist-daemon-core" }

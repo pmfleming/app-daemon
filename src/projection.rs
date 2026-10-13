@@ -4,7 +4,7 @@ use crate::model::ResourceAvailability;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(transparent)]
 pub struct MetricAvailability(pub BTreeMap<String, bool>);
 impl Default for MetricAvailability {

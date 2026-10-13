@@ -14,7 +14,7 @@ use crate::{
 
 const JSON_SAFE_INTEGER_MASK: u64 = (1_u64 << 53) - 1;
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize, schemars::JsonSchema)]
 pub struct QueryParams {
     #[serde(default)]
     pub query: String,

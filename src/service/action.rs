@@ -20,7 +20,7 @@ mod close;
 #[cfg(test)]
 mod tests;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(rename_all = "kebab-case")]
 pub enum ApplicationAction {
     Activate,
@@ -32,7 +32,7 @@ pub enum ApplicationAction {
     DesktopAction,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 pub struct ExecuteParams {
     pub target_id: String,
     pub action: ApplicationAction,

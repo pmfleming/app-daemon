@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 /// CPU, memory, and GPU observations for the current interval.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
+#[derive(schemars::JsonSchema)]
 pub struct ComputeUsage {
     /// Top-compatible CPU usage: 100% is one fully occupied logical CPU.
     pub cpu_percent: f64,
@@ -43,6 +44,7 @@ impl ComputeUsage {
 /// Interval I/O and allocated storage footprints, in bytes unless named otherwise.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
+#[derive(schemars::JsonSchema)]
 pub struct StorageUsage {
     /// Physical storage bytes completed during the current interval.
     pub disk_read_bytes: u64,
@@ -86,6 +88,7 @@ impl StorageUsage {
 /// Socket-attributed byte deltas, rates, and connection count.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
+#[derive(schemars::JsonSchema)]
 pub struct NetworkUsage {
     pub network_receive_bytes: u64,
     pub network_transmit_bytes: u64,
@@ -106,6 +109,7 @@ impl NetworkUsage {
 /// Estimated energy attribution together with its source and confidence labels.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
+#[derive(schemars::JsonSchema)]
 pub struct EnergyUsage {
     /// Application-attributed energy. This is only populated for attributable domains.
     pub energy_mwh: f64,
@@ -122,6 +126,7 @@ pub struct EnergyUsage {
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
+#[derive(schemars::JsonSchema)]
 pub struct ResourceMeasurement {
     pub sample_interval_ms: u64,
     pub attribution_method: String,
@@ -137,7 +142,7 @@ pub struct ResourceMeasurement {
     pub resources_shared: bool,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ResourceUsage {
     #[serde(default)]
     pub metric_availability: crate::projection::MetricAvailability,
@@ -160,14 +165,14 @@ impl ResourceUsage {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct DesktopActionSummary {
     pub id: String,
     pub name: String,
     pub icon: String,
 }
 
-#[derive(Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct WindowSummary {
     pub id: String,
     pub title: String,
@@ -180,7 +185,7 @@ pub struct WindowSummary {
     pub resources: ResourceUsage,
 }
 
-#[derive(Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ApplicationIdentity {
     pub id: String,
     pub kind: String,
@@ -197,7 +202,7 @@ pub struct ApplicationIdentity {
     pub startup_class: String,
 }
 
-#[derive(Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ApplicationRuntime {
     pub running: bool,
     pub focused: bool,
@@ -207,7 +212,7 @@ pub struct ApplicationRuntime {
     pub instances: Vec<WindowSummary>,
 }
 
-#[derive(Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ApplicationSummary {
     #[serde(flatten)]
     pub identity: ApplicationIdentity,
@@ -225,7 +230,7 @@ pub struct ApplicationSummary {
     pub score: i64,
 }
 
-#[derive(Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ApplicationPage {
     pub revision: u64,
     pub generation: u64,
@@ -236,6 +241,7 @@ pub struct ApplicationPage {
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
+#[derive(schemars::JsonSchema)]
 pub struct ResourcePeaks {
     pub cpu_percent: f64,
     pub cpu_percent_of_machine: f64,
@@ -253,6 +259,7 @@ pub struct ResourcePeaks {
 /// Missing metadata in older history files means unknown, not measured zero.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
+#[derive(schemars::JsonSchema)]
 pub struct ResourceAvailability {
     pub cpu: bool,
     pub memory: bool,
@@ -296,6 +303,7 @@ impl ResourceAvailability {
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
+#[derive(schemars::JsonSchema)]
 pub struct HistoricalResourceUsage {
     #[serde(skip_deserializing)]
     pub metric_availability: crate::projection::MetricAvailability,
@@ -319,7 +327,7 @@ pub struct HistoricalResourceUsage {
     pub peaks: ResourcePeaks,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ResourceHistoryPoint {
     pub timestamp_ms: u64,
     pub duration_ms: u64,
@@ -327,7 +335,7 @@ pub struct ResourceHistoryPoint {
     pub resources: HistoricalResourceUsage,
 }
 
-#[derive(Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ApplicationResourceHistory {
     pub target_id: String,
     pub summary: HistorySummary,
@@ -339,7 +347,7 @@ pub struct ApplicationResourceHistory {
 }
 
 /// Canonical statistics over a selected window, independent of response pagination.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct HistorySummary {
     #[serde(default)]
     pub energy_confidence: String,
@@ -350,7 +358,7 @@ pub struct HistorySummary {
     pub metrics: std::collections::BTreeMap<String, MetricSummary>,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct MetricSummary {
     #[serde(default)]
     pub observed_total: Option<f64>,
@@ -365,6 +373,7 @@ pub struct MetricSummary {
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
+#[derive(schemars::JsonSchema)]
 pub struct ApplicationEnergySummary {
     pub target_id: String,
     pub name: String,
@@ -375,6 +384,7 @@ pub struct ApplicationEnergySummary {
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
+#[derive(schemars::JsonSchema)]
 pub struct ApplicationEnergyOverview {
     pub since_ms: u64,
     pub until_ms: u64,
@@ -386,7 +396,7 @@ pub struct ApplicationEnergyOverview {
 
 /// Launch handoff and workspace placement have independent outcomes. A
 /// completed launch with unavailable/failed placement must never be replayed.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct WorkspacePlacement {
     pub workspace_id: String,
     pub status: PlacementStatus,
@@ -396,6 +406,7 @@ pub struct WorkspacePlacement {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
+#[derive(schemars::JsonSchema)]
 pub enum PlacementStatus {
     Pending,
     Placed,
@@ -403,7 +414,7 @@ pub enum PlacementStatus {
     Failed,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct CloseObservation {
     pub targeted_window_ids: Vec<String>,
     pub dispatched_window_ids: Vec<String>,
@@ -412,7 +423,7 @@ pub struct CloseObservation {
     pub dispatch_error: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct OperationResult {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub close: Option<CloseObservation>,

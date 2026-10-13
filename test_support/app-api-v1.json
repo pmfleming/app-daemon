@@ -1,95 +1,3421 @@
 {
-  "protocol": "app-api",
-  "version": 1,
   "operation_outcome": {
-    "placement_statuses": ["pending", "placed", "unavailable", "failed"],
     "partial_success_example": {
-      "id": "operation-example",
       "action": "launch",
-      "target_id": "org.example.App.desktop",
-      "status": "completed",
-      "message": "Application started; workspace placement unavailable. Do not relaunch automatically.",
+      "id": "operation-example",
       "launch_backend": "uwsm-app",
       "launch_scope": "app-graphical.slice",
+      "message": "Application started; workspace placement unavailable. Do not relaunch automatically.",
       "placement": {
-        "workspace_id": "3",
+        "reason": "no unambiguous new window with verified launch ownership",
         "status": "unavailable",
-        "reason": "no unambiguous new window with verified launch ownership"
-      }
-    }
+        "workspace_id": "3"
+      },
+      "status": "completed",
+      "target_id": "org.example.App.desktop"
+    },
+    "placement_statuses": [
+      "pending",
+      "placed",
+      "unavailable",
+      "failed"
+    ]
   },
+  "protocol": "app-api",
   "registry": {
     "methods": [
       {
         "name": "applications.query",
         "params_example": {
-          "query": "",
           "category": "",
           "generation": 1,
-          "limit": 500
+          "limit": 500,
+          "query": ""
+        },
+        "params_schema": {
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "properties": {
+            "category": {
+              "default": "",
+              "type": "string"
+            },
+            "generation": {
+              "default": 0,
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "limit": {
+              "default": 500,
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "query": {
+              "default": "",
+              "type": "string"
+            }
+          },
+          "title": "QueryParams",
+          "type": "object"
+        },
+        "policy": {
+          "ack_budget_ms": 30000,
+          "conflict_domain": "applications",
+          "execution": "read",
+          "request_bytes": 1048576,
+          "result_bytes": 16777216,
+          "sensitivity": "sensitive-read"
         },
         "response_key": "applications",
+        "result_schema": {
+          "$defs": {
+            "ApplicationSummary": {
+              "description": "CPU, memory, and GPU observations for the current interval.",
+              "properties": {
+                "attributed_fraction": {
+                  "default": 0.0,
+                  "format": "double",
+                  "type": "number"
+                },
+                "battery_percent": {
+                  "default": 0.0,
+                  "format": "double",
+                  "type": "number"
+                },
+                "battery_percent_per_hour": {
+                  "default": 0.0,
+                  "format": "double",
+                  "type": "number"
+                },
+                "cancelled_write_bytes": {
+                  "default": 0,
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "categories": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "category": {
+                  "description": "One of Shelllist's five launcher categories.",
+                  "type": "string"
+                },
+                "comment": {
+                  "type": "string"
+                },
+                "cpu_percent": {
+                  "default": 0.0,
+                  "description": "Top-compatible CPU usage: 100% is one fully occupied logical CPU.",
+                  "format": "double",
+                  "type": "number"
+                },
+                "cpu_percent_of_machine": {
+                  "default": 0.0,
+                  "description": "CPU usage as a percentage of the whole machine, always capped at 100%.",
+                  "format": "double",
+                  "type": "number"
+                },
+                "default_workspace_id": {
+                  "description": "Preferred Hyprland workspace for newly launched windows.",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "desktop_actions": {
+                  "items": {
+                    "$ref": "#/$defs/DesktopActionSummary"
+                  },
+                  "type": "array"
+                },
+                "disk_read_bytes": {
+                  "default": 0,
+                  "description": "Physical storage bytes completed during the current interval.",
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "disk_read_bytes_per_second": {
+                  "default": 0.0,
+                  "format": "double",
+                  "type": "number"
+                },
+                "disk_space_permanent_bytes": {
+                  "default": 0,
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "disk_space_temporary_bytes": {
+                  "default": 0,
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "disk_space_total_bytes": {
+                  "default": 0,
+                  "description": "Allocated size of identified application-owned data directories.",
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "disk_write_bytes": {
+                  "default": 0,
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "disk_write_bytes_per_second": {
+                  "default": 0.0,
+                  "format": "double",
+                  "type": "number"
+                },
+                "energy_confidence": {
+                  "default": "",
+                  "type": "string"
+                },
+                "energy_mwh": {
+                  "default": 0.0,
+                  "description": "Application-attributed energy. This is only populated for attributable domains.",
+                  "format": "double",
+                  "type": "number"
+                },
+                "energy_source": {
+                  "default": "",
+                  "type": "string"
+                },
+                "estimated_app_power_watts": {
+                  "default": 0.0,
+                  "format": "double",
+                  "type": "number"
+                },
+                "focused": {
+                  "type": "boolean"
+                },
+                "generic_name": {
+                  "type": "string"
+                },
+                "gpu_busy_percent": {
+                  "default": 0.0,
+                  "description": "Occupancy of the busiest DRM engine, capped at 100%.",
+                  "format": "double",
+                  "type": "number"
+                },
+                "gpu_memory_allocated_bytes": {
+                  "default": 0,
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "gpu_memory_bytes": {
+                  "default": 0,
+                  "description": "Resident GPU memory reported by DRM, falling back to allocated memory.",
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "gpu_memory_resident_bytes": {
+                  "default": 0,
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "gpu_percent": {
+                  "default": 0.0,
+                  "description": "Aggregate DRM engine occupancy; it can exceed 100% across engines.",
+                  "format": "double",
+                  "type": "number"
+                },
+                "icon": {
+                  "type": "string"
+                },
+                "id": {
+                  "type": "string"
+                },
+                "instances": {
+                  "items": {
+                    "$ref": "#/$defs/WindowSummary"
+                  },
+                  "type": "array"
+                },
+                "keywords": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "kind": {
+                  "type": "string"
+                },
+                "logical_read_bytes": {
+                  "default": 0,
+                  "description": "Logical process I/O, including page-cache hits.",
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "logical_read_bytes_per_second": {
+                  "default": 0.0,
+                  "format": "double",
+                  "type": "number"
+                },
+                "logical_write_bytes": {
+                  "default": 0,
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "logical_write_bytes_per_second": {
+                  "default": 0.0,
+                  "format": "double",
+                  "type": "number"
+                },
+                "major_faults_per_second": {
+                  "default": 0.0,
+                  "format": "double",
+                  "type": "number"
+                },
+                "match_kind": {
+                  "description": "The strongest textual match tier, such as `exact-name` or `acronym`.",
+                  "type": "string"
+                },
+                "match_score": {
+                  "description": "Textual relevance for the active query.",
+                  "format": "int64",
+                  "type": "integer"
+                },
+                "measurement": {
+                  "$ref": "#/$defs/ResourceMeasurement"
+                },
+                "memory_bytes": {
+                  "default": 0,
+                  "description": "Best available physical-memory estimate: PSS when readable, RSS otherwise.",
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "memory_cgroup_bytes": {
+                  "default": 0,
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "memory_private_bytes": {
+                  "default": 0,
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "memory_pss_bytes": {
+                  "default": 0,
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "memory_rss_bytes": {
+                  "default": 0,
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "memory_swap_bytes": {
+                  "default": 0,
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "metric_availability": {
+                  "additionalProperties": {
+                    "type": "boolean"
+                  },
+                  "default": {
+                    "attributed_fraction": false,
+                    "average_power_watts": false,
+                    "battery_percent": false,
+                    "battery_percent_per_hour": false,
+                    "cancelled_write_bytes": false,
+                    "cpu_percent": false,
+                    "cpu_percent_of_machine": false,
+                    "disk_read_bytes": false,
+                    "disk_read_bytes_per_second": false,
+                    "disk_space_permanent_bytes": false,
+                    "disk_space_temporary_bytes": false,
+                    "disk_space_total_bytes": false,
+                    "disk_write_bytes": false,
+                    "disk_write_bytes_per_second": false,
+                    "energy_mwh": false,
+                    "estimated_app_power_watts": false,
+                    "gpu_busy_percent": false,
+                    "gpu_memory_allocated_bytes": false,
+                    "gpu_memory_bytes": false,
+                    "gpu_memory_resident_bytes": false,
+                    "gpu_percent": false,
+                    "logical_read_bytes": false,
+                    "logical_read_bytes_per_second": false,
+                    "logical_write_bytes": false,
+                    "logical_write_bytes_per_second": false,
+                    "major_faults_per_second": false,
+                    "memory_bytes": false,
+                    "memory_cgroup_bytes": false,
+                    "memory_private_bytes": false,
+                    "memory_pss_bytes": false,
+                    "memory_rss_bytes": false,
+                    "memory_swap_bytes": false,
+                    "network_connection_count": false,
+                    "network_receive_bytes": false,
+                    "network_receive_bytes_per_second": false,
+                    "network_transmit_bytes": false,
+                    "network_transmit_bytes_per_second": false,
+                    "open_file_disk_bytes": false,
+                    "power_watts": false,
+                    "process_count": false,
+                    "read_operations": false,
+                    "read_operations_per_second": false,
+                    "referenced_file_disk_bytes": false,
+                    "referenced_file_permanent_bytes": false,
+                    "referenced_file_temporary_bytes": false,
+                    "thread_count": false,
+                    "write_operations": false,
+                    "write_operations_per_second": false
+                  },
+                  "type": "object"
+                },
+                "name": {
+                  "type": "string"
+                },
+                "network_connection_count": {
+                  "default": 0,
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "network_receive_bytes": {
+                  "default": 0,
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "network_receive_bytes_per_second": {
+                  "default": 0.0,
+                  "format": "double",
+                  "type": "number"
+                },
+                "network_transmit_bytes": {
+                  "default": 0,
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "network_transmit_bytes_per_second": {
+                  "default": 0.0,
+                  "format": "double",
+                  "type": "number"
+                },
+                "open_file_disk_bytes": {
+                  "default": 0,
+                  "description": "Allocated size of unique regular files currently held open.",
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "power_watts": {
+                  "default": 0.0,
+                  "description": "Estimated application power, retained under the v1-compatible field name.",
+                  "format": "double",
+                  "type": "number"
+                },
+                "process_count": {
+                  "default": 0,
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "read_operations": {
+                  "default": 0,
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "read_operations_per_second": {
+                  "default": 0.0,
+                  "format": "double",
+                  "type": "number"
+                },
+                "referenced_file_disk_bytes": {
+                  "default": 0,
+                  "description": "Allocated size of unique open or mapped regular files.",
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "referenced_file_permanent_bytes": {
+                  "default": 0,
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "referenced_file_temporary_bytes": {
+                  "default": 0,
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "revision": {
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "running": {
+                  "type": "boolean"
+                },
+                "running_count": {
+                  "format": "uint",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "runtime_score": {
+                  "description": "Focus/recency score independent of textual relevance.",
+                  "format": "int64",
+                  "type": "integer"
+                },
+                "score": {
+                  "description": "Combined sort score retained for clients that consume a single value.",
+                  "format": "int64",
+                  "type": "integer"
+                },
+                "startup_class": {
+                  "type": "string"
+                },
+                "system_power_watts": {
+                  "default": 0.0,
+                  "format": "double",
+                  "type": "number"
+                },
+                "thread_count": {
+                  "default": 0,
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "write_operations": {
+                  "default": 0,
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "write_operations_per_second": {
+                  "default": 0.0,
+                  "format": "double",
+                  "type": "number"
+                }
+              },
+              "required": [
+                "id",
+                "kind",
+                "name",
+                "generic_name",
+                "comment",
+                "icon",
+                "keywords",
+                "categories",
+                "category",
+                "default_workspace_id",
+                "startup_class",
+                "revision",
+                "running",
+                "focused",
+                "running_count",
+                "metric_availability",
+                "cpu_percent",
+                "cpu_percent_of_machine",
+                "memory_bytes",
+                "memory_rss_bytes",
+                "memory_pss_bytes",
+                "memory_private_bytes",
+                "memory_swap_bytes",
+                "memory_cgroup_bytes",
+                "process_count",
+                "thread_count",
+                "major_faults_per_second",
+                "gpu_percent",
+                "gpu_busy_percent",
+                "gpu_memory_bytes",
+                "gpu_memory_resident_bytes",
+                "gpu_memory_allocated_bytes",
+                "disk_read_bytes",
+                "disk_write_bytes",
+                "disk_read_bytes_per_second",
+                "disk_write_bytes_per_second",
+                "logical_read_bytes",
+                "logical_write_bytes",
+                "logical_read_bytes_per_second",
+                "logical_write_bytes_per_second",
+                "read_operations",
+                "write_operations",
+                "read_operations_per_second",
+                "write_operations_per_second",
+                "cancelled_write_bytes",
+                "open_file_disk_bytes",
+                "referenced_file_disk_bytes",
+                "referenced_file_temporary_bytes",
+                "referenced_file_permanent_bytes",
+                "disk_space_total_bytes",
+                "disk_space_temporary_bytes",
+                "disk_space_permanent_bytes",
+                "network_receive_bytes",
+                "network_transmit_bytes",
+                "network_receive_bytes_per_second",
+                "network_transmit_bytes_per_second",
+                "network_connection_count",
+                "energy_mwh",
+                "battery_percent",
+                "power_watts",
+                "estimated_app_power_watts",
+                "system_power_watts",
+                "battery_percent_per_hour",
+                "attributed_fraction",
+                "energy_source",
+                "energy_confidence",
+                "measurement",
+                "instances",
+                "desktop_actions",
+                "match_score",
+                "match_kind",
+                "runtime_score",
+                "score"
+              ],
+              "type": "object"
+            },
+            "DesktopActionSummary": {
+              "properties": {
+                "icon": {
+                  "type": "string"
+                },
+                "id": {
+                  "type": "string"
+                },
+                "name": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "id",
+                "name",
+                "icon"
+              ],
+              "type": "object"
+            },
+            "ResourceMeasurement": {
+              "properties": {
+                "attribution_method": {
+                  "default": "",
+                  "type": "string"
+                },
+                "coverage": {
+                  "default": 0.0,
+                  "format": "double",
+                  "type": "number"
+                },
+                "disk_space_scope": {
+                  "default": "",
+                  "type": "string"
+                },
+                "gpu_available": {
+                  "default": false,
+                  "type": "boolean"
+                },
+                "memory_source": {
+                  "default": "",
+                  "type": "string"
+                },
+                "network_available": {
+                  "default": false,
+                  "type": "boolean"
+                },
+                "network_bytes_available": {
+                  "default": false,
+                  "type": "boolean"
+                },
+                "network_connections_available": {
+                  "default": false,
+                  "type": "boolean"
+                },
+                "referenced_files_available": {
+                  "default": false,
+                  "type": "boolean"
+                },
+                "resources_shared": {
+                  "default": false,
+                  "type": "boolean"
+                },
+                "sample_interval_ms": {
+                  "default": 0,
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "storage_available": {
+                  "default": false,
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "sample_interval_ms",
+                "attribution_method",
+                "coverage",
+                "memory_source",
+                "gpu_available",
+                "storage_available",
+                "referenced_files_available",
+                "disk_space_scope",
+                "network_available",
+                "network_bytes_available",
+                "network_connections_available",
+                "resources_shared"
+              ],
+              "type": "object"
+            },
+            "WindowSummary": {
+              "description": "CPU, memory, and GPU observations for the current interval.",
+              "properties": {
+                "attributed_fraction": {
+                  "default": 0.0,
+                  "format": "double",
+                  "type": "number"
+                },
+                "battery_percent": {
+                  "default": 0.0,
+                  "format": "double",
+                  "type": "number"
+                },
+                "battery_percent_per_hour": {
+                  "default": 0.0,
+                  "format": "double",
+                  "type": "number"
+                },
+                "cancelled_write_bytes": {
+                  "default": 0,
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "class": {
+                  "type": "string"
+                },
+                "cpu_percent": {
+                  "default": 0.0,
+                  "description": "Top-compatible CPU usage: 100% is one fully occupied logical CPU.",
+                  "format": "double",
+                  "type": "number"
+                },
+                "cpu_percent_of_machine": {
+                  "default": 0.0,
+                  "description": "CPU usage as a percentage of the whole machine, always capped at 100%.",
+                  "format": "double",
+                  "type": "number"
+                },
+                "disk_read_bytes": {
+                  "default": 0,
+                  "description": "Physical storage bytes completed during the current interval.",
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "disk_read_bytes_per_second": {
+                  "default": 0.0,
+                  "format": "double",
+                  "type": "number"
+                },
+                "disk_space_permanent_bytes": {
+                  "default": 0,
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "disk_space_temporary_bytes": {
+                  "default": 0,
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "disk_space_total_bytes": {
+                  "default": 0,
+                  "description": "Allocated size of identified application-owned data directories.",
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "disk_write_bytes": {
+                  "default": 0,
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "disk_write_bytes_per_second": {
+                  "default": 0.0,
+                  "format": "double",
+                  "type": "number"
+                },
+                "energy_confidence": {
+                  "default": "",
+                  "type": "string"
+                },
+                "energy_mwh": {
+                  "default": 0.0,
+                  "description": "Application-attributed energy. This is only populated for attributable domains.",
+                  "format": "double",
+                  "type": "number"
+                },
+                "energy_source": {
+                  "default": "",
+                  "type": "string"
+                },
+                "estimated_app_power_watts": {
+                  "default": 0.0,
+                  "format": "double",
+                  "type": "number"
+                },
+                "focus_rank": {
+                  "format": "int64",
+                  "type": "integer"
+                },
+                "focused": {
+                  "type": "boolean"
+                },
+                "gpu_busy_percent": {
+                  "default": 0.0,
+                  "description": "Occupancy of the busiest DRM engine, capped at 100%.",
+                  "format": "double",
+                  "type": "number"
+                },
+                "gpu_memory_allocated_bytes": {
+                  "default": 0,
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "gpu_memory_bytes": {
+                  "default": 0,
+                  "description": "Resident GPU memory reported by DRM, falling back to allocated memory.",
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "gpu_memory_resident_bytes": {
+                  "default": 0,
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "gpu_percent": {
+                  "default": 0.0,
+                  "description": "Aggregate DRM engine occupancy; it can exceed 100% across engines.",
+                  "format": "double",
+                  "type": "number"
+                },
+                "id": {
+                  "type": "string"
+                },
+                "logical_read_bytes": {
+                  "default": 0,
+                  "description": "Logical process I/O, including page-cache hits.",
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "logical_read_bytes_per_second": {
+                  "default": 0.0,
+                  "format": "double",
+                  "type": "number"
+                },
+                "logical_write_bytes": {
+                  "default": 0,
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "logical_write_bytes_per_second": {
+                  "default": 0.0,
+                  "format": "double",
+                  "type": "number"
+                },
+                "major_faults_per_second": {
+                  "default": 0.0,
+                  "format": "double",
+                  "type": "number"
+                },
+                "measurement": {
+                  "$ref": "#/$defs/ResourceMeasurement"
+                },
+                "memory_bytes": {
+                  "default": 0,
+                  "description": "Best available physical-memory estimate: PSS when readable, RSS otherwise.",
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "memory_cgroup_bytes": {
+                  "default": 0,
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "memory_private_bytes": {
+                  "default": 0,
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "memory_pss_bytes": {
+                  "default": 0,
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "memory_rss_bytes": {
+                  "default": 0,
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "memory_swap_bytes": {
+                  "default": 0,
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "metric_availability": {
+                  "additionalProperties": {
+                    "type": "boolean"
+                  },
+                  "default": {
+                    "attributed_fraction": false,
+                    "average_power_watts": false,
+                    "battery_percent": false,
+                    "battery_percent_per_hour": false,
+                    "cancelled_write_bytes": false,
+                    "cpu_percent": false,
+                    "cpu_percent_of_machine": false,
+                    "disk_read_bytes": false,
+                    "disk_read_bytes_per_second": false,
+                    "disk_space_permanent_bytes": false,
+                    "disk_space_temporary_bytes": false,
+                    "disk_space_total_bytes": false,
+                    "disk_write_bytes": false,
+                    "disk_write_bytes_per_second": false,
+                    "energy_mwh": false,
+                    "estimated_app_power_watts": false,
+                    "gpu_busy_percent": false,
+                    "gpu_memory_allocated_bytes": false,
+                    "gpu_memory_bytes": false,
+                    "gpu_memory_resident_bytes": false,
+                    "gpu_percent": false,
+                    "logical_read_bytes": false,
+                    "logical_read_bytes_per_second": false,
+                    "logical_write_bytes": false,
+                    "logical_write_bytes_per_second": false,
+                    "major_faults_per_second": false,
+                    "memory_bytes": false,
+                    "memory_cgroup_bytes": false,
+                    "memory_private_bytes": false,
+                    "memory_pss_bytes": false,
+                    "memory_rss_bytes": false,
+                    "memory_swap_bytes": false,
+                    "network_connection_count": false,
+                    "network_receive_bytes": false,
+                    "network_receive_bytes_per_second": false,
+                    "network_transmit_bytes": false,
+                    "network_transmit_bytes_per_second": false,
+                    "open_file_disk_bytes": false,
+                    "power_watts": false,
+                    "process_count": false,
+                    "read_operations": false,
+                    "read_operations_per_second": false,
+                    "referenced_file_disk_bytes": false,
+                    "referenced_file_permanent_bytes": false,
+                    "referenced_file_temporary_bytes": false,
+                    "thread_count": false,
+                    "write_operations": false,
+                    "write_operations_per_second": false
+                  },
+                  "type": "object"
+                },
+                "network_connection_count": {
+                  "default": 0,
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "network_receive_bytes": {
+                  "default": 0,
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "network_receive_bytes_per_second": {
+                  "default": 0.0,
+                  "format": "double",
+                  "type": "number"
+                },
+                "network_transmit_bytes": {
+                  "default": 0,
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "network_transmit_bytes_per_second": {
+                  "default": 0.0,
+                  "format": "double",
+                  "type": "number"
+                },
+                "open_file_disk_bytes": {
+                  "default": 0,
+                  "description": "Allocated size of unique regular files currently held open.",
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "power_watts": {
+                  "default": 0.0,
+                  "description": "Estimated application power, retained under the v1-compatible field name.",
+                  "format": "double",
+                  "type": "number"
+                },
+                "process_count": {
+                  "default": 0,
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "read_operations": {
+                  "default": 0,
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "read_operations_per_second": {
+                  "default": 0.0,
+                  "format": "double",
+                  "type": "number"
+                },
+                "referenced_file_disk_bytes": {
+                  "default": 0,
+                  "description": "Allocated size of unique open or mapped regular files.",
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "referenced_file_permanent_bytes": {
+                  "default": 0,
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "referenced_file_temporary_bytes": {
+                  "default": 0,
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "system_power_watts": {
+                  "default": 0.0,
+                  "format": "double",
+                  "type": "number"
+                },
+                "thread_count": {
+                  "default": 0,
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "title": {
+                  "type": "string"
+                },
+                "workspace_id": {
+                  "type": "string"
+                },
+                "workspace_name": {
+                  "type": "string"
+                },
+                "write_operations": {
+                  "default": 0,
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "write_operations_per_second": {
+                  "default": 0.0,
+                  "format": "double",
+                  "type": "number"
+                }
+              },
+              "required": [
+                "id",
+                "title",
+                "class",
+                "workspace_id",
+                "workspace_name",
+                "focused",
+                "focus_rank",
+                "metric_availability",
+                "cpu_percent",
+                "cpu_percent_of_machine",
+                "memory_bytes",
+                "memory_rss_bytes",
+                "memory_pss_bytes",
+                "memory_private_bytes",
+                "memory_swap_bytes",
+                "memory_cgroup_bytes",
+                "process_count",
+                "thread_count",
+                "major_faults_per_second",
+                "gpu_percent",
+                "gpu_busy_percent",
+                "gpu_memory_bytes",
+                "gpu_memory_resident_bytes",
+                "gpu_memory_allocated_bytes",
+                "disk_read_bytes",
+                "disk_write_bytes",
+                "disk_read_bytes_per_second",
+                "disk_write_bytes_per_second",
+                "logical_read_bytes",
+                "logical_write_bytes",
+                "logical_read_bytes_per_second",
+                "logical_write_bytes_per_second",
+                "read_operations",
+                "write_operations",
+                "read_operations_per_second",
+                "write_operations_per_second",
+                "cancelled_write_bytes",
+                "open_file_disk_bytes",
+                "referenced_file_disk_bytes",
+                "referenced_file_temporary_bytes",
+                "referenced_file_permanent_bytes",
+                "disk_space_total_bytes",
+                "disk_space_temporary_bytes",
+                "disk_space_permanent_bytes",
+                "network_receive_bytes",
+                "network_transmit_bytes",
+                "network_receive_bytes_per_second",
+                "network_transmit_bytes_per_second",
+                "network_connection_count",
+                "energy_mwh",
+                "battery_percent",
+                "power_watts",
+                "estimated_app_power_watts",
+                "system_power_watts",
+                "battery_percent_per_hour",
+                "attributed_fraction",
+                "energy_source",
+                "energy_confidence",
+                "measurement"
+              ],
+              "type": "object"
+            }
+          },
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "properties": {
+            "applications": {
+              "items": {
+                "$ref": "#/$defs/ApplicationSummary"
+              },
+              "type": "array"
+            },
+            "generation": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "has_more": {
+              "type": "boolean"
+            },
+            "hyprland_available": {
+              "type": "boolean"
+            },
+            "revision": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "revision",
+            "generation",
+            "applications",
+            "has_more",
+            "hyprland_available"
+          ],
+          "title": "ApplicationPage",
+          "type": "object"
+        },
         "stream": "applications.changed"
       },
       {
         "name": "applications.revision",
         "params_example": {},
+        "params_schema": {
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "title": "AnyValue"
+        },
+        "policy": {
+          "ack_budget_ms": 30000,
+          "conflict_domain": "applications",
+          "execution": "read",
+          "request_bytes": 1048576,
+          "result_bytes": 16777216,
+          "sensitivity": "sensitive-read"
+        },
         "response_key": "revision",
+        "result_schema": {
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "format": "uint64",
+          "minimum": 0,
+          "title": "uint64",
+          "type": "integer"
+        },
         "stream": "applications.changed"
       },
       {
         "name": "applications.history",
-        "params_example": {
-          "target_id": "org.example.App.desktop",
-          "since_ms": 0,
-          "until_ms": 15000,
-          "cursor": null,
-          "limit": 1000
-        },
-        "response_key": "history",
-        "stream": "applications.changed",
         "pagination": {
           "kind": "opaque-cursor",
+          "order": "oldest-first",
           "request_field": "cursor",
           "response_field": "next_cursor",
-          "order": "oldest-first",
           "summary_field": "summary",
+          "summary_revision_field": "revision",
           "summary_scope": "full-selected-window",
-          "summary_weighting": "observed-duration",
-          "summary_revision_field": "revision"
-        }
+          "summary_weighting": "observed-duration"
+        },
+        "params_example": {
+          "cursor": null,
+          "limit": 1000,
+          "since_ms": 0,
+          "target_id": "org.example.App.desktop",
+          "until_ms": 15000
+        },
+        "params_schema": {
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "properties": {
+            "cursor": {
+              "default": null,
+              "description": "Opaque cursor returned as `next_cursor` by the previous page.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "limit": {
+              "default": 1000,
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "since_ms": {
+              "default": null,
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "target_id": {
+              "type": "string"
+            },
+            "until_ms": {
+              "default": null,
+              "description": "Freeze the selected window across pages and its statistical summary.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "target_id"
+          ],
+          "title": "ResourceHistoryParams",
+          "type": "object"
+        },
+        "policy": {
+          "ack_budget_ms": 30000,
+          "conflict_domain": "applications",
+          "execution": "read",
+          "request_bytes": 1048576,
+          "result_bytes": 16777216,
+          "sensitivity": "sensitive-read"
+        },
+        "response_key": "history",
+        "result_schema": {
+          "$defs": {
+            "HistorySummary": {
+              "description": "Canonical statistics over a selected window, independent of response pagination.",
+              "properties": {
+                "energy_confidence": {
+                  "default": "",
+                  "type": "string"
+                },
+                "metrics": {
+                  "additionalProperties": {
+                    "$ref": "#/$defs/MetricSummary"
+                  },
+                  "type": "object"
+                },
+                "revision": {
+                  "type": "string"
+                },
+                "weighting": {
+                  "type": "string"
+                },
+                "window_end_ms": {
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "window_start_ms": {
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "energy_confidence",
+                "window_start_ms",
+                "window_end_ms",
+                "revision",
+                "weighting",
+                "metrics"
+              ],
+              "type": "object"
+            },
+            "MetricSummary": {
+              "properties": {
+                "available": {
+                  "type": "boolean"
+                },
+                "coverage": {
+                  "format": "double",
+                  "type": "number"
+                },
+                "mean": {
+                  "format": "double",
+                  "type": [
+                    "number",
+                    "null"
+                  ]
+                },
+                "observed_ms": {
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "observed_total": {
+                  "default": null,
+                  "format": "double",
+                  "type": [
+                    "number",
+                    "null"
+                  ]
+                },
+                "peak": {
+                  "format": "double",
+                  "type": [
+                    "number",
+                    "null"
+                  ]
+                },
+                "total_unit": {
+                  "default": null,
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                }
+              },
+              "required": [
+                "observed_total",
+                "total_unit",
+                "available",
+                "mean",
+                "peak",
+                "observed_ms",
+                "coverage"
+              ],
+              "type": "object"
+            },
+            "ResourceAvailability": {
+              "description": "A capability is true only when available throughout the observed bucket.\nMissing metadata in older history files means unknown, not measured zero.",
+              "properties": {
+                "cpu": {
+                  "default": false,
+                  "type": "boolean"
+                },
+                "disk_space": {
+                  "default": false,
+                  "type": "boolean"
+                },
+                "energy": {
+                  "default": false,
+                  "type": "boolean"
+                },
+                "gpu": {
+                  "default": false,
+                  "type": "boolean"
+                },
+                "memory": {
+                  "default": false,
+                  "type": "boolean"
+                },
+                "network_bytes": {
+                  "default": false,
+                  "type": "boolean"
+                },
+                "network_connections": {
+                  "default": false,
+                  "type": "boolean"
+                },
+                "referenced_files": {
+                  "default": false,
+                  "type": "boolean"
+                },
+                "storage": {
+                  "default": false,
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "cpu",
+                "memory",
+                "gpu",
+                "storage",
+                "referenced_files",
+                "disk_space",
+                "network_bytes",
+                "network_connections",
+                "energy"
+              ],
+              "type": "object"
+            },
+            "ResourceHistoryPoint": {
+              "description": "CPU, memory, and GPU observations for the current interval.",
+              "properties": {
+                "attributed_fraction": {
+                  "default": 0.0,
+                  "format": "double",
+                  "type": "number"
+                },
+                "availability": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/$defs/ResourceAvailability"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "average_power_watts": {
+                  "default": 0.0,
+                  "format": "double",
+                  "type": "number"
+                },
+                "battery_percent": {
+                  "default": 0.0,
+                  "format": "double",
+                  "type": "number"
+                },
+                "cancelled_write_bytes": {
+                  "default": 0,
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "coverage": {
+                  "default": 0.0,
+                  "format": "double",
+                  "type": "number"
+                },
+                "cpu_percent": {
+                  "default": 0.0,
+                  "description": "Top-compatible CPU usage: 100% is one fully occupied logical CPU.",
+                  "format": "double",
+                  "type": "number"
+                },
+                "cpu_percent_of_machine": {
+                  "default": 0.0,
+                  "description": "CPU usage as a percentage of the whole machine, always capped at 100%.",
+                  "format": "double",
+                  "type": "number"
+                },
+                "disk_read_bytes": {
+                  "default": 0,
+                  "description": "Physical storage bytes completed during the current interval.",
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "disk_read_bytes_per_second": {
+                  "default": 0.0,
+                  "format": "double",
+                  "type": "number"
+                },
+                "disk_space_permanent_bytes": {
+                  "default": 0,
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "disk_space_temporary_bytes": {
+                  "default": 0,
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "disk_space_total_bytes": {
+                  "default": 0,
+                  "description": "Allocated size of identified application-owned data directories.",
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "disk_write_bytes": {
+                  "default": 0,
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "disk_write_bytes_per_second": {
+                  "default": 0.0,
+                  "format": "double",
+                  "type": "number"
+                },
+                "duration_ms": {
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "energy_confidence": {
+                  "default": "",
+                  "type": "string"
+                },
+                "energy_mwh": {
+                  "default": 0.0,
+                  "format": "double",
+                  "type": "number"
+                },
+                "energy_source": {
+                  "default": "",
+                  "type": "string"
+                },
+                "gpu_busy_percent": {
+                  "default": 0.0,
+                  "description": "Occupancy of the busiest DRM engine, capped at 100%.",
+                  "format": "double",
+                  "type": "number"
+                },
+                "gpu_memory_allocated_bytes": {
+                  "default": 0,
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "gpu_memory_bytes": {
+                  "default": 0,
+                  "description": "Resident GPU memory reported by DRM, falling back to allocated memory.",
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "gpu_memory_resident_bytes": {
+                  "default": 0,
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "gpu_percent": {
+                  "default": 0.0,
+                  "description": "Aggregate DRM engine occupancy; it can exceed 100% across engines.",
+                  "format": "double",
+                  "type": "number"
+                },
+                "logical_read_bytes": {
+                  "default": 0,
+                  "description": "Logical process I/O, including page-cache hits.",
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "logical_read_bytes_per_second": {
+                  "default": 0.0,
+                  "format": "double",
+                  "type": "number"
+                },
+                "logical_write_bytes": {
+                  "default": 0,
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "logical_write_bytes_per_second": {
+                  "default": 0.0,
+                  "format": "double",
+                  "type": "number"
+                },
+                "major_faults_per_second": {
+                  "default": 0.0,
+                  "format": "double",
+                  "type": "number"
+                },
+                "memory_bytes": {
+                  "default": 0,
+                  "description": "Best available physical-memory estimate: PSS when readable, RSS otherwise.",
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "memory_cgroup_bytes": {
+                  "default": 0,
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "memory_private_bytes": {
+                  "default": 0,
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "memory_pss_bytes": {
+                  "default": 0,
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "memory_rss_bytes": {
+                  "default": 0,
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "memory_swap_bytes": {
+                  "default": 0,
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "metric_availability": {
+                  "additionalProperties": {
+                    "type": "boolean"
+                  },
+                  "default": {
+                    "attributed_fraction": false,
+                    "average_power_watts": false,
+                    "battery_percent": false,
+                    "battery_percent_per_hour": false,
+                    "cancelled_write_bytes": false,
+                    "cpu_percent": false,
+                    "cpu_percent_of_machine": false,
+                    "disk_read_bytes": false,
+                    "disk_read_bytes_per_second": false,
+                    "disk_space_permanent_bytes": false,
+                    "disk_space_temporary_bytes": false,
+                    "disk_space_total_bytes": false,
+                    "disk_write_bytes": false,
+                    "disk_write_bytes_per_second": false,
+                    "energy_mwh": false,
+                    "estimated_app_power_watts": false,
+                    "gpu_busy_percent": false,
+                    "gpu_memory_allocated_bytes": false,
+                    "gpu_memory_bytes": false,
+                    "gpu_memory_resident_bytes": false,
+                    "gpu_percent": false,
+                    "logical_read_bytes": false,
+                    "logical_read_bytes_per_second": false,
+                    "logical_write_bytes": false,
+                    "logical_write_bytes_per_second": false,
+                    "major_faults_per_second": false,
+                    "memory_bytes": false,
+                    "memory_cgroup_bytes": false,
+                    "memory_private_bytes": false,
+                    "memory_pss_bytes": false,
+                    "memory_rss_bytes": false,
+                    "memory_swap_bytes": false,
+                    "network_connection_count": false,
+                    "network_receive_bytes": false,
+                    "network_receive_bytes_per_second": false,
+                    "network_transmit_bytes": false,
+                    "network_transmit_bytes_per_second": false,
+                    "open_file_disk_bytes": false,
+                    "power_watts": false,
+                    "process_count": false,
+                    "read_operations": false,
+                    "read_operations_per_second": false,
+                    "referenced_file_disk_bytes": false,
+                    "referenced_file_permanent_bytes": false,
+                    "referenced_file_temporary_bytes": false,
+                    "thread_count": false,
+                    "write_operations": false,
+                    "write_operations_per_second": false
+                  },
+                  "readOnly": true,
+                  "type": "object"
+                },
+                "network_connection_count": {
+                  "default": 0,
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "network_receive_bytes": {
+                  "default": 0,
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "network_receive_bytes_per_second": {
+                  "default": 0.0,
+                  "format": "double",
+                  "type": "number"
+                },
+                "network_transmit_bytes": {
+                  "default": 0,
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "network_transmit_bytes_per_second": {
+                  "default": 0.0,
+                  "format": "double",
+                  "type": "number"
+                },
+                "open_file_disk_bytes": {
+                  "default": 0,
+                  "description": "Allocated size of unique regular files currently held open.",
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "peaks": {
+                  "$ref": "#/$defs/ResourcePeaks",
+                  "default": {
+                    "cpu_percent": 0.0,
+                    "cpu_percent_of_machine": 0.0,
+                    "disk_read_bytes_per_second": 0.0,
+                    "disk_write_bytes_per_second": 0.0,
+                    "estimated_app_power_watts": 0.0,
+                    "gpu_busy_percent": 0.0,
+                    "gpu_percent": 0.0,
+                    "memory_bytes": 0,
+                    "network_receive_bytes_per_second": 0.0,
+                    "network_transmit_bytes_per_second": 0.0
+                  }
+                },
+                "process_count": {
+                  "default": 0,
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "read_operations": {
+                  "default": 0,
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "read_operations_per_second": {
+                  "default": 0.0,
+                  "format": "double",
+                  "type": "number"
+                },
+                "referenced_file_disk_bytes": {
+                  "default": 0,
+                  "description": "Allocated size of unique open or mapped regular files.",
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "referenced_file_permanent_bytes": {
+                  "default": 0,
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "referenced_file_temporary_bytes": {
+                  "default": 0,
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "sample_count": {
+                  "default": 0,
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "system_power_watts": {
+                  "default": 0.0,
+                  "format": "double",
+                  "type": "number"
+                },
+                "thread_count": {
+                  "default": 0,
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "timestamp_ms": {
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "write_operations": {
+                  "default": 0,
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "write_operations_per_second": {
+                  "default": 0.0,
+                  "format": "double",
+                  "type": "number"
+                }
+              },
+              "required": [
+                "timestamp_ms",
+                "duration_ms",
+                "metric_availability",
+                "cpu_percent",
+                "cpu_percent_of_machine",
+                "memory_bytes",
+                "memory_rss_bytes",
+                "memory_pss_bytes",
+                "memory_private_bytes",
+                "memory_swap_bytes",
+                "memory_cgroup_bytes",
+                "process_count",
+                "thread_count",
+                "major_faults_per_second",
+                "gpu_percent",
+                "gpu_busy_percent",
+                "gpu_memory_bytes",
+                "gpu_memory_resident_bytes",
+                "gpu_memory_allocated_bytes",
+                "disk_read_bytes",
+                "disk_write_bytes",
+                "disk_read_bytes_per_second",
+                "disk_write_bytes_per_second",
+                "logical_read_bytes",
+                "logical_write_bytes",
+                "logical_read_bytes_per_second",
+                "logical_write_bytes_per_second",
+                "read_operations",
+                "write_operations",
+                "read_operations_per_second",
+                "write_operations_per_second",
+                "cancelled_write_bytes",
+                "open_file_disk_bytes",
+                "referenced_file_disk_bytes",
+                "referenced_file_temporary_bytes",
+                "referenced_file_permanent_bytes",
+                "disk_space_total_bytes",
+                "disk_space_temporary_bytes",
+                "disk_space_permanent_bytes",
+                "network_receive_bytes",
+                "network_transmit_bytes",
+                "network_receive_bytes_per_second",
+                "network_transmit_bytes_per_second",
+                "network_connection_count",
+                "energy_mwh",
+                "battery_percent",
+                "average_power_watts",
+                "system_power_watts",
+                "attributed_fraction",
+                "energy_source",
+                "energy_confidence",
+                "sample_count",
+                "coverage",
+                "peaks"
+              ],
+              "type": "object"
+            },
+            "ResourcePeaks": {
+              "properties": {
+                "cpu_percent": {
+                  "default": 0.0,
+                  "format": "double",
+                  "type": "number"
+                },
+                "cpu_percent_of_machine": {
+                  "default": 0.0,
+                  "format": "double",
+                  "type": "number"
+                },
+                "disk_read_bytes_per_second": {
+                  "default": 0.0,
+                  "format": "double",
+                  "type": "number"
+                },
+                "disk_write_bytes_per_second": {
+                  "default": 0.0,
+                  "format": "double",
+                  "type": "number"
+                },
+                "estimated_app_power_watts": {
+                  "default": 0.0,
+                  "format": "double",
+                  "type": "number"
+                },
+                "gpu_busy_percent": {
+                  "default": 0.0,
+                  "format": "double",
+                  "type": "number"
+                },
+                "gpu_percent": {
+                  "default": 0.0,
+                  "format": "double",
+                  "type": "number"
+                },
+                "memory_bytes": {
+                  "default": 0,
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "network_receive_bytes_per_second": {
+                  "default": 0.0,
+                  "format": "double",
+                  "type": "number"
+                },
+                "network_transmit_bytes_per_second": {
+                  "default": 0.0,
+                  "format": "double",
+                  "type": "number"
+                }
+              },
+              "required": [
+                "cpu_percent",
+                "cpu_percent_of_machine",
+                "memory_bytes",
+                "gpu_percent",
+                "gpu_busy_percent",
+                "disk_read_bytes_per_second",
+                "disk_write_bytes_per_second",
+                "estimated_app_power_watts",
+                "network_receive_bytes_per_second",
+                "network_transmit_bytes_per_second"
+              ],
+              "type": "object"
+            }
+          },
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "properties": {
+            "has_more": {
+              "type": "boolean"
+            },
+            "next_cursor": {
+              "description": "Opaque forward-pagination cursor. Pass it back as `cursor` to fetch the next page.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "points": {
+              "description": "Chronological page ordered from oldest to newest.",
+              "items": {
+                "$ref": "#/$defs/ResourceHistoryPoint"
+              },
+              "type": "array"
+            },
+            "summary": {
+              "$ref": "#/$defs/HistorySummary"
+            },
+            "target_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "target_id",
+            "summary",
+            "points",
+            "has_more",
+            "next_cursor"
+          ],
+          "title": "ApplicationResourceHistory",
+          "type": "object"
+        },
+        "stream": "applications.changed"
       },
       {
         "name": "applications.energyOverview",
         "params_example": {
-          "since_ms": 0,
-          "limit": 20
+          "limit": 20,
+          "since_ms": 0
+        },
+        "params_schema": {
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "properties": {
+            "limit": {
+              "default": 20,
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "since_ms": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "since_ms"
+          ],
+          "title": "EnergyOverviewParams",
+          "type": "object"
+        },
+        "policy": {
+          "ack_budget_ms": 30000,
+          "conflict_domain": "applications",
+          "execution": "read",
+          "request_bytes": 1048576,
+          "result_bytes": 16777216,
+          "sensitivity": "sensitive-read"
         },
         "response_key": "energy_overview",
+        "result_schema": {
+          "$defs": {
+            "ApplicationEnergySummary": {
+              "properties": {
+                "energy_mwh": {
+                  "default": 0.0,
+                  "format": "double",
+                  "type": "number"
+                },
+                "icon": {
+                  "default": "",
+                  "type": "string"
+                },
+                "name": {
+                  "default": "",
+                  "type": "string"
+                },
+                "share": {
+                  "default": 0.0,
+                  "format": "double",
+                  "type": "number"
+                },
+                "target_id": {
+                  "default": "",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "target_id",
+                "name",
+                "icon",
+                "energy_mwh",
+                "share"
+              ],
+              "type": "object"
+            }
+          },
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "properties": {
+            "applications": {
+              "default": [],
+              "items": {
+                "$ref": "#/$defs/ApplicationEnergySummary"
+              },
+              "type": "array"
+            },
+            "energy_confidence": {
+              "default": "",
+              "type": "string"
+            },
+            "energy_source": {
+              "default": "",
+              "type": "string"
+            },
+            "since_ms": {
+              "default": 0,
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "total_energy_mwh": {
+              "default": 0.0,
+              "format": "double",
+              "type": "number"
+            },
+            "until_ms": {
+              "default": 0,
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "since_ms",
+            "until_ms",
+            "total_energy_mwh",
+            "energy_source",
+            "energy_confidence",
+            "applications"
+          ],
+          "title": "ApplicationEnergyOverview",
+          "type": "object"
+        },
         "stream": "applications.changed"
       },
       {
         "name": "applications.refresh",
         "params_example": {
-          "query": "",
           "category": "",
           "generation": 1,
-          "limit": 500
+          "limit": 500,
+          "query": ""
+        },
+        "params_schema": {
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "properties": {
+            "category": {
+              "default": "",
+              "type": "string"
+            },
+            "generation": {
+              "default": 0,
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "limit": {
+              "default": 500,
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "query": {
+              "default": "",
+              "type": "string"
+            }
+          },
+          "title": "QueryParams",
+          "type": "object"
+        },
+        "policy": {
+          "ack_budget_ms": 30000,
+          "conflict_domain": "applications",
+          "execution": "effect",
+          "request_bytes": 1048576,
+          "result_bytes": 16777216,
+          "sensitivity": "effect"
         },
         "response_key": "applications",
+        "result_schema": {
+          "$defs": {
+            "ApplicationSummary": {
+              "description": "CPU, memory, and GPU observations for the current interval.",
+              "properties": {
+                "attributed_fraction": {
+                  "default": 0.0,
+                  "format": "double",
+                  "type": "number"
+                },
+                "battery_percent": {
+                  "default": 0.0,
+                  "format": "double",
+                  "type": "number"
+                },
+                "battery_percent_per_hour": {
+                  "default": 0.0,
+                  "format": "double",
+                  "type": "number"
+                },
+                "cancelled_write_bytes": {
+                  "default": 0,
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "categories": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "category": {
+                  "description": "One of Shelllist's five launcher categories.",
+                  "type": "string"
+                },
+                "comment": {
+                  "type": "string"
+                },
+                "cpu_percent": {
+                  "default": 0.0,
+                  "description": "Top-compatible CPU usage: 100% is one fully occupied logical CPU.",
+                  "format": "double",
+                  "type": "number"
+                },
+                "cpu_percent_of_machine": {
+                  "default": 0.0,
+                  "description": "CPU usage as a percentage of the whole machine, always capped at 100%.",
+                  "format": "double",
+                  "type": "number"
+                },
+                "default_workspace_id": {
+                  "description": "Preferred Hyprland workspace for newly launched windows.",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "desktop_actions": {
+                  "items": {
+                    "$ref": "#/$defs/DesktopActionSummary"
+                  },
+                  "type": "array"
+                },
+                "disk_read_bytes": {
+                  "default": 0,
+                  "description": "Physical storage bytes completed during the current interval.",
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "disk_read_bytes_per_second": {
+                  "default": 0.0,
+                  "format": "double",
+                  "type": "number"
+                },
+                "disk_space_permanent_bytes": {
+                  "default": 0,
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "disk_space_temporary_bytes": {
+                  "default": 0,
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "disk_space_total_bytes": {
+                  "default": 0,
+                  "description": "Allocated size of identified application-owned data directories.",
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "disk_write_bytes": {
+                  "default": 0,
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "disk_write_bytes_per_second": {
+                  "default": 0.0,
+                  "format": "double",
+                  "type": "number"
+                },
+                "energy_confidence": {
+                  "default": "",
+                  "type": "string"
+                },
+                "energy_mwh": {
+                  "default": 0.0,
+                  "description": "Application-attributed energy. This is only populated for attributable domains.",
+                  "format": "double",
+                  "type": "number"
+                },
+                "energy_source": {
+                  "default": "",
+                  "type": "string"
+                },
+                "estimated_app_power_watts": {
+                  "default": 0.0,
+                  "format": "double",
+                  "type": "number"
+                },
+                "focused": {
+                  "type": "boolean"
+                },
+                "generic_name": {
+                  "type": "string"
+                },
+                "gpu_busy_percent": {
+                  "default": 0.0,
+                  "description": "Occupancy of the busiest DRM engine, capped at 100%.",
+                  "format": "double",
+                  "type": "number"
+                },
+                "gpu_memory_allocated_bytes": {
+                  "default": 0,
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "gpu_memory_bytes": {
+                  "default": 0,
+                  "description": "Resident GPU memory reported by DRM, falling back to allocated memory.",
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "gpu_memory_resident_bytes": {
+                  "default": 0,
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "gpu_percent": {
+                  "default": 0.0,
+                  "description": "Aggregate DRM engine occupancy; it can exceed 100% across engines.",
+                  "format": "double",
+                  "type": "number"
+                },
+                "icon": {
+                  "type": "string"
+                },
+                "id": {
+                  "type": "string"
+                },
+                "instances": {
+                  "items": {
+                    "$ref": "#/$defs/WindowSummary"
+                  },
+                  "type": "array"
+                },
+                "keywords": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "kind": {
+                  "type": "string"
+                },
+                "logical_read_bytes": {
+                  "default": 0,
+                  "description": "Logical process I/O, including page-cache hits.",
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "logical_read_bytes_per_second": {
+                  "default": 0.0,
+                  "format": "double",
+                  "type": "number"
+                },
+                "logical_write_bytes": {
+                  "default": 0,
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "logical_write_bytes_per_second": {
+                  "default": 0.0,
+                  "format": "double",
+                  "type": "number"
+                },
+                "major_faults_per_second": {
+                  "default": 0.0,
+                  "format": "double",
+                  "type": "number"
+                },
+                "match_kind": {
+                  "description": "The strongest textual match tier, such as `exact-name` or `acronym`.",
+                  "type": "string"
+                },
+                "match_score": {
+                  "description": "Textual relevance for the active query.",
+                  "format": "int64",
+                  "type": "integer"
+                },
+                "measurement": {
+                  "$ref": "#/$defs/ResourceMeasurement"
+                },
+                "memory_bytes": {
+                  "default": 0,
+                  "description": "Best available physical-memory estimate: PSS when readable, RSS otherwise.",
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "memory_cgroup_bytes": {
+                  "default": 0,
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "memory_private_bytes": {
+                  "default": 0,
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "memory_pss_bytes": {
+                  "default": 0,
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "memory_rss_bytes": {
+                  "default": 0,
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "memory_swap_bytes": {
+                  "default": 0,
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "metric_availability": {
+                  "additionalProperties": {
+                    "type": "boolean"
+                  },
+                  "default": {
+                    "attributed_fraction": false,
+                    "average_power_watts": false,
+                    "battery_percent": false,
+                    "battery_percent_per_hour": false,
+                    "cancelled_write_bytes": false,
+                    "cpu_percent": false,
+                    "cpu_percent_of_machine": false,
+                    "disk_read_bytes": false,
+                    "disk_read_bytes_per_second": false,
+                    "disk_space_permanent_bytes": false,
+                    "disk_space_temporary_bytes": false,
+                    "disk_space_total_bytes": false,
+                    "disk_write_bytes": false,
+                    "disk_write_bytes_per_second": false,
+                    "energy_mwh": false,
+                    "estimated_app_power_watts": false,
+                    "gpu_busy_percent": false,
+                    "gpu_memory_allocated_bytes": false,
+                    "gpu_memory_bytes": false,
+                    "gpu_memory_resident_bytes": false,
+                    "gpu_percent": false,
+                    "logical_read_bytes": false,
+                    "logical_read_bytes_per_second": false,
+                    "logical_write_bytes": false,
+                    "logical_write_bytes_per_second": false,
+                    "major_faults_per_second": false,
+                    "memory_bytes": false,
+                    "memory_cgroup_bytes": false,
+                    "memory_private_bytes": false,
+                    "memory_pss_bytes": false,
+                    "memory_rss_bytes": false,
+                    "memory_swap_bytes": false,
+                    "network_connection_count": false,
+                    "network_receive_bytes": false,
+                    "network_receive_bytes_per_second": false,
+                    "network_transmit_bytes": false,
+                    "network_transmit_bytes_per_second": false,
+                    "open_file_disk_bytes": false,
+                    "power_watts": false,
+                    "process_count": false,
+                    "read_operations": false,
+                    "read_operations_per_second": false,
+                    "referenced_file_disk_bytes": false,
+                    "referenced_file_permanent_bytes": false,
+                    "referenced_file_temporary_bytes": false,
+                    "thread_count": false,
+                    "write_operations": false,
+                    "write_operations_per_second": false
+                  },
+                  "type": "object"
+                },
+                "name": {
+                  "type": "string"
+                },
+                "network_connection_count": {
+                  "default": 0,
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "network_receive_bytes": {
+                  "default": 0,
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "network_receive_bytes_per_second": {
+                  "default": 0.0,
+                  "format": "double",
+                  "type": "number"
+                },
+                "network_transmit_bytes": {
+                  "default": 0,
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "network_transmit_bytes_per_second": {
+                  "default": 0.0,
+                  "format": "double",
+                  "type": "number"
+                },
+                "open_file_disk_bytes": {
+                  "default": 0,
+                  "description": "Allocated size of unique regular files currently held open.",
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "power_watts": {
+                  "default": 0.0,
+                  "description": "Estimated application power, retained under the v1-compatible field name.",
+                  "format": "double",
+                  "type": "number"
+                },
+                "process_count": {
+                  "default": 0,
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "read_operations": {
+                  "default": 0,
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "read_operations_per_second": {
+                  "default": 0.0,
+                  "format": "double",
+                  "type": "number"
+                },
+                "referenced_file_disk_bytes": {
+                  "default": 0,
+                  "description": "Allocated size of unique open or mapped regular files.",
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "referenced_file_permanent_bytes": {
+                  "default": 0,
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "referenced_file_temporary_bytes": {
+                  "default": 0,
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "revision": {
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "running": {
+                  "type": "boolean"
+                },
+                "running_count": {
+                  "format": "uint",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "runtime_score": {
+                  "description": "Focus/recency score independent of textual relevance.",
+                  "format": "int64",
+                  "type": "integer"
+                },
+                "score": {
+                  "description": "Combined sort score retained for clients that consume a single value.",
+                  "format": "int64",
+                  "type": "integer"
+                },
+                "startup_class": {
+                  "type": "string"
+                },
+                "system_power_watts": {
+                  "default": 0.0,
+                  "format": "double",
+                  "type": "number"
+                },
+                "thread_count": {
+                  "default": 0,
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "write_operations": {
+                  "default": 0,
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "write_operations_per_second": {
+                  "default": 0.0,
+                  "format": "double",
+                  "type": "number"
+                }
+              },
+              "required": [
+                "id",
+                "kind",
+                "name",
+                "generic_name",
+                "comment",
+                "icon",
+                "keywords",
+                "categories",
+                "category",
+                "default_workspace_id",
+                "startup_class",
+                "revision",
+                "running",
+                "focused",
+                "running_count",
+                "metric_availability",
+                "cpu_percent",
+                "cpu_percent_of_machine",
+                "memory_bytes",
+                "memory_rss_bytes",
+                "memory_pss_bytes",
+                "memory_private_bytes",
+                "memory_swap_bytes",
+                "memory_cgroup_bytes",
+                "process_count",
+                "thread_count",
+                "major_faults_per_second",
+                "gpu_percent",
+                "gpu_busy_percent",
+                "gpu_memory_bytes",
+                "gpu_memory_resident_bytes",
+                "gpu_memory_allocated_bytes",
+                "disk_read_bytes",
+                "disk_write_bytes",
+                "disk_read_bytes_per_second",
+                "disk_write_bytes_per_second",
+                "logical_read_bytes",
+                "logical_write_bytes",
+                "logical_read_bytes_per_second",
+                "logical_write_bytes_per_second",
+                "read_operations",
+                "write_operations",
+                "read_operations_per_second",
+                "write_operations_per_second",
+                "cancelled_write_bytes",
+                "open_file_disk_bytes",
+                "referenced_file_disk_bytes",
+                "referenced_file_temporary_bytes",
+                "referenced_file_permanent_bytes",
+                "disk_space_total_bytes",
+                "disk_space_temporary_bytes",
+                "disk_space_permanent_bytes",
+                "network_receive_bytes",
+                "network_transmit_bytes",
+                "network_receive_bytes_per_second",
+                "network_transmit_bytes_per_second",
+                "network_connection_count",
+                "energy_mwh",
+                "battery_percent",
+                "power_watts",
+                "estimated_app_power_watts",
+                "system_power_watts",
+                "battery_percent_per_hour",
+                "attributed_fraction",
+                "energy_source",
+                "energy_confidence",
+                "measurement",
+                "instances",
+                "desktop_actions",
+                "match_score",
+                "match_kind",
+                "runtime_score",
+                "score"
+              ],
+              "type": "object"
+            },
+            "DesktopActionSummary": {
+              "properties": {
+                "icon": {
+                  "type": "string"
+                },
+                "id": {
+                  "type": "string"
+                },
+                "name": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "id",
+                "name",
+                "icon"
+              ],
+              "type": "object"
+            },
+            "ResourceMeasurement": {
+              "properties": {
+                "attribution_method": {
+                  "default": "",
+                  "type": "string"
+                },
+                "coverage": {
+                  "default": 0.0,
+                  "format": "double",
+                  "type": "number"
+                },
+                "disk_space_scope": {
+                  "default": "",
+                  "type": "string"
+                },
+                "gpu_available": {
+                  "default": false,
+                  "type": "boolean"
+                },
+                "memory_source": {
+                  "default": "",
+                  "type": "string"
+                },
+                "network_available": {
+                  "default": false,
+                  "type": "boolean"
+                },
+                "network_bytes_available": {
+                  "default": false,
+                  "type": "boolean"
+                },
+                "network_connections_available": {
+                  "default": false,
+                  "type": "boolean"
+                },
+                "referenced_files_available": {
+                  "default": false,
+                  "type": "boolean"
+                },
+                "resources_shared": {
+                  "default": false,
+                  "type": "boolean"
+                },
+                "sample_interval_ms": {
+                  "default": 0,
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "storage_available": {
+                  "default": false,
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "sample_interval_ms",
+                "attribution_method",
+                "coverage",
+                "memory_source",
+                "gpu_available",
+                "storage_available",
+                "referenced_files_available",
+                "disk_space_scope",
+                "network_available",
+                "network_bytes_available",
+                "network_connections_available",
+                "resources_shared"
+              ],
+              "type": "object"
+            },
+            "WindowSummary": {
+              "description": "CPU, memory, and GPU observations for the current interval.",
+              "properties": {
+                "attributed_fraction": {
+                  "default": 0.0,
+                  "format": "double",
+                  "type": "number"
+                },
+                "battery_percent": {
+                  "default": 0.0,
+                  "format": "double",
+                  "type": "number"
+                },
+                "battery_percent_per_hour": {
+                  "default": 0.0,
+                  "format": "double",
+                  "type": "number"
+                },
+                "cancelled_write_bytes": {
+                  "default": 0,
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "class": {
+                  "type": "string"
+                },
+                "cpu_percent": {
+                  "default": 0.0,
+                  "description": "Top-compatible CPU usage: 100% is one fully occupied logical CPU.",
+                  "format": "double",
+                  "type": "number"
+                },
+                "cpu_percent_of_machine": {
+                  "default": 0.0,
+                  "description": "CPU usage as a percentage of the whole machine, always capped at 100%.",
+                  "format": "double",
+                  "type": "number"
+                },
+                "disk_read_bytes": {
+                  "default": 0,
+                  "description": "Physical storage bytes completed during the current interval.",
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "disk_read_bytes_per_second": {
+                  "default": 0.0,
+                  "format": "double",
+                  "type": "number"
+                },
+                "disk_space_permanent_bytes": {
+                  "default": 0,
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "disk_space_temporary_bytes": {
+                  "default": 0,
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "disk_space_total_bytes": {
+                  "default": 0,
+                  "description": "Allocated size of identified application-owned data directories.",
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "disk_write_bytes": {
+                  "default": 0,
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "disk_write_bytes_per_second": {
+                  "default": 0.0,
+                  "format": "double",
+                  "type": "number"
+                },
+                "energy_confidence": {
+                  "default": "",
+                  "type": "string"
+                },
+                "energy_mwh": {
+                  "default": 0.0,
+                  "description": "Application-attributed energy. This is only populated for attributable domains.",
+                  "format": "double",
+                  "type": "number"
+                },
+                "energy_source": {
+                  "default": "",
+                  "type": "string"
+                },
+                "estimated_app_power_watts": {
+                  "default": 0.0,
+                  "format": "double",
+                  "type": "number"
+                },
+                "focus_rank": {
+                  "format": "int64",
+                  "type": "integer"
+                },
+                "focused": {
+                  "type": "boolean"
+                },
+                "gpu_busy_percent": {
+                  "default": 0.0,
+                  "description": "Occupancy of the busiest DRM engine, capped at 100%.",
+                  "format": "double",
+                  "type": "number"
+                },
+                "gpu_memory_allocated_bytes": {
+                  "default": 0,
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "gpu_memory_bytes": {
+                  "default": 0,
+                  "description": "Resident GPU memory reported by DRM, falling back to allocated memory.",
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "gpu_memory_resident_bytes": {
+                  "default": 0,
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "gpu_percent": {
+                  "default": 0.0,
+                  "description": "Aggregate DRM engine occupancy; it can exceed 100% across engines.",
+                  "format": "double",
+                  "type": "number"
+                },
+                "id": {
+                  "type": "string"
+                },
+                "logical_read_bytes": {
+                  "default": 0,
+                  "description": "Logical process I/O, including page-cache hits.",
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "logical_read_bytes_per_second": {
+                  "default": 0.0,
+                  "format": "double",
+                  "type": "number"
+                },
+                "logical_write_bytes": {
+                  "default": 0,
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "logical_write_bytes_per_second": {
+                  "default": 0.0,
+                  "format": "double",
+                  "type": "number"
+                },
+                "major_faults_per_second": {
+                  "default": 0.0,
+                  "format": "double",
+                  "type": "number"
+                },
+                "measurement": {
+                  "$ref": "#/$defs/ResourceMeasurement"
+                },
+                "memory_bytes": {
+                  "default": 0,
+                  "description": "Best available physical-memory estimate: PSS when readable, RSS otherwise.",
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "memory_cgroup_bytes": {
+                  "default": 0,
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "memory_private_bytes": {
+                  "default": 0,
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "memory_pss_bytes": {
+                  "default": 0,
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "memory_rss_bytes": {
+                  "default": 0,
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "memory_swap_bytes": {
+                  "default": 0,
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "metric_availability": {
+                  "additionalProperties": {
+                    "type": "boolean"
+                  },
+                  "default": {
+                    "attributed_fraction": false,
+                    "average_power_watts": false,
+                    "battery_percent": false,
+                    "battery_percent_per_hour": false,
+                    "cancelled_write_bytes": false,
+                    "cpu_percent": false,
+                    "cpu_percent_of_machine": false,
+                    "disk_read_bytes": false,
+                    "disk_read_bytes_per_second": false,
+                    "disk_space_permanent_bytes": false,
+                    "disk_space_temporary_bytes": false,
+                    "disk_space_total_bytes": false,
+                    "disk_write_bytes": false,
+                    "disk_write_bytes_per_second": false,
+                    "energy_mwh": false,
+                    "estimated_app_power_watts": false,
+                    "gpu_busy_percent": false,
+                    "gpu_memory_allocated_bytes": false,
+                    "gpu_memory_bytes": false,
+                    "gpu_memory_resident_bytes": false,
+                    "gpu_percent": false,
+                    "logical_read_bytes": false,
+                    "logical_read_bytes_per_second": false,
+                    "logical_write_bytes": false,
+                    "logical_write_bytes_per_second": false,
+                    "major_faults_per_second": false,
+                    "memory_bytes": false,
+                    "memory_cgroup_bytes": false,
+                    "memory_private_bytes": false,
+                    "memory_pss_bytes": false,
+                    "memory_rss_bytes": false,
+                    "memory_swap_bytes": false,
+                    "network_connection_count": false,
+                    "network_receive_bytes": false,
+                    "network_receive_bytes_per_second": false,
+                    "network_transmit_bytes": false,
+                    "network_transmit_bytes_per_second": false,
+                    "open_file_disk_bytes": false,
+                    "power_watts": false,
+                    "process_count": false,
+                    "read_operations": false,
+                    "read_operations_per_second": false,
+                    "referenced_file_disk_bytes": false,
+                    "referenced_file_permanent_bytes": false,
+                    "referenced_file_temporary_bytes": false,
+                    "thread_count": false,
+                    "write_operations": false,
+                    "write_operations_per_second": false
+                  },
+                  "type": "object"
+                },
+                "network_connection_count": {
+                  "default": 0,
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "network_receive_bytes": {
+                  "default": 0,
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "network_receive_bytes_per_second": {
+                  "default": 0.0,
+                  "format": "double",
+                  "type": "number"
+                },
+                "network_transmit_bytes": {
+                  "default": 0,
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "network_transmit_bytes_per_second": {
+                  "default": 0.0,
+                  "format": "double",
+                  "type": "number"
+                },
+                "open_file_disk_bytes": {
+                  "default": 0,
+                  "description": "Allocated size of unique regular files currently held open.",
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "power_watts": {
+                  "default": 0.0,
+                  "description": "Estimated application power, retained under the v1-compatible field name.",
+                  "format": "double",
+                  "type": "number"
+                },
+                "process_count": {
+                  "default": 0,
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "read_operations": {
+                  "default": 0,
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "read_operations_per_second": {
+                  "default": 0.0,
+                  "format": "double",
+                  "type": "number"
+                },
+                "referenced_file_disk_bytes": {
+                  "default": 0,
+                  "description": "Allocated size of unique open or mapped regular files.",
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "referenced_file_permanent_bytes": {
+                  "default": 0,
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "referenced_file_temporary_bytes": {
+                  "default": 0,
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "system_power_watts": {
+                  "default": 0.0,
+                  "format": "double",
+                  "type": "number"
+                },
+                "thread_count": {
+                  "default": 0,
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "title": {
+                  "type": "string"
+                },
+                "workspace_id": {
+                  "type": "string"
+                },
+                "workspace_name": {
+                  "type": "string"
+                },
+                "write_operations": {
+                  "default": 0,
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "write_operations_per_second": {
+                  "default": 0.0,
+                  "format": "double",
+                  "type": "number"
+                }
+              },
+              "required": [
+                "id",
+                "title",
+                "class",
+                "workspace_id",
+                "workspace_name",
+                "focused",
+                "focus_rank",
+                "metric_availability",
+                "cpu_percent",
+                "cpu_percent_of_machine",
+                "memory_bytes",
+                "memory_rss_bytes",
+                "memory_pss_bytes",
+                "memory_private_bytes",
+                "memory_swap_bytes",
+                "memory_cgroup_bytes",
+                "process_count",
+                "thread_count",
+                "major_faults_per_second",
+                "gpu_percent",
+                "gpu_busy_percent",
+                "gpu_memory_bytes",
+                "gpu_memory_resident_bytes",
+                "gpu_memory_allocated_bytes",
+                "disk_read_bytes",
+                "disk_write_bytes",
+                "disk_read_bytes_per_second",
+                "disk_write_bytes_per_second",
+                "logical_read_bytes",
+                "logical_write_bytes",
+                "logical_read_bytes_per_second",
+                "logical_write_bytes_per_second",
+                "read_operations",
+                "write_operations",
+                "read_operations_per_second",
+                "write_operations_per_second",
+                "cancelled_write_bytes",
+                "open_file_disk_bytes",
+                "referenced_file_disk_bytes",
+                "referenced_file_temporary_bytes",
+                "referenced_file_permanent_bytes",
+                "disk_space_total_bytes",
+                "disk_space_temporary_bytes",
+                "disk_space_permanent_bytes",
+                "network_receive_bytes",
+                "network_transmit_bytes",
+                "network_receive_bytes_per_second",
+                "network_transmit_bytes_per_second",
+                "network_connection_count",
+                "energy_mwh",
+                "battery_percent",
+                "power_watts",
+                "estimated_app_power_watts",
+                "system_power_watts",
+                "battery_percent_per_hour",
+                "attributed_fraction",
+                "energy_source",
+                "energy_confidence",
+                "measurement"
+              ],
+              "type": "object"
+            }
+          },
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "properties": {
+            "applications": {
+              "items": {
+                "$ref": "#/$defs/ApplicationSummary"
+              },
+              "type": "array"
+            },
+            "generation": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "has_more": {
+              "type": "boolean"
+            },
+            "hyprland_available": {
+              "type": "boolean"
+            },
+            "revision": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "revision",
+            "generation",
+            "applications",
+            "has_more",
+            "hyprland_available"
+          ],
+          "title": "ApplicationPage",
+          "type": "object"
+        },
         "stream": "applications.changed"
       },
       {
         "name": "applications.execute",
         "params_example": {
-          "target_id": "org.example.App.desktop",
           "action": "activate",
-          "window_id": null,
           "desktop_action_id": null,
           "expected_revision": 1,
+          "target_id": "org.example.App.desktop",
+          "window_id": null,
           "workspace_id": "2"
         },
+        "params_schema": {
+          "$defs": {
+            "ApplicationAction": {
+              "enum": [
+                "activate",
+                "launch",
+                "focus-window",
+                "close",
+                "close-window",
+                "move-to-workspace",
+                "desktop-action"
+              ],
+              "type": "string"
+            }
+          },
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "properties": {
+            "action": {
+              "$ref": "#/$defs/ApplicationAction"
+            },
+            "desktop_action_id": {
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "expected_revision": {
+              "default": null,
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "target_id": {
+              "type": "string"
+            },
+            "window_id": {
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "workspace_id": {
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "target_id",
+            "action"
+          ],
+          "title": "ExecuteParams",
+          "type": "object"
+        },
+        "policy": {
+          "ack_budget_ms": 1000,
+          "conflict_domain": "applications",
+          "execution": "operation",
+          "request_bytes": 1048576,
+          "result_bytes": 16777216,
+          "sensitivity": "effect"
+        },
         "response_key": "operation",
+        "result_schema": {
+          "$defs": {
+            "CloseObservation": {
+              "properties": {
+                "dispatch_error": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "dispatched_window_ids": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "remaining_window_ids": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "status": {
+                  "type": "string"
+                },
+                "targeted_window_ids": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                }
+              },
+              "required": [
+                "targeted_window_ids",
+                "dispatched_window_ids",
+                "remaining_window_ids",
+                "status",
+                "dispatch_error"
+              ],
+              "type": "object"
+            },
+            "PlacementStatus": {
+              "enum": [
+                "pending",
+                "placed",
+                "unavailable",
+                "failed"
+              ],
+              "type": "string"
+            },
+            "WorkspacePlacement": {
+              "description": "Launch handoff and workspace placement have independent outcomes. A\ncompleted launch with unavailable/failed placement must never be replayed.",
+              "properties": {
+                "reason": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "status": {
+                  "$ref": "#/$defs/PlacementStatus"
+                },
+                "workspace_id": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "workspace_id",
+                "status"
+              ],
+              "type": "object"
+            }
+          },
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "properties": {
+            "action": {
+              "type": "string"
+            },
+            "close": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/CloseObservation"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "id": {
+              "type": "string"
+            },
+            "launch_backend": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "launch_scope": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "message": {
+              "type": "string"
+            },
+            "placement": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/WorkspacePlacement"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "status": {
+              "type": "string"
+            },
+            "target_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "action",
+            "target_id",
+            "status",
+            "message"
+          ],
+          "title": "OperationResult",
+          "type": "object"
+        },
         "stream": "applications.operation"
       },
       {
@@ -97,16 +3423,220 @@
         "params_example": {
           "operation_id": "operation-example"
         },
+        "params_schema": {
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "additionalProperties": false,
+          "properties": {
+            "operation_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "operation_id"
+          ],
+          "title": "OperationStatusParams",
+          "type": "object"
+        },
+        "policy": {
+          "ack_budget_ms": 30000,
+          "conflict_domain": "applications",
+          "execution": "read",
+          "request_bytes": 1048576,
+          "result_bytes": 16777216,
+          "sensitivity": "sensitive-read"
+        },
         "response_key": "operation_status",
+        "result_schema": {
+          "$defs": {
+            "CloseObservation": {
+              "properties": {
+                "dispatch_error": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "dispatched_window_ids": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "remaining_window_ids": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "status": {
+                  "type": "string"
+                },
+                "targeted_window_ids": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                }
+              },
+              "required": [
+                "targeted_window_ids",
+                "dispatched_window_ids",
+                "remaining_window_ids",
+                "status",
+                "dispatch_error"
+              ],
+              "type": "object"
+            },
+            "PlacementStatus": {
+              "enum": [
+                "pending",
+                "placed",
+                "unavailable",
+                "failed"
+              ],
+              "type": "string"
+            },
+            "WorkspacePlacement": {
+              "description": "Launch handoff and workspace placement have independent outcomes. A\ncompleted launch with unavailable/failed placement must never be replayed.",
+              "properties": {
+                "reason": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "status": {
+                  "$ref": "#/$defs/PlacementStatus"
+                },
+                "workspace_id": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "workspace_id",
+                "status"
+              ],
+              "type": "object"
+            }
+          },
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "properties": {
+            "action": {
+              "type": "string"
+            },
+            "close": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/CloseObservation"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "id": {
+              "type": "string"
+            },
+            "launch_backend": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "launch_scope": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "message": {
+              "type": "string"
+            },
+            "placement": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/WorkspacePlacement"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "status": {
+              "type": "string"
+            },
+            "target_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "action",
+            "target_id",
+            "status",
+            "message"
+          ],
+          "title": "OperationResult",
+          "type": "object"
+        },
         "stream": "applications.operation"
       },
       {
         "name": "applications.settings.update",
         "params_example": {
-          "target_id": "org.example.App.desktop",
-          "category": "code"
+          "category": "code",
+          "target_id": "org.example.App.desktop"
+        },
+        "params_schema": {
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "properties": {
+            "category": {
+              "type": "string"
+            },
+            "target_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "target_id",
+            "category"
+          ],
+          "title": "UpdateSettingsParams",
+          "type": "object"
+        },
+        "policy": {
+          "ack_budget_ms": 30000,
+          "conflict_domain": "applications",
+          "execution": "effect",
+          "request_bytes": 1048576,
+          "result_bytes": 16777216,
+          "sensitivity": "effect"
         },
         "response_key": "settings",
+        "result_schema": {
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "properties": {
+            "category": {
+              "type": "string"
+            },
+            "target_id": {
+              "type": "string"
+            },
+            "workspace_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "target_id",
+            "category",
+            "workspace_id"
+          ],
+          "title": "Settings",
+          "type": "object"
+        },
         "stream": "applications.changed"
       }
     ],
@@ -121,5 +3651,6 @@
         "name": "applications.operation"
       }
     ]
-  }
+  },
+  "version": 1
 }

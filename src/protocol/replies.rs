@@ -38,7 +38,7 @@ pub enum Reply {
     },
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub struct Settings {
     pub target_id: String,
     pub category: String,
