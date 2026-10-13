@@ -23,7 +23,7 @@ pub const PROTOCOL: &str = protocol::NAME;
 pub const VERSION: u8 = protocol::VERSION;
 pub const BUS_NAME: &str = "org.laufan.AppDaemon";
 pub const OBJECT_PATH: &str = "/org/laufan/AppDaemon";
-pub const INTERFACE: &str = "org.laufan.AppDaemon1";
+pub const INTERFACE: &str = "org.laufan.AppDaemon2";
 const API: ApiIdentity = ApiIdentity::new(PROTOCOL, VERSION as u32);
 
 pub struct ApiService {

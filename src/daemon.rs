@@ -23,7 +23,7 @@ pub struct AppDaemon {
     subscriptions: Arc<OwnedTaskRegistry>,
 }
 
-#[zbus::interface(name = "org.laufan.AppDaemon1")]
+#[zbus::interface(name = "org.laufan.AppDaemon2")]
 impl AppDaemon {
     async fn call(
         &self,

@@ -7,7 +7,7 @@ pub mod replies;
 pub use methods::METHODS;
 
 pub const NAME: &str = "app-api";
-pub const VERSION: u8 = 1;
+pub const VERSION: u8 = shelllist_daemon_core::CONTRACT_VERSION as u8;
 
 pub mod stream {
     pub const APPLICATIONS: &str = "applications.changed";
@@ -20,6 +20,7 @@ pub const STREAMS: &[&str] = &[stream::APPLICATIONS, stream::WINDOWS, stream::OP
 pub fn contract_fixture() -> serde_json::Result<Value> {
     let mut fixture =
         shelllist_daemon_core::load_fixture(include_str!("../test_support/app-api-v1.json"))?;
+    fixture["version"] = serde_json::json!(VERSION);
     fixture["registry"] = registry()?;
     Ok(fixture)
 }
@@ -76,7 +77,7 @@ pub fn event_contract_fixture() -> Value {
 pub fn registry() -> serde_json::Result<Value> {
     Ok(serde_json::json!({
         "methods": methods::Method::ALL.iter().map(|method| method.registry_entry()).collect::<Vec<_>>(),
-        "streams": STREAMS.iter().map(|name| serde_json::json!({"name": name})).collect::<Vec<_>>()
+        "streams": STREAMS.iter().map(|name| crate::daemon::events::registry(name)).collect::<Vec<_>>()
     }))
 }
 

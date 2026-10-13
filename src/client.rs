@@ -32,7 +32,7 @@ impl CorrelationPolicy for AppCorrelation {
     fn event_id(&self, stream: &str, event: &Value) -> Option<String> {
         if stream == protocol::stream::OPERATION {
             event
-                .pointer("/operation/id")
+                .pointer("/data/operation/id")
                 .or_else(|| event.get("subscription_id"))
         } else {
             event.get("subscription_id")

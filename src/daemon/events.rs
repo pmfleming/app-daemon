@@ -1,38 +1,33 @@
-//! Typed events shared by live subscriptions and offline contract fixtures.
+//! Typed payloads shared by live subscriptions, schemas and offline fixtures.
+use crate::{api, model::OperationResult, protocol, service::StateRevision};
 use serde::Serialize;
-use serde_json::Value;
-use shelllist_daemon_core::{ApiIdentity, Correlation, event_envelope};
+use serde_json::{Value, json};
+use shelllist_daemon_core::{
+    ApiIdentity, Correlation,
+    wire::{Event as Envelope, Gap},
+};
 use zbus::object_server::SignalEmitter;
 
-use crate::{api, model::OperationResult, protocol, service::StateRevision};
-
-#[derive(Serialize)]
-#[serde(untagged)]
-enum Fields<'a> {
-    Operation {
-        operation: &'a OperationResult,
-    },
-    Gap {
-        dropped_events: u64,
-        recovery_method: &'static str,
-    },
-    Subscribed {
-        catalog_revision: u64,
-        window_revision: u64,
-        settings_revision: u64,
-        runtime_revision: u64,
-    },
-    Changed {
-        revision: u64,
-    },
+#[derive(Serialize, schemars::JsonSchema)]
+struct OperationData<'a> {
+    operation: &'a OperationResult,
+}
+#[derive(Serialize, schemars::JsonSchema)]
+struct SubscribedData {
+    catalog_revision: u64,
+    window_revision: u64,
+    settings_revision: u64,
+    runtime_revision: u64,
+}
+#[derive(Serialize, schemars::JsonSchema)]
+struct ChangedData {
+    revision: u64,
 }
 
-/// Keep the D-Bus stream and the JSON stream inseparable at emission.
 pub(crate) struct Event {
     stream: &'static str,
     value: Value,
 }
-
 impl Event {
     pub(crate) fn into_value(self) -> Value {
         self.value
@@ -44,22 +39,17 @@ pub(crate) fn operation(subscription_id: &str, operation: &OperationResult) -> E
         protocol::stream::OPERATION,
         subscription_id,
         &operation.status,
-        Fields::Operation { operation },
+        OperationData { operation },
     )
 }
-
 pub(crate) fn operation_gap(subscription_id: &str, dropped_events: u64) -> Event {
     envelope(
         protocol::stream::OPERATION,
         subscription_id,
-        "resync-required",
-        Fields::Gap {
-            dropped_events,
-            recovery_method: "applications.operation.status",
-        },
+        "gap",
+        Gap::lagged(dropped_events),
     )
 }
-
 pub(crate) fn subscribed(
     stream: &'static str,
     subscription_id: &str,
@@ -69,7 +59,7 @@ pub(crate) fn subscribed(
         stream,
         subscription_id,
         "subscribed",
-        Fields::Subscribed {
+        SubscribedData {
             catalog_revision: revision.catalog,
             window_revision: revision.windows,
             settings_revision: revision.settings,
@@ -77,29 +67,28 @@ pub(crate) fn subscribed(
         },
     )
 }
-
 pub(crate) fn changed(stream: &'static str, subscription_id: &str, revision: u64) -> Event {
-    envelope(
-        stream,
-        subscription_id,
-        "changed",
-        Fields::Changed { revision },
-    )
+    envelope(stream, subscription_id, "changed", ChangedData { revision })
 }
-
-fn envelope(stream: &'static str, subscription_id: &str, event: &str, fields: Fields<'_>) -> Event {
+fn envelope(
+    stream: &'static str,
+    subscription_id: &str,
+    event: &str,
+    data: impl Serialize,
+) -> Event {
     Event {
         stream,
-        value: event_envelope(
+        value: Envelope::new(
             ApiIdentity::new(api::PROTOCOL, api::VERSION as u32),
             stream,
             event,
             Correlation::Subscription(subscription_id),
-            serde_json::to_value(fields).expect("serializable app-api event"),
-        ),
+            data,
+        )
+        .into_value()
+        .expect("serializable app event"),
     }
 }
-
 pub(super) async fn emit(emitter: &SignalEmitter<'_>, event: Event) {
     let stream = event.stream;
     if let Err(error) = emitter
@@ -109,21 +98,34 @@ pub(super) async fn emit(emitter: &SignalEmitter<'_>, event: Event) {
         tracing::warn!(%stream, %error, "app-api event could not be emitted");
     }
 }
-
+fn schema<T: schemars::JsonSchema>() -> Value {
+    shelllist_daemon_core::method_schemas::<(), T>()["result_schema"].take()
+}
+pub(crate) fn registry(stream: &str) -> Value {
+    let mut events = vec![json!({"name":"subscribed", "data_schema":schema::<SubscribedData>()})];
+    if stream == protocol::stream::OPERATION {
+        for name in ["accepted", "running", "completed", "failed", "cancelled"] {
+            events.push(json!({"name":name, "data_schema":schema::<OperationData<'_>>()}));
+        }
+        events.push(json!({"name":"gap", "data_schema":schema::<Gap>()}));
+    } else {
+        events.push(json!({"name":"changed", "data_schema":schema::<ChangedData>()}));
+    }
+    json!({"name":stream, "semantics":if stream == protocol::stream::OPERATION {"transitions"} else {"invalidation"}, "events":events})
+}
 #[cfg(test)]
 mod tests {
-    use super::{StateRevision, changed, operation_gap, protocol, subscribed};
-
+    use super::*;
     #[test]
-    fn event_payloads_remain_top_level_and_emission_uses_the_envelope_stream() {
+    fn payload_and_gap_are_canonical_and_emission_uses_the_envelope_stream() {
         let gap = operation_gap("sub", 4).into_value();
-        assert_eq!(gap["event"], "resync-required");
-        assert_eq!(gap["dropped_events"], 4);
+        assert_eq!(gap["event"], "gap");
+        assert_eq!(gap["data"]["dropped_events"], "4");
         assert_eq!(gap["subscription_id"], "sub");
-        assert_eq!(gap["recovery_method"], "applications.operation.status");
-        assert!(gap.get("data").is_none());
+        assert!(gap.get("dropped_events").is_none());
+        assert!(gap["data"].get("recovery_method").is_none());
         for stream in protocol::STREAMS {
-            let subscribed = subscribed(
+            let event = subscribed(
                 stream,
                 "sub",
                 StateRevision {
@@ -133,16 +135,11 @@ mod tests {
                     runtime: 4,
                 },
             );
-            assert_eq!(subscribed.stream, subscribed.value["stream"]);
-            assert_eq!(subscribed.value["catalog_revision"], 1);
-            assert_eq!(subscribed.value["window_revision"], 2);
-            assert_eq!(subscribed.value["settings_revision"], 3);
-            assert_eq!(subscribed.value["runtime_revision"], 4);
-            assert!(subscribed.value.get("data").is_none());
+            assert_eq!(event.stream, event.value["stream"]);
+            assert_eq!(event.value["data"]["catalog_revision"], 1);
+            assert!(event.value.get("catalog_revision").is_none());
             let changed = changed(stream, "sub", 9);
-            assert_eq!(changed.stream, changed.value["stream"]);
-            assert_eq!(changed.value["revision"], 9);
-            assert_eq!(changed.value["subscription_id"], "sub");
+            assert_eq!(changed.value["data"]["revision"], 9);
         }
     }
 }

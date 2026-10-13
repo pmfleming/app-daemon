@@ -3642,15 +3642,934 @@
     ],
     "streams": [
       {
-        "name": "applications.changed"
+        "events": [
+          {
+            "data_schema": {
+              "$schema": "https://json-schema.org/draft/2020-12/schema",
+              "properties": {
+                "catalog_revision": {
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "runtime_revision": {
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "settings_revision": {
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "window_revision": {
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "catalog_revision",
+                "window_revision",
+                "settings_revision",
+                "runtime_revision"
+              ],
+              "title": "SubscribedData",
+              "type": "object"
+            },
+            "name": "subscribed"
+          },
+          {
+            "data_schema": {
+              "$schema": "https://json-schema.org/draft/2020-12/schema",
+              "properties": {
+                "revision": {
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "revision"
+              ],
+              "title": "ChangedData",
+              "type": "object"
+            },
+            "name": "changed"
+          }
+        ],
+        "name": "applications.changed",
+        "semantics": "invalidation"
       },
       {
-        "name": "windows.changed"
+        "events": [
+          {
+            "data_schema": {
+              "$schema": "https://json-schema.org/draft/2020-12/schema",
+              "properties": {
+                "catalog_revision": {
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "runtime_revision": {
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "settings_revision": {
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "window_revision": {
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "catalog_revision",
+                "window_revision",
+                "settings_revision",
+                "runtime_revision"
+              ],
+              "title": "SubscribedData",
+              "type": "object"
+            },
+            "name": "subscribed"
+          },
+          {
+            "data_schema": {
+              "$schema": "https://json-schema.org/draft/2020-12/schema",
+              "properties": {
+                "revision": {
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "revision"
+              ],
+              "title": "ChangedData",
+              "type": "object"
+            },
+            "name": "changed"
+          }
+        ],
+        "name": "windows.changed",
+        "semantics": "invalidation"
       },
       {
-        "name": "applications.operation"
+        "events": [
+          {
+            "data_schema": {
+              "$schema": "https://json-schema.org/draft/2020-12/schema",
+              "properties": {
+                "catalog_revision": {
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "runtime_revision": {
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "settings_revision": {
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "window_revision": {
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "catalog_revision",
+                "window_revision",
+                "settings_revision",
+                "runtime_revision"
+              ],
+              "title": "SubscribedData",
+              "type": "object"
+            },
+            "name": "subscribed"
+          },
+          {
+            "data_schema": {
+              "$defs": {
+                "CloseObservation": {
+                  "properties": {
+                    "dispatch_error": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "dispatched_window_ids": {
+                      "items": {
+                        "type": "string"
+                      },
+                      "type": "array"
+                    },
+                    "remaining_window_ids": {
+                      "items": {
+                        "type": "string"
+                      },
+                      "type": "array"
+                    },
+                    "status": {
+                      "type": "string"
+                    },
+                    "targeted_window_ids": {
+                      "items": {
+                        "type": "string"
+                      },
+                      "type": "array"
+                    }
+                  },
+                  "required": [
+                    "targeted_window_ids",
+                    "dispatched_window_ids",
+                    "remaining_window_ids",
+                    "status",
+                    "dispatch_error"
+                  ],
+                  "type": "object"
+                },
+                "OperationResult": {
+                  "properties": {
+                    "action": {
+                      "type": "string"
+                    },
+                    "close": {
+                      "anyOf": [
+                        {
+                          "$ref": "#/$defs/CloseObservation"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "id": {
+                      "type": "string"
+                    },
+                    "launch_backend": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "launch_scope": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "message": {
+                      "type": "string"
+                    },
+                    "placement": {
+                      "anyOf": [
+                        {
+                          "$ref": "#/$defs/WorkspacePlacement"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "status": {
+                      "type": "string"
+                    },
+                    "target_id": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "action",
+                    "target_id",
+                    "status",
+                    "message"
+                  ],
+                  "type": "object"
+                },
+                "PlacementStatus": {
+                  "enum": [
+                    "pending",
+                    "placed",
+                    "unavailable",
+                    "failed"
+                  ],
+                  "type": "string"
+                },
+                "WorkspacePlacement": {
+                  "description": "Launch handoff and workspace placement have independent outcomes. A\ncompleted launch with unavailable/failed placement must never be replayed.",
+                  "properties": {
+                    "reason": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "status": {
+                      "$ref": "#/$defs/PlacementStatus"
+                    },
+                    "workspace_id": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "workspace_id",
+                    "status"
+                  ],
+                  "type": "object"
+                }
+              },
+              "$schema": "https://json-schema.org/draft/2020-12/schema",
+              "properties": {
+                "operation": {
+                  "$ref": "#/$defs/OperationResult"
+                }
+              },
+              "required": [
+                "operation"
+              ],
+              "title": "OperationData",
+              "type": "object"
+            },
+            "name": "accepted"
+          },
+          {
+            "data_schema": {
+              "$defs": {
+                "CloseObservation": {
+                  "properties": {
+                    "dispatch_error": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "dispatched_window_ids": {
+                      "items": {
+                        "type": "string"
+                      },
+                      "type": "array"
+                    },
+                    "remaining_window_ids": {
+                      "items": {
+                        "type": "string"
+                      },
+                      "type": "array"
+                    },
+                    "status": {
+                      "type": "string"
+                    },
+                    "targeted_window_ids": {
+                      "items": {
+                        "type": "string"
+                      },
+                      "type": "array"
+                    }
+                  },
+                  "required": [
+                    "targeted_window_ids",
+                    "dispatched_window_ids",
+                    "remaining_window_ids",
+                    "status",
+                    "dispatch_error"
+                  ],
+                  "type": "object"
+                },
+                "OperationResult": {
+                  "properties": {
+                    "action": {
+                      "type": "string"
+                    },
+                    "close": {
+                      "anyOf": [
+                        {
+                          "$ref": "#/$defs/CloseObservation"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "id": {
+                      "type": "string"
+                    },
+                    "launch_backend": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "launch_scope": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "message": {
+                      "type": "string"
+                    },
+                    "placement": {
+                      "anyOf": [
+                        {
+                          "$ref": "#/$defs/WorkspacePlacement"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "status": {
+                      "type": "string"
+                    },
+                    "target_id": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "action",
+                    "target_id",
+                    "status",
+                    "message"
+                  ],
+                  "type": "object"
+                },
+                "PlacementStatus": {
+                  "enum": [
+                    "pending",
+                    "placed",
+                    "unavailable",
+                    "failed"
+                  ],
+                  "type": "string"
+                },
+                "WorkspacePlacement": {
+                  "description": "Launch handoff and workspace placement have independent outcomes. A\ncompleted launch with unavailable/failed placement must never be replayed.",
+                  "properties": {
+                    "reason": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "status": {
+                      "$ref": "#/$defs/PlacementStatus"
+                    },
+                    "workspace_id": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "workspace_id",
+                    "status"
+                  ],
+                  "type": "object"
+                }
+              },
+              "$schema": "https://json-schema.org/draft/2020-12/schema",
+              "properties": {
+                "operation": {
+                  "$ref": "#/$defs/OperationResult"
+                }
+              },
+              "required": [
+                "operation"
+              ],
+              "title": "OperationData",
+              "type": "object"
+            },
+            "name": "running"
+          },
+          {
+            "data_schema": {
+              "$defs": {
+                "CloseObservation": {
+                  "properties": {
+                    "dispatch_error": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "dispatched_window_ids": {
+                      "items": {
+                        "type": "string"
+                      },
+                      "type": "array"
+                    },
+                    "remaining_window_ids": {
+                      "items": {
+                        "type": "string"
+                      },
+                      "type": "array"
+                    },
+                    "status": {
+                      "type": "string"
+                    },
+                    "targeted_window_ids": {
+                      "items": {
+                        "type": "string"
+                      },
+                      "type": "array"
+                    }
+                  },
+                  "required": [
+                    "targeted_window_ids",
+                    "dispatched_window_ids",
+                    "remaining_window_ids",
+                    "status",
+                    "dispatch_error"
+                  ],
+                  "type": "object"
+                },
+                "OperationResult": {
+                  "properties": {
+                    "action": {
+                      "type": "string"
+                    },
+                    "close": {
+                      "anyOf": [
+                        {
+                          "$ref": "#/$defs/CloseObservation"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "id": {
+                      "type": "string"
+                    },
+                    "launch_backend": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "launch_scope": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "message": {
+                      "type": "string"
+                    },
+                    "placement": {
+                      "anyOf": [
+                        {
+                          "$ref": "#/$defs/WorkspacePlacement"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "status": {
+                      "type": "string"
+                    },
+                    "target_id": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "action",
+                    "target_id",
+                    "status",
+                    "message"
+                  ],
+                  "type": "object"
+                },
+                "PlacementStatus": {
+                  "enum": [
+                    "pending",
+                    "placed",
+                    "unavailable",
+                    "failed"
+                  ],
+                  "type": "string"
+                },
+                "WorkspacePlacement": {
+                  "description": "Launch handoff and workspace placement have independent outcomes. A\ncompleted launch with unavailable/failed placement must never be replayed.",
+                  "properties": {
+                    "reason": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "status": {
+                      "$ref": "#/$defs/PlacementStatus"
+                    },
+                    "workspace_id": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "workspace_id",
+                    "status"
+                  ],
+                  "type": "object"
+                }
+              },
+              "$schema": "https://json-schema.org/draft/2020-12/schema",
+              "properties": {
+                "operation": {
+                  "$ref": "#/$defs/OperationResult"
+                }
+              },
+              "required": [
+                "operation"
+              ],
+              "title": "OperationData",
+              "type": "object"
+            },
+            "name": "completed"
+          },
+          {
+            "data_schema": {
+              "$defs": {
+                "CloseObservation": {
+                  "properties": {
+                    "dispatch_error": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "dispatched_window_ids": {
+                      "items": {
+                        "type": "string"
+                      },
+                      "type": "array"
+                    },
+                    "remaining_window_ids": {
+                      "items": {
+                        "type": "string"
+                      },
+                      "type": "array"
+                    },
+                    "status": {
+                      "type": "string"
+                    },
+                    "targeted_window_ids": {
+                      "items": {
+                        "type": "string"
+                      },
+                      "type": "array"
+                    }
+                  },
+                  "required": [
+                    "targeted_window_ids",
+                    "dispatched_window_ids",
+                    "remaining_window_ids",
+                    "status",
+                    "dispatch_error"
+                  ],
+                  "type": "object"
+                },
+                "OperationResult": {
+                  "properties": {
+                    "action": {
+                      "type": "string"
+                    },
+                    "close": {
+                      "anyOf": [
+                        {
+                          "$ref": "#/$defs/CloseObservation"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "id": {
+                      "type": "string"
+                    },
+                    "launch_backend": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "launch_scope": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "message": {
+                      "type": "string"
+                    },
+                    "placement": {
+                      "anyOf": [
+                        {
+                          "$ref": "#/$defs/WorkspacePlacement"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "status": {
+                      "type": "string"
+                    },
+                    "target_id": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "action",
+                    "target_id",
+                    "status",
+                    "message"
+                  ],
+                  "type": "object"
+                },
+                "PlacementStatus": {
+                  "enum": [
+                    "pending",
+                    "placed",
+                    "unavailable",
+                    "failed"
+                  ],
+                  "type": "string"
+                },
+                "WorkspacePlacement": {
+                  "description": "Launch handoff and workspace placement have independent outcomes. A\ncompleted launch with unavailable/failed placement must never be replayed.",
+                  "properties": {
+                    "reason": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "status": {
+                      "$ref": "#/$defs/PlacementStatus"
+                    },
+                    "workspace_id": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "workspace_id",
+                    "status"
+                  ],
+                  "type": "object"
+                }
+              },
+              "$schema": "https://json-schema.org/draft/2020-12/schema",
+              "properties": {
+                "operation": {
+                  "$ref": "#/$defs/OperationResult"
+                }
+              },
+              "required": [
+                "operation"
+              ],
+              "title": "OperationData",
+              "type": "object"
+            },
+            "name": "failed"
+          },
+          {
+            "data_schema": {
+              "$defs": {
+                "CloseObservation": {
+                  "properties": {
+                    "dispatch_error": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "dispatched_window_ids": {
+                      "items": {
+                        "type": "string"
+                      },
+                      "type": "array"
+                    },
+                    "remaining_window_ids": {
+                      "items": {
+                        "type": "string"
+                      },
+                      "type": "array"
+                    },
+                    "status": {
+                      "type": "string"
+                    },
+                    "targeted_window_ids": {
+                      "items": {
+                        "type": "string"
+                      },
+                      "type": "array"
+                    }
+                  },
+                  "required": [
+                    "targeted_window_ids",
+                    "dispatched_window_ids",
+                    "remaining_window_ids",
+                    "status",
+                    "dispatch_error"
+                  ],
+                  "type": "object"
+                },
+                "OperationResult": {
+                  "properties": {
+                    "action": {
+                      "type": "string"
+                    },
+                    "close": {
+                      "anyOf": [
+                        {
+                          "$ref": "#/$defs/CloseObservation"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "id": {
+                      "type": "string"
+                    },
+                    "launch_backend": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "launch_scope": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "message": {
+                      "type": "string"
+                    },
+                    "placement": {
+                      "anyOf": [
+                        {
+                          "$ref": "#/$defs/WorkspacePlacement"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "status": {
+                      "type": "string"
+                    },
+                    "target_id": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "action",
+                    "target_id",
+                    "status",
+                    "message"
+                  ],
+                  "type": "object"
+                },
+                "PlacementStatus": {
+                  "enum": [
+                    "pending",
+                    "placed",
+                    "unavailable",
+                    "failed"
+                  ],
+                  "type": "string"
+                },
+                "WorkspacePlacement": {
+                  "description": "Launch handoff and workspace placement have independent outcomes. A\ncompleted launch with unavailable/failed placement must never be replayed.",
+                  "properties": {
+                    "reason": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "status": {
+                      "$ref": "#/$defs/PlacementStatus"
+                    },
+                    "workspace_id": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "workspace_id",
+                    "status"
+                  ],
+                  "type": "object"
+                }
+              },
+              "$schema": "https://json-schema.org/draft/2020-12/schema",
+              "properties": {
+                "operation": {
+                  "$ref": "#/$defs/OperationResult"
+                }
+              },
+              "required": [
+                "operation"
+              ],
+              "title": "OperationData",
+              "type": "object"
+            },
+            "name": "cancelled"
+          },
+          {
+            "data_schema": {
+              "$defs": {
+                "GapReason": {
+                  "enum": [
+                    "subscriber-lag",
+                    "source-reset"
+                  ],
+                  "type": "string"
+                }
+              },
+              "$schema": "https://json-schema.org/draft/2020-12/schema",
+              "additionalProperties": false,
+              "properties": {
+                "dropped_events": {
+                  "description": "Decimal string: loss counters must survive JavaScript without rounding.",
+                  "type": "string"
+                },
+                "reason": {
+                  "$ref": "#/$defs/GapReason"
+                }
+              },
+              "required": [
+                "reason",
+                "dropped_events"
+              ],
+              "title": "Gap",
+              "type": "object"
+            },
+            "name": "gap"
+          }
+        ],
+        "name": "applications.operation",
+        "semantics": "transitions"
       }
     ]
   },
-  "version": 1
+  "version": 2
 }
