@@ -63,6 +63,8 @@
           "ack_budget_ms": 30000,
           "conflict_domain": "applications",
           "execution": "read",
+          "max_in_flight": 16,
+          "max_owner_in_flight": 8,
           "request_bytes": 1048576,
           "result_bytes": 16777216,
           "sensitivity": "sensitive-read"
@@ -1165,6 +1167,8 @@
           "ack_budget_ms": 30000,
           "conflict_domain": "applications",
           "execution": "read",
+          "max_in_flight": 16,
+          "max_owner_in_flight": 8,
           "request_bytes": 1048576,
           "result_bytes": 16777216,
           "sensitivity": "sensitive-read"
@@ -1248,6 +1252,8 @@
           "ack_budget_ms": 30000,
           "conflict_domain": "applications",
           "execution": "read",
+          "max_in_flight": 16,
+          "max_owner_in_flight": 8,
           "request_bytes": 1048576,
           "result_bytes": 16777216,
           "sensitivity": "sensitive-read"
@@ -1983,6 +1989,8 @@
           "ack_budget_ms": 30000,
           "conflict_domain": "applications",
           "execution": "read",
+          "max_in_flight": 16,
+          "max_owner_in_flight": 8,
           "request_bytes": 1048576,
           "result_bytes": 16777216,
           "sensitivity": "sensitive-read"
@@ -2112,6 +2120,8 @@
           "ack_budget_ms": 30000,
           "conflict_domain": "applications",
           "execution": "effect",
+          "max_in_flight": 16,
+          "max_owner_in_flight": 8,
           "request_bytes": 1048576,
           "result_bytes": 16777216,
           "sensitivity": "effect"
@@ -3278,6 +3288,8 @@
           "ack_budget_ms": 1000,
           "conflict_domain": "applications",
           "execution": "operation",
+          "max_in_flight": 16,
+          "max_owner_in_flight": 8,
           "request_bytes": 1048576,
           "result_bytes": 16777216,
           "sensitivity": "effect"
@@ -3441,6 +3453,8 @@
           "ack_budget_ms": 30000,
           "conflict_domain": "applications",
           "execution": "read",
+          "max_in_flight": 16,
+          "max_owner_in_flight": 8,
           "request_bytes": 1048576,
           "result_bytes": 16777216,
           "sensitivity": "sensitive-read"
@@ -3608,6 +3622,8 @@
           "ack_budget_ms": 30000,
           "conflict_domain": "applications",
           "execution": "effect",
+          "max_in_flight": 16,
+          "max_owner_in_flight": 8,
           "request_bytes": 1048576,
           "result_bytes": 16777216,
           "sensitivity": "effect"

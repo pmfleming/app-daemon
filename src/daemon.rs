@@ -19,7 +19,7 @@ pub(crate) mod events;
 
 pub struct AppDaemon {
     boundary: shelllist_daemon_tokio::ServiceBoundary,
-    api: ApiService,
+    api: Arc<ApiService>,
     applications: Arc<ApplicationService>,
     subscriptions: Arc<OwnedTaskRegistry>,
 }
@@ -32,14 +32,22 @@ impl AppDaemon {
         params_json: &str,
         #[zbus(header)] header: Header<'_>,
     ) -> String {
-        let admitted =
-            match self
-                .boundary
-                .call(header.sender().map(|s| s.as_str()), method, params_json)
-            {
-                Ok(admitted) => admitted,
-                Err(response) => return response,
-            };
+        let Some(declared) = protocol::methods::Method::parse(method) else {
+            return api::error(
+                ErrorCode::UnsupportedMethod,
+                format!("Unsupported app-api method: {method}"),
+            )
+            .to_string();
+        };
+        let admitted = match self.boundary.call_policy(
+            header.sender().map(|s| s.as_str()),
+            method,
+            params_json,
+            declared.policy(),
+        ) {
+            Ok(admitted) => admitted,
+            Err(response) => return response,
+        };
         let params: Value = match serde_json::from_str(params_json) {
             Ok(value) => value,
             Err(error) => {
@@ -50,12 +58,12 @@ impl AppDaemon {
                 .to_string();
             }
         };
-        admitted.encode(
-            &self
-                .api
-                .dispatch_owned(method, params, header.sender().map(ToString::to_string))
-                .await,
-        )
+        let api = self.api.clone();
+        let method = method.to_owned();
+        let owner = header.sender().map(ToString::to_string);
+        admitted
+            .run(async move { api.dispatch_owned(&method, params, owner).await })
+            .await
     }
 
     async fn subscribe(
@@ -267,7 +275,7 @@ pub async fn run() -> Result<()> {
         boundary: shelllist_daemon_tokio::ServiceBoundary::new(
             shelllist_daemon_core::ApiIdentity::new(api::PROTOCOL, api::VERSION as u32),
         ),
-        api: ApiService::new(Arc::clone(&applications)),
+        api: Arc::new(ApiService::new(Arc::clone(&applications))),
         applications,
         subscriptions: Arc::clone(&subscriptions),
     };
