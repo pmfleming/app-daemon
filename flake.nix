@@ -106,6 +106,7 @@
                 bash
                 coreutils
                 dbus
+                git
                 cargo-llvm-cov
                 cargo-machete
                 jq
