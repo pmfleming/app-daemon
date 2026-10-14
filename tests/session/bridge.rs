@@ -71,12 +71,14 @@ impl Bridge {
             .into())
     }
     async fn completed(&mut self, id: &str) -> Result<()> {
-        self.until(|v| {
+        let terminal = |v: &Value| {
             v["kind"] == "event"
                 && v["event"]["data"]["operation"]["id"] == id
                 && v["event"]["data"]["operation"]["status"] == "completed"
-        })
-        .await?;
+        };
+        if !self.seen.iter().any(terminal) {
+            self.until(terminal).await?;
+        }
         Ok(())
     }
     async fn shutdown(mut self) -> Result<Vec<Value>> {
@@ -97,6 +99,83 @@ impl Bridge {
         Ok(self.seen)
     }
 }
+/// Manual measurement, not a timing threshold in CI. All effects use the fixture launcher.
+#[tokio::test]
+#[ignore = "manual current-source reliability baseline"]
+async fn reliability_baseline() -> Result<()> {
+    use std::time::{Duration, Instant};
+    fn ticks(pid: u32) -> Result<u64> {
+        let stat = std::fs::read_to_string(format!("/proc/{pid}/stat"))?;
+        let fields: Vec<_> = stat
+            .rsplit_once(')')
+            .context("proc stat")?
+            .1
+            .split_whitespace()
+            .collect();
+        Ok(fields[11].parse::<u64>()? + fields[12].parse::<u64>()?)
+    }
+    let mut session = Session::start(true).await?;
+    let mut bridge = Bridge::start(&session)?;
+    bridge.subscribe().await?;
+    let mut latencies = Vec::new();
+    for index in 0..200 {
+        let started = Instant::now();
+        assert_eq!(
+            bridge
+                .call(&format!("read-{index}"), "applications.revision", json!({}))
+                .await?["ok"],
+            true
+        );
+        latencies.push(started.elapsed().as_secs_f64() * 1_000_000.0);
+    }
+    for index in 0..10 {
+        let result = bridge
+            .call(
+                &format!("effect-{index}"),
+                "applications.execute",
+                json!({"target_id":"ok.desktop", "action":"launch"}),
+            )
+            .await?;
+        let id = result["data"]["operation"]["id"]
+            .as_str()
+            .context("operation id")?;
+        bridge.completed(id).await?;
+    }
+    // Drain all previous traffic before observing idle. No polling runs here.
+    bridge
+        .call("idle-fence", "applications.revision", json!({}))
+        .await?;
+    let idle_start = bridge.seen.len();
+    let pid = bridge.child.id().context("bridge pid")?;
+    let before_ticks = ticks(pid)?;
+    let started = Instant::now();
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    let idle_seconds = started.elapsed().as_secs_f64();
+    let idle_cpu_ticks = ticks(pid)? - before_ticks;
+    bridge
+        .call("idle-end", "applications.revision", json!({}))
+        .await?;
+    let idle_events = bridge.seen[idle_start..]
+        .iter()
+        .filter(|v| v["kind"] == "event")
+        .count();
+    latencies.sort_by(f64::total_cmp);
+    let frames = bridge.shutdown().await?;
+    let events: Vec<_> = frames.iter().filter(|v| v["kind"] == "event").collect();
+    println!(
+        "SHELLLIST_RELIABILITY {}",
+        json!({
+            "scenario":"isolated-real-app-jsonl-and-dbus", "profile":"cargo-test-debug",
+            "samples":latencies.len(), "latency_us":{"p50":latencies[99],"p95":latencies[189],"p99":latencies[197]},
+            "event_count":events.len(), "event_json_bytes":events.iter().map(|v| v.to_string().len()).sum::<usize>(),
+            "transport_recoveries":frames.iter().filter(|v| v["kind"] == "transport-error").count(),
+            "idle_seconds":idle_seconds,"idle_bridge_cpu_ticks":idle_cpu_ticks,"idle_event_count":idle_events,
+            "effects":"ten temporary fixture launcher operations; no live desktop effects"
+        })
+    );
+    session.shutdown().await
+}
+
 fn route(id: &str, kind: &str) -> Value {
     // Identical local identifiers must not turn two bridge connections into one owner.
     json!({"consumerId":"same-view", "localId":id, "generation":1, "kind":kind})
