@@ -506,41 +506,40 @@ fn read_system_cpu() -> (u64, usize) {
 }
 
 fn read_process_memory(pid: u32) -> MemoryUsage {
-    if let Ok(rollup) = fs::read_to_string(format!("/proc/{pid}/smaps_rollup")) {
-        let values = memory_key_values(&rollup);
-        let private_kib = values
+    match fs::read_to_string(format!("/proc/{pid}/smaps_rollup")) {
+        Ok(rollup) => parse_memory_rollup(&rollup),
+        Err(_) => parse_memory_status(
+            &fs::read_to_string(format!("/proc/{pid}/status")).unwrap_or_default(),
+        ),
+    }
+}
+
+fn parse_memory_rollup(rollup: &str) -> MemoryUsage {
+    let values = memory_bytes(rollup);
+    MemoryUsage {
+        rss_bytes: values.get("Rss").copied().unwrap_or(0),
+        pss_bytes: values.get("Pss").copied().unwrap_or(0),
+        private_bytes: values
             .get("Private_Clean")
             .copied()
             .unwrap_or(0)
             .saturating_add(values.get("Private_Dirty").copied().unwrap_or(0))
-            .saturating_add(values.get("Private_Hugetlb").copied().unwrap_or(0));
-        return MemoryUsage {
-            rss_bytes: values.get("Rss").copied().unwrap_or(0).saturating_mul(1024),
-            pss_bytes: values.get("Pss").copied().unwrap_or(0).saturating_mul(1024),
-            private_bytes: private_kib.saturating_mul(1024),
-            swap_bytes: values
-                .get("SwapPss")
-                .or_else(|| values.get("Swap"))
-                .copied()
-                .unwrap_or(0)
-                .saturating_mul(1024),
-            rss_available: values.contains_key("Rss"),
-            pss_available: values.contains_key("Pss"),
-        };
-    }
-    let status = fs::read_to_string(format!("/proc/{pid}/status")).unwrap_or_default();
-    let values = memory_key_values(&status);
-    MemoryUsage {
-        rss_bytes: values
-            .get("VmRSS")
-            .copied()
-            .unwrap_or(0)
-            .saturating_mul(1024),
+            .saturating_add(values.get("Private_Hugetlb").copied().unwrap_or(0)),
         swap_bytes: values
-            .get("VmSwap")
+            .get("SwapPss")
+            .or_else(|| values.get("Swap"))
             .copied()
-            .unwrap_or(0)
-            .saturating_mul(1024),
+            .unwrap_or(0),
+        rss_available: values.contains_key("Rss"),
+        pss_available: values.contains_key("Pss"),
+    }
+}
+
+fn parse_memory_status(status: &str) -> MemoryUsage {
+    let values = memory_bytes(status);
+    MemoryUsage {
+        rss_bytes: values.get("VmRSS").copied().unwrap_or(0),
+        swap_bytes: values.get("VmSwap").copied().unwrap_or(0),
         rss_available: values.contains_key("VmRSS"),
         ..MemoryUsage::default()
     }
@@ -550,11 +549,17 @@ fn read_process_memory(pid: u32) -> MemoryUsage {
 mod cgroup_tests;
 #[cfg(test)]
 mod disk_tests;
+#[cfg(test)]
+mod memory_tests;
 
-fn memory_key_values(value: &str) -> HashMap<&str, u64> {
+// Both smaps_rollup and status report memory in KiB. Normalize once at the edge.
+fn memory_bytes(value: &str) -> HashMap<&str, u64> {
     value
         .lines()
         .filter_map(|line| line.split_once(':'))
-        .filter_map(|(key, value)| Some((key, value.split_whitespace().next()?.parse().ok()?)))
+        .filter_map(|(key, value)| {
+            let kib: u64 = value.split_whitespace().next()?.parse().ok()?;
+            Some((key, kib.saturating_mul(1024)))
+        })
         .collect()
 }

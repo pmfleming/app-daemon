@@ -41,5 +41,21 @@ Validation: all-feature tests and strict all-target/all-feature Clippy pass;
 RQLens hotspots regenerated. The cursor version and serialized field order remain
 unchanged.
 
+## 4. Isolate memory parsing and normalize units once
+
+The procfs reader now delegates to pure rollup/status parsers. KiB-to-byte
+conversion is centralized in the numeric acquisition helper; private-memory
+components still use saturating addition, and readable zero remains distinct
+from unavailable data. Rollup read failures still fall back to status; a readable
+partial rollup is not silently replaced.
+
+Table-driven tests cover both formats, missing/malformed values, zero PSS/RSS,
+SwapPss precedence (including zero), Swap fallback, overflow, and a missing PID.
+The combined Halstead effort of the reader and its parsing helpers falls from
+36,461 to 19,308; extraction is included in that comparison.
+
+Validation: all-feature tests and strict all-target/all-feature Clippy pass;
+RQLens hotspots regenerated.
+
 Static metrics remain advisory/partial because framework-generated method items
 are not inventoried; passing tests do not include the ignored live-systemd fixtures.
