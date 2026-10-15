@@ -28,5 +28,18 @@ and duplicate mappings across processes.
 Validation: all-feature tests and strict all-target/all-feature Clippy pass;
 RQLens hotspots regenerated. No resource wire fields changed.
 
+## 3. Borrow cursor fields when encoding
+
+The internal cursor schema is generic over its text representation: encoding uses
+`&str`, while decoding still owns `String` fields. This removes two temporary
+string allocations per encoded cursor without restricting escaped JSON strings.
+A regression compares the exact base64 output with the former owned version-2
+representation, including Unicode, quotes and backslashes, and checks target and
+epoch validation.
+
+Validation: all-feature tests and strict all-target/all-feature Clippy pass;
+RQLens hotspots regenerated. The cursor version and serialized field order remain
+unchanged.
+
 Static metrics remain advisory/partial because framework-generated method items
 are not inventoried; passing tests do not include the ignored live-systemd fixtures.

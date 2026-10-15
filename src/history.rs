@@ -63,11 +63,11 @@ pub struct EnergyTotal {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-struct HistoryCursor {
+struct HistoryCursor<Text = String> {
     version: u8,
-    target_id: String,
+    target_id: Text,
     after_timestamp_ms: u64,
-    epoch: String,
+    epoch: Text,
 }
 
 #[derive(Debug)]
@@ -492,9 +492,9 @@ fn new_cursor_epoch() -> String {
 fn encode_cursor(target_id: &str, timestamp_ms: u64, epoch: &str) -> anyhow::Result<String> {
     let cursor = HistoryCursor {
         version: CURSOR_VERSION,
-        target_id: target_id.to_owned(),
+        target_id,
         after_timestamp_ms: timestamp_ms,
-        epoch: epoch.to_owned(),
+        epoch,
     };
     Ok(URL_SAFE_NO_PAD.encode(serde_json::to_vec(&cursor)?))
 }

@@ -3,6 +3,33 @@ use super::{
     ResourceUsage, now_milliseconds, persist_snapshot,
 };
 
+#[test]
+fn borrowed_cursor_encoding_preserves_owned_v2_wire_format() -> anyhow::Result<()> {
+    use super::{HistoryCursor, URL_SAFE_NO_PAD, decode_cursor, encode_cursor};
+    use base64::Engine as _;
+    for target in ["app.desktop", "org.\"quoted\\雪.desktop"] {
+        let epoch = "epoch-\"\\雪";
+        let legacy = HistoryCursor {
+            version: 2,
+            target_id: target.to_owned(),
+            after_timestamp_ms: 123,
+            epoch: epoch.to_owned(),
+        };
+        let encoded = encode_cursor(target, 123, epoch)?;
+        assert_eq!(
+            encoded,
+            URL_SAFE_NO_PAD.encode(serde_json::to_vec(&legacy)?)
+        );
+        let decoded = decode_cursor(&encoded, target, epoch)?;
+        assert_eq!(decoded.target_id, target);
+        assert_eq!(decoded.epoch, epoch);
+        assert_eq!(decoded.after_timestamp_ms, 123);
+        assert!(decode_cursor(&encoded, "another-app", epoch).is_err());
+        assert!(decode_cursor(&encoded, target, "another-epoch").is_err());
+    }
+    Ok(())
+}
+
 fn usage(cpu: f64, energy: f64) -> ResourceUsage {
     let mut usage = ResourceUsage::default();
     usage.compute.cpu_percent = cpu;
