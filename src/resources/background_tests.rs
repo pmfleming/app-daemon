@@ -32,6 +32,10 @@ fn catalog() -> anyhow::Result<(tempfile::TempDir, Catalog)> {
             ),
         )?;
     }
+    std::fs::write(
+        dir.path().join("org.example.Bus.desktop"),
+        "[Desktop Entry]\nType=Application\nName=Bus\nDBusActivatable=true\n",
+    )?;
     let catalog = Catalog::from_paths(vec![dir.path().into()]);
     Ok((dir, catalog))
 }
@@ -44,18 +48,14 @@ fn windowless_apps_are_discovered_published_and_added_to_history() -> anyhow::Re
         let mut state = provider.state.lock().unwrap();
         state.processes = HashMap::from([
             (42, process(1, 100)),
-            (43, process(1, 101)), // Independent roots sharing one application cgroup.
+            (43, process(1, 101)), // Independent roots initially sharing a launcher.
+            (50, process(1, 200)),
             (99, process(1, 1)),
         ]);
         state.cgroups = HashMap::from([
-            (
-                42,
-                "/user.slice/app-org.example.App@12345678.service".into(),
-            ),
-            (
-                43,
-                "/user.slice/app-org.example.App@12345678.service".into(),
-            ),
+            (42, "/app-launcher.service".into()),
+            (43, "/app-launcher.service".into()),
+            (50, "/org.example.Bus.service/worker".into()),
             (
                 99,
                 "/user.slice/app-org.example.Shortcut@12345678.service".into(),
@@ -67,21 +67,43 @@ fn windowless_apps_are_discovered_published_and_added_to_history() -> anyhow::Re
         provider: provider.clone(),
         ..Default::default()
     };
-    sampler.sample_for_applications(&HashMap::new(), &catalog, &Default::default());
+    let windows = HashMap::from([("org.example.App.desktop".into(), vec![42])]);
+    let initial = sampler.sample_for_applications(&windows, &catalog, &Default::default());
+    let usage = initial.usage_for_application("org.example.App.desktop", []);
+    assert_eq!(
+        usage.compute.process_count, 1,
+        "unrelated launcher siblings stay unowned"
+    );
+    assert_eq!(usage.measurement.attribution_method, "process-tree");
     sampler.previous_sample = Some(Instant::now() - std::time::Duration::from_secs(2));
     {
         let mut state = provider.state.lock().unwrap();
         state.system_ticks += 100;
         state.processes.get_mut(&42).unwrap().total_ticks += 20;
+        for pid in [42, 43] {
+            state.cgroups.insert(
+                pid,
+                "/user.slice/app-org.example.App@12345678.service".into(),
+            );
+        }
     }
     let snapshot = sampler.sample_for_applications(&HashMap::new(), &catalog, &Default::default());
     assert_eq!(
         snapshot.target_roots.len(),
-        1,
+        2,
         "launch-only scopes must not claim resources"
     );
-    assert_eq!(snapshot.cgroup_path_by_root.len(), 2);
-    assert_eq!(snapshot.cgroup_members_by_path.len(), 1);
+    assert_eq!(
+        snapshot
+            .usage_for_application("org.example.Bus.desktop", [])
+            .compute
+            .process_count,
+        1
+    );
+    assert_eq!(
+        snapshot.cgroup_path_by_root[&50],
+        "/org.example.Bus.service"
+    );
     let usage = snapshot.usage_for_application("org.example.App.desktop", []);
     assert_eq!(usage.compute.process_count, 2);
     assert_eq!(usage.compute.cpu_percent, 20.0);
@@ -185,57 +207,6 @@ fn ownership_follows_window_reassignment_and_survives_parent_exit_but_not_pid_re
     let reused = sampler.sample_for_applications(&HashMap::new(), &catalog, &Default::default());
     assert!(reused.target_roots().is_empty());
     assert_ne!(background.runtime_revision(), reused.runtime_revision());
-    Ok(())
-}
-
-#[test]
-fn unrelated_launcher_groups_are_not_borrowed_and_stable_dbus_units_are_discovered()
--> anyhow::Result<()> {
-    let (dir, catalog) = catalog()?;
-    let provider = Arc::new(TestProvider::default());
-    {
-        let mut state = provider.state.lock().unwrap();
-        state.processes = HashMap::from([(42, process(1, 100)), (43, process(1, 101))]);
-        state.cgroups = HashMap::from([
-            (42, "/app-launcher.service".into()),
-            (43, "/app-launcher.service".into()),
-        ]);
-    }
-    let mut sampler = ResourceSampler {
-        provider: provider.clone(),
-        ..Default::default()
-    };
-    let windows = HashMap::from([("org.example.App.desktop".into(), vec![42])]);
-    let snapshot = sampler.sample_for_applications(&windows, &catalog, &Default::default());
-    let usage = snapshot.usage_for_application("org.example.App.desktop", []);
-    assert_eq!(
-        usage.compute.process_count, 1,
-        "do not charge unrelated siblings in the launcher service"
-    );
-    assert_eq!(usage.measurement.attribution_method, "process-tree");
-    std::fs::write(
-        dir.path().join("org.example.Bus.desktop"),
-        "[Desktop Entry]\nType=Application\nName=Bus\nDBusActivatable=true\n",
-    )?;
-    let catalog = Catalog::from_paths(vec![dir.path().into()]);
-    provider
-        .state
-        .lock()
-        .unwrap()
-        .cgroups
-        .insert(43, "/org.example.Bus.service/worker".into());
-    let snapshot = sampler.sample_for_applications(&HashMap::new(), &catalog, &Default::default());
-    assert_eq!(
-        snapshot
-            .usage_for_application("org.example.Bus.desktop", [])
-            .compute
-            .process_count,
-        1
-    );
-    assert_eq!(
-        snapshot.cgroup_path_by_root[&43],
-        "/org.example.Bus.service"
-    );
     Ok(())
 }
 

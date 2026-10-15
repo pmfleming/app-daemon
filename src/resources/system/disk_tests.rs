@@ -2,37 +2,6 @@ use super::{AllocatedFiles, DiskFileId, DiskScanBudget, allocated_directory_byte
 use std::{fs, os::unix::fs::MetadataExt};
 
 #[test]
-fn allocated_totals_saturate_and_deduplicate_by_device_and_inode() {
-    let mut files = AllocatedFiles::default();
-    let first = DiskFileId {
-        device: 1,
-        inode: 1,
-    };
-    files.include(first, 10);
-    files.include(first, 999);
-    assert_eq!(
-        files.bytes, 10,
-        "only the first observation of an inode counts"
-    );
-    files.include(
-        DiskFileId {
-            device: 2,
-            inode: 1,
-        },
-        20,
-    );
-    assert_eq!(files.bytes, 30, "inode numbers are scoped to their device");
-    files.include(
-        DiskFileId {
-            device: 1,
-            inode: 2,
-        },
-        u64::MAX,
-    );
-    assert_eq!(files.bytes, u64::MAX);
-}
-
-#[test]
 fn disk_walks_count_unique_owned_files_and_never_publish_partial_sizes() -> anyhow::Result<()> {
     let directory = tempfile::tempdir()?;
     let file = directory.path().join("one");
@@ -49,7 +18,34 @@ fn disk_walks_count_unique_owned_files_and_never_publish_partial_sizes() -> anyh
         file.clone(),                  // A regular file is not an application directory.
     ];
     let total = allocated_directory_bytes(&roots, &mut DiskScanBudget::default());
-    assert_eq!(total, Some(fs::metadata(file)?.blocks() * 512));
+    let metadata = fs::metadata(file)?;
+    assert_eq!(total, Some(metadata.blocks() * 512));
+    let mut files = AllocatedFiles::default();
+    files
+        .scan_directory(directory.path(), &mut DiskScanBudget::default())
+        .expect("complete scan");
+    let id = DiskFileId {
+        device: metadata.dev(),
+        inode: metadata.ino(),
+    };
+    files.include(id, u64::MAX);
+    assert_eq!(
+        Some(files.bytes),
+        total,
+        "repeat observations cannot replace an inode's size"
+    );
+    files.include(
+        DiskFileId {
+            device: id.device.wrapping_add(1),
+            ..id
+        },
+        u64::MAX,
+    );
+    assert_eq!(
+        files.bytes,
+        u64::MAX,
+        "different devices count independently and totals saturate"
+    );
     for mut budget in [
         DiskScanBudget {
             remaining_entries: 2,

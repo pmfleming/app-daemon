@@ -210,15 +210,32 @@ mod tests {
     }
     #[test]
     fn resource_projection_fixture_is_current() {
-        let mut fixture: serde_json::Value =
-            serde_json::from_str(include_str!("../../test_support/app-resource-v1.json")).unwrap();
+        fn shape(value: serde_json::Value) -> serde_json::Value {
+            match value {
+                serde_json::Value::Object(fields) => fields
+                    .into_iter()
+                    .map(|(key, value)| (key, shape(value)))
+                    .collect(),
+                _ => serde_json::Value::Null,
+            }
+        }
+        let mut fixture = crate::protocol::resource_contract_fixture().unwrap();
         let original = fixture.clone();
         let current: crate::model::ResourceUsage =
             serde_json::from_value(fixture["current"].clone()).unwrap();
+        // JSON's integer/float spellings are interchangeable; field paths are not.
+        assert_eq!(
+            shape(serde_json::to_value(&current).unwrap()),
+            shape(fixture["current"].clone())
+        );
         fixture["current"]["metric_availability"] =
             serde_json::to_value(ResourceAvailability::for_usage(&current).project()).unwrap();
         let point =
             super::normalize(serde_json::from_value(fixture["history_point"].clone()).unwrap());
+        assert_eq!(
+            shape(serde_json::to_value(&point).unwrap()),
+            shape(fixture["history_point"].clone())
+        );
         fixture["history_point"]["metric_availability"] =
             serde_json::to_value(&point.resources.metric_availability).unwrap();
         fixture["summary"] = serde_json::to_value(super::summarize(

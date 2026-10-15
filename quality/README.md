@@ -1,5 +1,9 @@
 # RustQualityLens baseline
 
+The current [70 → 47 test-pruning review](test-pruning-70-to-47.md) records the
+33% registered-test reduction, retained behavior/regressions, source-size savings,
+and paired coverage results. Earlier test-count reports below are historical.
+
 The [next five improvements](next-five-improvements.md) cover allocation-free stat
 parsing, file-cache ownership, borrowed cursors, memory parsing and bounded disk
 accounting, with per-step verification and explicit aggregate metric tradeoffs.
@@ -12,7 +16,7 @@ The latest [query/sampling allocation review](query-allocation-review.md) record
 production refactors, benchmark allocation reductions, fresh RQLens measurements,
 and unchanged test counts, alongside explicit metric tradeoffs.
 
-The subsequent [test-pruning review](test-pruning-review.md) records the current
+The earlier [test-pruning review](test-pruning-review.md) records the
 97 → 65 registered-test reduction, retained regressions and measured coverage
 tradeoffs. Historical metric baselines below describe their earlier snapshots.
 

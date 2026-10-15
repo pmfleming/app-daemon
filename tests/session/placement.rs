@@ -109,7 +109,18 @@ async fn category_overrides_context_for_all_launch_paths_despite_scope_migration
             .iter()
             .all(|command| !command.contains("workspace = '9'"))
     );
+    drop(stream);
     drop(proxy);
+    session.restart().await?;
+    let restored = call(&session.proxy().await?, "applications.query", json!({})).await?;
+    let app = restored["data"]["applications"]["applications"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|app| app["id"] == "ok.desktop")
+        .unwrap();
+    assert_eq!(app["category"], "text");
+    assert_eq!(app["default_workspace_id"], "5");
     session.shutdown().await
 }
 
@@ -225,74 +236,76 @@ async fn dbus_owner_proves_new_window_ownership_for_launch_and_desktop_action() 
 }
 
 #[tokio::test]
-async fn rejected_and_unconfirmed_moves_preserve_launch_receipt_and_report_partial_failure()
--> Result<()> {
+async fn placement_requires_confirmation_without_losing_successful_launch_receipts() -> Result<()> {
     let mut session = Session::start(true).await?;
     let _manager = manager(&session).await?;
     let proxy = session.proxy().await?;
     let mut stream = events(&proxy).await?;
-    for accept in [false, true] {
-        session.compositor.set("[]");
-        session.compositor.moves(accept, false);
-        let accepted = call(
-            &proxy,
-            "applications.execute",
-            json!({"target_id":"ok.desktop","action":"launch","workspace_id":"3"}),
-        )
-        .await?;
-        let id = accepted["data"]["operation"]["id"].as_str().unwrap();
-        handoff(&mut stream, id).await?;
+    for (action, accept, apply, workspace) in [
+        ("launch", false, false, "3"),
+        ("launch", true, false, "3"),
+        ("move-to-workspace", true, false, "3"),
+        ("move-to-workspace", true, true, "3"),
+        ("move-to-workspace", true, true, "name:code"),
+        ("move-to-workspace", true, true, "special:scratchpad"),
+        ("move-to-workspace", true, true, "name:2"),
+        ("activate", true, true, "3"),
+    ] {
+        let launching = action != "move-to-workspace";
+        if action == "activate" {
+            // Placement succeeds, then focus fails: the launch receipt must survive.
+            session.compositor.reject_focus();
+        }
+        let mut initial = window("0x123", "ok", std::process::id(), 9);
+        // A numeric name is not proof of the corresponding numeric workspace ID.
+        initial["workspace"]["name"] = json!("3");
+        let windows = json!([initial]).to_string();
         session
             .compositor
-            .set(&json!([window("0x123", "ok", std::process::id(), 9)]).to_string());
-        let result = operation(&mut stream, id, "completed").await?;
-        assert_eq!(result["placement"]["status"], "failed", "{result}");
-        assert_eq!(result["launch_backend"], "uwsm-app");
-        assert!(
-            result["placement"]["reason"]
-                .as_str()
-                .unwrap()
-                .contains(if accept { "not confirmed" } else { "rejected" })
-        );
-    }
-    drop(proxy);
-    session.shutdown().await
-}
-
-#[tokio::test]
-async fn explicit_moves_require_snapshot_confirmation() -> Result<()> {
-    let mut session = Session::start(true).await?;
-    let proxy = session.proxy().await?;
-    let mut stream = events(&proxy).await?;
-    for (accept, apply, workspace, terminal) in [
-        (false, false, "3", "failed"),
-        (true, false, "3", "failed"),
-        (true, true, "3", "completed"),
-        (true, true, "name:code", "completed"),
-        (true, true, "special:scratchpad", "completed"),
-        (true, true, "name:2", "completed"),
-    ] {
-        let mut initial = window("0x123", "ok", std::process::id(), 9);
-        // A numeric name is not proof of having moved to that numeric workspace ID.
-        initial["workspace"]["name"] = json!("3");
-        session.compositor.set(&json!([initial]).to_string());
+            .set(if launching { "[]" } else { &windows });
         session.compositor.moves(accept, apply);
         let accepted = call(
             &proxy,
             "applications.execute",
             json!({
-                "target_id":"ok.desktop", "action":"move-to-workspace",
-                "window_id":"window-123", "workspace_id":workspace
+                "target_id":"ok.desktop", "workspace_id":workspace,
+                "action":action,
+                "window_id":if launching { None } else { Some("window-123") },
             }),
         )
         .await?;
         let id = accepted["data"]["operation"]["id"]
             .as_str()
             .context("operation id")?;
+        if launching {
+            handoff(&mut stream, id).await?;
+            session.compositor.set(&windows);
+        }
+        let terminal = if action != "activate" && (launching || apply) {
+            "completed"
+        } else {
+            "failed"
+        };
         let result = operation(&mut stream, id, terminal).await?;
-        let message = result["message"].as_str().unwrap();
+        let message = if launching {
+            assert_eq!(
+                result["placement"]["status"],
+                if apply { "placed" } else { "failed" },
+                "{result}"
+            );
+            assert_eq!(result["launch_backend"], "uwsm-app");
+            if apply {
+                &result["message"]
+            } else {
+                &result["placement"]["reason"]
+            }
+        } else {
+            &result["message"]
+        };
         assert!(
-            message.contains(if apply {
+            message.as_str().unwrap().contains(if action == "activate" {
+                "rejected the focus"
+            } else if apply {
                 "Moved"
             } else if accept {
                 "not confirmed"

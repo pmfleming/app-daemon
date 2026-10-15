@@ -556,5 +556,3 @@ pub fn persist_snapshot(snapshot: HistorySnapshot) -> std::io::Result<()> {
 mod recovery_tests;
 #[cfg(test)]
 mod tests;
-#[cfg(test)]
-mod timing_tests;

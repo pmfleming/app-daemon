@@ -19,7 +19,20 @@ use support::{Session, call, cancel, events, operation, raw_call, running, stopp
 async fn dbus_requests_are_validated_and_connection_owned_results_are_recoverable() -> Result<()> {
     let mut session = Session::start(true).await?;
     let proxy = session.proxy().await?;
+    let oversized =
+        json!({"target_id":"ok.desktop", "action":"launch"}).to_string() + &" ".repeat(1024 * 1024);
+    let malformed_oversized = "[".repeat(1024 * 1024 + 1);
     for (method, params, code) in [
+        (
+            "applications.execute",
+            oversized.as_str(),
+            "request-too-large",
+        ),
+        (
+            "applications.execute",
+            malformed_oversized.as_str(),
+            "request-too-large",
+        ),
         ("unknown.method", "{}", "unsupported-method"),
         ("applications.query", "{", "validation-error"),
         (
@@ -39,6 +52,10 @@ async fn dbus_requests_are_validated_and_connection_owned_results_are_recoverabl
         assert_eq!(response["error"]["retryable"], false);
         assert!(response.get("data").is_none());
     }
+    assert!(
+        !session.state_path("handoff.pid").exists(),
+        "rejected calls must not launch"
+    );
     let invalid: String = proxy.call("Subscribe", &(vec!["unknown.stream"],)).await?;
     assert_eq!(
         serde_json::from_str::<serde_json::Value>(&invalid)?["error"]["code"],

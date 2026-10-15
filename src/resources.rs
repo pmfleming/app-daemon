@@ -18,8 +18,6 @@ mod energy;
 mod gpu;
 mod network;
 mod provider;
-#[cfg(test)]
-mod resume_tests;
 mod system;
 
 use discovery::ProcessSample;
@@ -913,10 +911,6 @@ mod background_tests;
 pub(crate) mod benchmarks;
 #[cfg(test)]
 mod cache_tests;
-#[cfg(test)]
-mod gpu_usage_tests;
-#[cfg(test)]
-mod network_tests;
 #[cfg(any(test, feature = "benchmarks"))]
 mod test_provider;
 #[cfg(test)]

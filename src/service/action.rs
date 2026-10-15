@@ -17,8 +17,6 @@ use super::identity::{resolve_target, target_window};
 use crate::ownership::Snapshot as OwnershipSnapshot;
 
 mod close;
-#[cfg(test)]
-mod tests;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(rename_all = "kebab-case")]

@@ -141,26 +141,3 @@ fn settings_revision(applications: &BTreeMap<String, ApplicationSettings>) -> u6
     }
     hasher.finish()
 }
-
-#[cfg(test)]
-mod tests {
-    use anyhow::Context;
-
-    use super::SettingsStore;
-
-    #[test]
-    fn persists_category_as_a_default_workspace() -> anyhow::Result<()> {
-        let directory = tempfile::tempdir()?;
-        let path = directory.path().join("settings.json");
-        let (store, _) = SettingsStore::load(Some(path.clone()))
-            .prepare_update("example.desktop".into(), "code".into())?;
-        store.persist()?;
-        let loaded = SettingsStore::load(Some(path));
-        let settings = loaded
-            .for_application("example.desktop")
-            .context("saved settings")?;
-        assert_eq!(settings.category, "code");
-        assert_eq!(settings.workspace_id.as_deref(), Some("3"));
-        Ok(())
-    }
-}

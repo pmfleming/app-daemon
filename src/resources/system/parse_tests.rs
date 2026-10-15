@@ -1,7 +1,39 @@
-use super::{MemoryUsage, parse_memory_rollup, parse_memory_status, read_process_memory};
+use super::{
+    MemoryUsage, parse_memory_rollup, parse_memory_status, parse_process_stat, read_process_memory,
+};
 
 #[test]
-fn memory_parsers_preserve_units_availability_and_swap_precedence() {
+fn procfs_inputs_preserve_identity_counters_units_and_availability() {
+    let stat = "42 (name with ) spaces) S 7 0 0 0 0 0 0 0 17 0 120 30 0 0 0 0 5 0 99 0 0";
+    let identity = crate::process::parse_process(stat).unwrap();
+    let process = parse_process_stat(stat).unwrap();
+    assert_eq!((identity.parent, identity.start), (7, 99));
+    assert_eq!((process.parent_pid, process.start_ticks), (7, 99));
+    assert_eq!(
+        (
+            process.total_ticks,
+            process.major_faults,
+            process.thread_count
+        ),
+        (150, 17, 5)
+    );
+    assert!(crate::process::parse_process(&stat.replace(") S", ") Z")).is_none());
+    for invalid in [
+        "malformed",
+        "42 (name) S 7",
+        "42 (name) S 7 0 0 0 0 0 0 0 17 0 120 30 0 0 0 0 5 0",
+    ] {
+        assert!(parse_process_stat(invalid).is_none());
+        assert!(crate::process::parse_process(invalid).is_none());
+    }
+    assert_eq!(
+        parse_process_stat(&stat.replace("120 30", &format!("{} 30", u64::MAX)))
+            .unwrap()
+            .total_ticks,
+        u64::MAX
+    );
+    assert!(parse_process_stat(&stat.replace("120 30", "invalid 30")).is_none());
+
     let overflow = format!(
         "Rss: {} kB\nPrivate_Clean: {} kB\nPrivate_Dirty: 1 kB\nSwap: 9 kB\n",
         u64::MAX,

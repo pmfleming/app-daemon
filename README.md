@@ -32,13 +32,13 @@ Launch operations with workspace context expose an optional `placement` object: 
 
 `cargo test --locked --all-features` includes private D-Bus/compositor integration tests. They create their own bus configuration, isolated HOME/XDG roots, command fixtures, and Unix sockets; no host desktop service is activated. Coverage includes metadata refresh, D-Bus-only activation/actions, operation recovery/ownership, launch failures, the real ten-second handoff timeout, cancellation, shutdown persistence, and compositor recovery.
 
-Two opt-in tests use the real user systemd manager to verify that service-mode executables and scope-mode GTK handoffs survive stopping their host service. They create only uniquely named temporary fixture units/processes and clean them up:
+An opt-in, two-case test uses the real user systemd manager to verify that service-mode executables and scope-mode GTK handoffs survive stopping their host service. It creates only uniquely named temporary fixture units/processes and cleans them up:
 
 ```sh
 cargo test --locked --test systemd_lifetime -- --ignored isolated_
 ```
 
-These tests are excluded from sandbox builds; the private-bus tests run normally in the Nix check phase. Neither suite launches a real graphical application.
+This test is excluded from sandbox builds; the private-bus tests run normally in the Nix check phase. Neither suite launches a real graphical application.
 
 ## Resource metrics
 

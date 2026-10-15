@@ -15,7 +15,7 @@ fn catalog_visibility_respects_desktops_and_id_precedence() -> anyhow::Result<()
         "[Desktop Entry]\nType=Application\nName=Visible lower copy\nExec=true\n",
     )?;
     fs::write(
-        high.path().join("plain.desktop"),
+        high.path().join("plain-editor.desktop"),
         "[Desktop Entry]\nType=Application\nName=Plain\nExec=true\nNotShowIn=app-daemon-test-excluded;\n",
     )?;
     fs::write(
@@ -25,7 +25,12 @@ fn catalog_visibility_respects_desktops_and_id_precedence() -> anyhow::Result<()
 
     let catalog = Catalog::from_paths(vec![high.path().into(), low.path().into()]);
     assert_eq!(catalog.entries.len(), 1);
-    assert_eq!(catalog.entries[0].id, "plain.desktop");
+    assert_eq!(catalog.entries[0].id, "plain-editor.desktop");
+    assert_eq!(
+        catalog.target_for_cgroup(r"/app-Hyprland-plain\x2deditor-deadbeef.scope/child"),
+        Some("plain-editor.desktop"),
+        "escaped desktop IDs resolve through nested application scopes"
+    );
     assert_eq!(catalog.entries[0].icon, "");
     assert_eq!(catalog.entries[0].startup_class, "");
     assert!(!super::shown_on_desktop(

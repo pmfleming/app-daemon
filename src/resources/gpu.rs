@@ -204,21 +204,5 @@ fn parse_scaled(value: &str, default_unit: &str, units: &[(&str, u64)]) -> Optio
 }
 
 #[cfg(test)]
-mod tests {
-    use super::parse_gpu_fdinfo;
-    use anyhow::Context;
-
-    #[test]
-    fn parses_valid_drm_counters_and_rejects_malformed_input() -> anyhow::Result<()> {
-        assert!(parse_gpu_fdinfo("drm-engine-gfx: nope\n").is_none());
-        assert!(parse_gpu_fdinfo("drm-client-id: 4\ndrm-engine-gfx: nope\n").is_none());
-        let value = "drm-pdev: 0000:03:00.0\ndrm-client-id: 7\ndrm-engine-gfx: 250000000 ns\ndrm-engine-compute: 10 ms\ndrm-memory-vram: 64 MiB\ndrm-resident-vram: 32 MiB\n";
-        let (id, client) = parse_gpu_fdinfo(value).context("DRM client metrics")?;
-        assert_eq!(id, "0000:03:00.0/7");
-        assert_eq!(client.engine_nanoseconds["gfx"], 250_000_000);
-        assert_eq!(client.engine_nanoseconds["compute"], 10_000_000);
-        assert_eq!(client.resident_regions["vram"], 32 * 1024 * 1024);
-        assert_eq!(client.allocated_regions["vram"], 64 * 1024 * 1024);
-        Ok(())
-    }
-}
+#[path = "gpu_usage_tests.rs"]
+mod tests;

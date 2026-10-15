@@ -1,10 +1,14 @@
+use super::super::{ResourceSampler, provider::ProcessStat, test_provider::TestProvider};
 use super::{
-    ResourceSampler,
-    provider::{NetworkCounters, ProcessStat},
-    test_provider::TestProvider,
+    INET_DIAG_INFO, INET_DIAG_MESSAGE_LENGTH, TCP_INFO_BYTES_ACKED_OFFSET,
+    TCP_INFO_BYTES_RECEIVED_OFFSET, TCP_INFO_COUNTERS_LENGTH, parse_diag_message, write_u16,
+    write_u32,
 };
 use crate::model::ResourceUsage;
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 
 fn sample(sampler: &mut ResourceSampler, pids: &[u32]) -> ResourceUsage {
     sampler
@@ -25,12 +29,26 @@ fn socket(provider: &TestProvider, pid: u32, inode: u64, received_bytes: u64) {
         },
     );
     state.sockets.entry(pid).or_default().insert(inode);
-    state.network.get_or_insert_default().insert(
-        inode,
-        NetworkCounters {
-            received_bytes,
-            transmitted_bytes: received_bytes / 2,
-        },
+    // Feed the sampler decoded kernel messages rather than pre-decoded counters.
+    let mut message = vec![0_u8; INET_DIAG_MESSAGE_LENGTH + 4 + TCP_INFO_COUNTERS_LENGTH];
+    write_u32(&mut message, 68, inode as u32);
+    write_u16(
+        &mut message,
+        INET_DIAG_MESSAGE_LENGTH,
+        (4 + TCP_INFO_COUNTERS_LENGTH) as u16,
+    );
+    write_u16(&mut message, INET_DIAG_MESSAGE_LENGTH + 2, INET_DIAG_INFO);
+    let payload = INET_DIAG_MESSAGE_LENGTH + 4;
+    for (offset, bytes) in [
+        (TCP_INFO_BYTES_ACKED_OFFSET, received_bytes / 2),
+        (TCP_INFO_BYTES_RECEIVED_OFFSET, received_bytes),
+    ] {
+        message[payload + offset..payload + offset + 8].copy_from_slice(&bytes.to_ne_bytes());
+    }
+    parse_diag_message(
+        &message,
+        &HashSet::from([inode]),
+        state.network.get_or_insert_default(),
     );
 }
 

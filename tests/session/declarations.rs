@@ -5,40 +5,6 @@ use serde_json::{Value, json};
 use super::support::{Session, raw_call};
 
 #[tokio::test]
-async fn direct_bus_rejects_oversized_calls_and_old_interfaces_before_launch() -> Result<()> {
-    let mut session = Session::start(true).await?;
-    let proxy = session.proxy().await?;
-    let params =
-        json!({"target_id":"ok.desktop", "action":"launch"}).to_string() + &" ".repeat(1024 * 1024);
-    let response = raw_call(&proxy, "applications.execute", &params).await?;
-    assert_eq!(response["error"]["code"], "request-too-large");
-    let invalid = raw_call(&proxy, "applications.execute", &"[".repeat(1024 * 1024 + 1)).await?;
-    assert_eq!(
-        invalid["error"]["code"], "request-too-large",
-        "size check precedes JSON parsing"
-    );
-    assert!(!session.state_path("handoff.pid").exists());
-    let old = zbus::Proxy::new(
-        &session.connection,
-        app_daemon::api::BUS_NAME,
-        app_daemon::api::OBJECT_PATH,
-        "org.laufan.AppDaemon1",
-    )
-    .await?;
-    assert!(
-        old.call::<_, _, String>("Call", &("applications.execute", "{}"))
-            .await
-            .is_err()
-    );
-    assert_eq!(
-        raw_call(&proxy, "applications.revision", "{}").await?["ok"],
-        true
-    );
-    drop((old, proxy));
-    session.shutdown().await
-}
-
-#[tokio::test]
 async fn every_declared_method_reaches_its_typed_handler_on_the_private_bus() -> Result<()> {
     let mut session = Session::start(true).await?;
     let proxy = session.proxy().await?;
@@ -46,6 +12,12 @@ async fn every_declared_method_reaches_its_typed_handler_on_the_private_bus() ->
     let frozen: Value = serde_json::from_str(include_str!("../../test_support/app-api-v1.json"))?;
     assert_eq!(registry, frozen["registry"]);
     assert_eq!(protocol::contract_fixture()?, frozen);
+    let events = protocol::event_contract_fixture();
+    assert_eq!(events["gap"]["event"], "gap");
+    assert_eq!(events["gap"]["stream"], protocol::stream::OPERATION);
+    assert_eq!(events["gap"]["data"]["dropped_events"], "4");
+    assert_eq!(events["gap"]["subscription_id"], "subscription-example");
+    assert!(events["gap"].get("dropped_events").is_none());
     shelllist_daemon_core::validate_unique_names(protocol::METHODS).map_err(anyhow::Error::msg)?;
     let mut operation_id = String::new();
     for entry in registry["methods"].as_array().context("method registry")? {

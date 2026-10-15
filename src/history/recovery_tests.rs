@@ -1,34 +1,7 @@
 use super::{
-    BUCKET_MILLISECONDS, ENERGY_BUCKET_MILLISECONDS, HistoryStore, RETENTION_MILLISECONDS,
-    ResourceUsage, now_milliseconds, persist_snapshot,
+    ENERGY_BUCKET_MILLISECONDS, HistoryStore, RETENTION_MILLISECONDS, ResourceUsage,
+    now_milliseconds, persist_snapshot,
 };
-
-#[test]
-fn borrowed_cursor_encoding_preserves_owned_v2_wire_format() -> anyhow::Result<()> {
-    use super::{HistoryCursor, URL_SAFE_NO_PAD, decode_cursor, encode_cursor};
-    use base64::Engine as _;
-    for target in ["app.desktop", "org.\"quoted\\雪.desktop"] {
-        let epoch = "epoch-\"\\雪";
-        let legacy = HistoryCursor {
-            version: 2,
-            target_id: target.to_owned(),
-            after_timestamp_ms: 123,
-            epoch: epoch.to_owned(),
-        };
-        let encoded = encode_cursor(target, 123, epoch)?;
-        assert_eq!(
-            encoded,
-            URL_SAFE_NO_PAD.encode(serde_json::to_vec(&legacy)?)
-        );
-        let decoded = decode_cursor(&encoded, target, epoch)?;
-        assert_eq!(decoded.target_id, target);
-        assert_eq!(decoded.epoch, epoch);
-        assert_eq!(decoded.after_timestamp_ms, 123);
-        assert!(decode_cursor(&encoded, "another-app", epoch).is_err());
-        assert!(decode_cursor(&encoded, target, "another-epoch").is_err());
-    }
-    Ok(())
-}
 
 fn usage(cpu: f64, energy: f64) -> ResourceUsage {
     let mut usage = ResourceUsage::default();
@@ -41,22 +14,56 @@ fn usage(cpu: f64, energy: f64) -> ResourceUsage {
 }
 
 #[test]
-fn restart_preserves_gaps_and_rewrites_or_clock_backfills_invalidate_cursors() -> anyhow::Result<()>
-{
+fn cursor_lifecycle_survives_restart_but_rejects_expiry_rewrites_and_backfills()
+-> anyhow::Result<()> {
     let dir = tempfile::tempdir()?;
     let path = dir.path().join("history.json");
     let t = now_milliseconds() / ENERGY_BUCKET_MILLISECONDS * ENERGY_BUCKET_MILLISECONDS - 120_000;
     let mut store = HistoryStore::load(Some(path.clone()));
+    store.record(
+        "app",
+        t - RETENTION_MILLISECONDS + 600_000,
+        1.0,
+        &usage(10.0, 1.0),
+    );
+    let oldest = store.query("app", None, None, 1)?;
+    let old_cursor = oldest.next_cursor.as_deref().unwrap();
+    let cutoff = oldest.points[0].timestamp_ms + RETENTION_MILLISECONDS;
     store.record("app", t + 1000, 1.0, &usage(10.0, 1.0));
-    persist_snapshot(store.snapshot(true))?;
-    let cursor = store.query("app", None, None, 1)?.next_cursor;
+    let recent = store.query("app", None, Some(old_cursor), 1)?;
+    assert_eq!(recent.points.len(), 1, "normal appends preserve cursors");
+    assert_eq!(
+        store
+            .query_window("app", Some(t), Some(t + 2000), Some(old_cursor), 1)?
+            .points,
+        recent.points,
+        "an anchor outside the requested window remains valid"
+    );
+    assert!(store.query("other-app", None, Some(old_cursor), 1).is_err());
+    store.prune(cutoff);
+    assert!(store.query("app", None, Some(old_cursor), 1).is_ok());
+    store.prune(cutoff + 1);
+    assert!(
+        store
+            .query("app", None, Some(old_cursor), 1)
+            .unwrap_err()
+            .to_string()
+            .contains("cursor expired")
+    );
+    let cursor = recent.next_cursor;
+    let incremental = store.query("app", None, cursor.as_deref(), 1)?;
+    assert!(incremental.points.is_empty());
+    assert_eq!(incremental.next_cursor, cursor);
+    persist_snapshot(store.snapshot(false))?;
+
     let mut restarted = HistoryStore::load(Some(path.clone()));
+    assert!(restarted.query("app", None, Some(old_cursor), 1).is_err());
     assert!(
         restarted
             .query("app", None, cursor.as_deref(), 1)?
             .points
             .is_empty(),
-        "normal restart preserves cursor validity"
+        "normal restart preserves retained cursors"
     );
     restarted.record("app", t + 3000, 2.0, &usage(40.0, 2.0));
     restarted.snapshot(true);
@@ -91,60 +98,6 @@ fn restart_preserves_gaps_and_rewrites_or_clock_backfills_invalidate_cursors() -
         points
             .windows(2)
             .all(|pair| pair[0].timestamp_ms < pair[1].timestamp_ms)
-    );
-    Ok(())
-}
-
-#[test]
-fn pruning_expires_only_cursors_whose_buckets_are_gone_even_after_restart() -> anyhow::Result<()> {
-    let dir = tempfile::tempdir()?;
-    let path = dir.path().join("history.json");
-    // End samples on a bucket boundary so each one-second interval occupies
-    // exactly one bucket, regardless of the wall clock when this test runs.
-    let now = now_milliseconds() / BUCKET_MILLISECONDS * BUCKET_MILLISECONDS;
-    let old = now - RETENTION_MILLISECONDS + 60_000;
-    let mut store = HistoryStore::load(Some(path.clone()));
-    store.record("app", old, 1.0, &usage(10.0, 1.0));
-    let first = store.query("app", None, None, 1)?;
-    let old_cursor = first.next_cursor.as_deref().unwrap();
-    let old_endpoint = first.points[0].timestamp_ms;
-
-    store.record("app", now - 60_000, 1.0, &usage(20.0, 1.0));
-    let latest = store.query("app", None, Some(old_cursor), 1)?;
-    assert_eq!(latest.points.len(), 1, "normal appends preserve cursors");
-    let recent_cursor = latest.next_cursor.as_deref().unwrap();
-    let narrowed = store.query_window(
-        "app",
-        Some(latest.points[0].timestamp_ms),
-        Some(now),
-        Some(old_cursor),
-        1,
-    )?;
-    assert_eq!(
-        narrowed.points, latest.points,
-        "anchor may be outside the requested window"
-    );
-
-    // Retention is inclusive at its cutoff; one millisecond later the old
-    // bucket disappears while the same target continues producing new data.
-    store.prune(old_endpoint + RETENTION_MILLISECONDS);
-    assert!(store.query("app", None, Some(old_cursor), 1).is_ok());
-    store.prune(old_endpoint + RETENTION_MILLISECONDS + 1);
-    let error = store.query("app", None, Some(old_cursor), 1).unwrap_err();
-    assert!(error.to_string().contains("cursor expired"));
-    let incremental = store.query("app", None, Some(recent_cursor), 1)?;
-    assert!(incremental.points.is_empty());
-    assert_eq!(incremental.next_cursor, latest.next_cursor);
-    assert_eq!(store.query("app", None, None, 10)?.points, latest.points);
-
-    persist_snapshot(store.snapshot(false))?;
-    let mut restarted = HistoryStore::load(Some(path));
-    assert!(restarted.query("app", None, Some(old_cursor), 1).is_err());
-    assert!(
-        restarted
-            .query("app", None, Some(recent_cursor), 1)?
-            .points
-            .is_empty()
     );
     Ok(())
 }

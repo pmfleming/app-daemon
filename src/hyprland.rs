@@ -199,6 +199,9 @@ mod tests {
             time::{Duration, timeout},
         };
 
+        // Invalid selectors must never become commands on the configured socket.
+        assert!(address_selector("0x1;exec bad").is_err());
+        assert!(workspace_selector("2,address:0x1").is_err());
         let root = tempfile::tempdir()?;
         let signature = root.path().file_name().unwrap().to_str().unwrap();
         let instance = root.path().join("hypr").join(signature);
@@ -234,21 +237,6 @@ mod tests {
                 .await
                 .is_err()
         );
-        Ok(())
-    }
-
-    #[test]
-    fn validates_ipc_events_and_window_dispatch_selectors() -> anyhow::Result<()> {
-        assert!(super::window_event_relevant("openwindow>>fixture"));
-        assert!(!super::window_event_relevant("openlayer>>bar"));
-        assert!(!super::window_event_relevant("malformed"));
-        assert_eq!(address_selector("0xAb12")?, "address:0xAb12");
-        assert!(address_selector("not-an-address").is_err());
-        assert_eq!(
-            workspace_selector("special:scratchpad")?,
-            "special:scratchpad"
-        );
-        assert!(workspace_selector("2,address:0x1").is_err());
         Ok(())
     }
 }

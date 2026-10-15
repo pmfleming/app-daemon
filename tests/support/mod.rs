@@ -283,11 +283,16 @@ struct CompositorState {
     response: String,
     commands: Vec<String>,
     move_behavior: (bool, bool),
+    reject_focus: bool,
 }
 
 impl CompositorState {
     fn respond(&mut self, request: String) -> String {
-        let output = if request == "j/clients" {
+        let output = if self.reject_focus
+            && (request.contains("hl.dsp.focus") || request.contains("focuswindow"))
+        {
+            "fixture rejected focus".into()
+        } else if request == "j/clients" {
             self.response.clone()
         } else if request.contains("hl.dsp.window.move")
             || request.contains("movetoworkspacesilent")
@@ -318,6 +323,7 @@ impl MockCompositor {
             response: "[]".into(),
             commands: Vec::new(),
             move_behavior: (true, true),
+            reject_focus: false,
         }));
         let reply = Arc::clone(&state);
         let (events, _) = broadcast::channel::<String>(32);
@@ -366,6 +372,9 @@ impl MockCompositor {
     }
     pub fn commands(&self) -> Vec<String> {
         self.state.lock().unwrap().commands.clone()
+    }
+    pub fn reject_focus(&self) {
+        self.state.lock().unwrap().reject_focus = true;
     }
     pub fn moves(&self, accept: bool, apply: bool) {
         self.state.lock().unwrap().move_behavior = (accept, apply);

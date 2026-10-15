@@ -13,13 +13,10 @@ const FIXTURE_ENV: &str = "APP_DAEMON_LIFETIME_FIXTURE";
 #[test]
 #[ignore = "requires a real user systemd manager; run --test systemd_lifetime --ignored --exact isolated_application_survives_host_service_stop"]
 fn isolated_application_survives_host_service_stop() -> Result<()> {
-    lifetime(false)
-}
-
-#[test]
-#[ignore = "requires a real user systemd manager"]
-fn isolated_desktop_handoff_survives_host_service_stop() -> Result<()> {
-    lifetime(true)
+    for desktop in [false, true] {
+        lifetime(desktop)?;
+    }
+    Ok(())
 }
 
 fn lifetime(desktop: bool) -> Result<()> {

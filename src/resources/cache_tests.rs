@@ -59,7 +59,7 @@ fn set_process(provider: &TestProvider, start_ticks: u64, bytes: u64, socket: u6
 }
 
 #[test]
-fn pid_reuse_refreshes_resources_without_charging_previous_process_work() {
+fn identity_changes_resume_and_exit_rebaseline_resource_caches() {
     let provider = Arc::new(TestProvider::default());
     let mut sampler = ResourceSampler {
         provider: provider.clone(),
@@ -86,9 +86,48 @@ fn pid_reuse_refreshes_resources_without_charging_previous_process_work() {
     assert_eq!(reused.compute.major_faults_per_second, 0.0);
     assert_eq!(reused.network.network_receive_bytes, 0);
 
+    // Resume is another discontinuity: the lower energy counter is not a wrap,
+    // and pre-suspend CPU, I/O and socket work must not become a history interval.
+    let zone = std::path::PathBuf::from("package-0");
+    provider
+        .state
+        .lock()
+        .unwrap()
+        .rapl
+        .insert(zone.clone(), (900_000_000, 1_000_000_000));
+    sampler.sample_for_targets(&targets);
+    sampler.reset_after_resume();
+    provider
+        .state
+        .lock()
+        .unwrap()
+        .rapl
+        .insert(zone.clone(), (100, 1_000_000_000));
+    set_process(&provider, 2, 950, 20);
+    let resumed = sampler.sample_for_targets(&targets);
+    assert_eq!(resumed.interval_seconds(), 0.0);
+    assert_eq!(resumed.system_energy_mwh, 0.0);
+    assert_eq!(resumed.energy_source, "unavailable");
+    let usage = resumed.usage_for_roots([42]);
+    assert_eq!(usage.compute.cpu_percent, 0.0);
+    assert_eq!(usage.storage.disk_read_bytes, 0);
+    assert_eq!(usage.network.network_receive_bytes, 0);
+    provider
+        .state
+        .lock()
+        .unwrap()
+        .rapl
+        .insert(zone, (7_200_100, 1_000_000_000));
+    let next = sampler.sample_for_targets(&targets);
+    assert!(next.interval_seconds() > 0.0);
+    assert_eq!(
+        next.system_energy_mwh, 2.0,
+        "only post-resume work is counted"
+    );
+    assert_eq!(next.energy_source, "rapl");
+
     provider.state.lock().unwrap().processes.clear();
     sampler.sample_for_targets(&targets);
-    assert!(sampler.previous_processes.is_empty());
     set_process(&provider, 2, 1000, 20);
     let returned = sampler.sample_for_targets(&targets).usage_for_roots([42]);
     assert_eq!(returned.storage.disk_read_bytes, 0);

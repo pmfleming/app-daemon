@@ -113,33 +113,3 @@ pub(crate) fn registry(stream: &str) -> Value {
     }
     json!({"name":stream, "semantics":if stream == protocol::stream::OPERATION {"transitions"} else {"invalidation"}, "events":events})
 }
-#[cfg(test)]
-mod tests {
-    use super::{StateRevision, changed, operation_gap, protocol, subscribed};
-    #[test]
-    fn payload_and_gap_are_canonical_and_emission_uses_the_envelope_stream() {
-        let gap = operation_gap("sub", 4).into_value();
-        assert_eq!(gap["event"], "gap");
-        assert_eq!(gap["data"]["dropped_events"], "4");
-        assert_eq!(gap["subscription_id"], "sub");
-        assert!(gap.get("dropped_events").is_none());
-        assert!(gap["data"].get("recovery_method").is_none());
-        for stream in protocol::STREAMS {
-            let event = subscribed(
-                stream,
-                "sub",
-                StateRevision {
-                    catalog: 1,
-                    windows: 2,
-                    settings: 3,
-                    runtime: 4,
-                },
-            );
-            assert_eq!(event.stream, event.value["stream"]);
-            assert_eq!(event.value["data"]["catalog_revision"], 1);
-            assert!(event.value.get("catalog_revision").is_none());
-            let changed = changed(stream, "sub", 9);
-            assert_eq!(changed.value["data"]["revision"], 9);
-        }
-    }
-}

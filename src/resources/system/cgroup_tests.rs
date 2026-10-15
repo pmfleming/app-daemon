@@ -77,6 +77,14 @@ fn missing_or_invalid_controllers_fall_back_and_recovery_rebaselines_counters() 
         "missing CPU controller uses procfs"
     );
 
+    sampler.reset_after_resume();
+    snapshot.cgroup_usage = sampler.cgroup_usage(&read(), 1.0);
+    assert_eq!(
+        snapshot.usage_for_roots([42]).storage.disk_read_bytes,
+        0,
+        "resume must discard pre-suspend cgroup deltas"
+    );
+
     fs::write(root.join("io.stat"), "8:0 rbytes=invalid\n")?;
     assert!(read_cgroup_counters_at(root).unwrap().io.is_none());
     snapshot.cgroup_usage = sampler.cgroup_usage(&read(), 1.0);

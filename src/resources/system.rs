@@ -570,7 +570,7 @@ mod cgroup_tests;
 #[cfg(test)]
 mod disk_tests;
 #[cfg(test)]
-mod memory_tests;
+mod parse_tests;
 
 // Both smaps_rollup and status report memory in KiB. Normalize once at the edge.
 fn memory_bytes(value: &str) -> HashMap<&str, u64> {

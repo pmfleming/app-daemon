@@ -215,38 +215,5 @@ fn write_u32(bytes: &mut [u8], offset: usize, value: u32) {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::{
-        HashMap, HashSet, INET_DIAG_INFO, INET_DIAG_MESSAGE_LENGTH, NetworkCounters,
-        TCP_INFO_BYTES_ACKED_OFFSET, TCP_INFO_BYTES_RECEIVED_OFFSET, TCP_INFO_COUNTERS_LENGTH,
-        parse_diag_message, write_u16, write_u32,
-    };
-
-    #[test]
-    fn parses_tcp_info_counters_for_requested_inode() {
-        let inode = 42_u64;
-        let mut message = vec![0_u8; INET_DIAG_MESSAGE_LENGTH + 4 + TCP_INFO_COUNTERS_LENGTH];
-        write_u32(&mut message, 68, inode as u32);
-        write_u16(
-            &mut message,
-            INET_DIAG_MESSAGE_LENGTH,
-            (4 + TCP_INFO_COUNTERS_LENGTH) as u16,
-        );
-        write_u16(&mut message, INET_DIAG_MESSAGE_LENGTH + 2, INET_DIAG_INFO);
-        let payload = INET_DIAG_MESSAGE_LENGTH + 4;
-        message[payload + TCP_INFO_BYTES_ACKED_OFFSET..payload + TCP_INFO_BYTES_ACKED_OFFSET + 8]
-            .copy_from_slice(&1234_u64.to_ne_bytes());
-        message[payload + TCP_INFO_BYTES_RECEIVED_OFFSET
-            ..payload + TCP_INFO_BYTES_RECEIVED_OFFSET + 8]
-            .copy_from_slice(&5678_u64.to_ne_bytes());
-        let mut counters = HashMap::new();
-        parse_diag_message(&message, &HashSet::from([inode]), &mut counters);
-        assert_eq!(
-            counters[&inode],
-            NetworkCounters {
-                transmitted_bytes: 1234,
-                received_bytes: 5678,
-            }
-        );
-    }
-}
+#[path = "network_tests.rs"]
+mod tests;
