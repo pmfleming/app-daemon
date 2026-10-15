@@ -82,6 +82,8 @@
         }
       );
 
+      nixosModules.default = import ./packaging/nixos.nix;
+
       apps = forAllSystems (
         system: pkgs: {
           default = {
@@ -94,6 +96,15 @@
       checks = forAllSystems (
         system: pkgs: {
           default = self.packages.${system}.default;
+          modules = let
+            cfg = (nixpkgs.lib.nixosSystem {
+              inherit system;
+              modules = [ self.nixosModules.default { services.app-daemon.resources.enableRaplAccess = true; } ];
+            }).config;
+          in assert nixpkgs.lib.hasInfix "chmod 0440" cfg.services.udev.extraRules;
+          assert nixpkgs.lib.hasInfix "chgrp video" cfg.services.udev.extraRules;
+          assert !(nixpkgs.lib.hasInfix "ATTR{enabled}" cfg.services.udev.extraRules);
+          pkgs.runCommand "app-daemon-module-contract" { } "touch $out";
         }
       );
 
