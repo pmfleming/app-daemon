@@ -13,7 +13,15 @@ use std::{
 
 #[test]
 fn parses_proc_counters_and_live_identity_without_trusting_command_names() -> anyhow::Result<()> {
-    let stat = "42 (name with ) spaces) S 7 0 0 0 0 0 0 0 0 0 120 30 0 0 0 0 0 0 99 0 0";
+    let stat = "42 (name with ) spaces) S 7 0 0 0 0 0 0 0 17 0 120 30 0 0 0 0 5 0 99 0 0";
+    #[cfg(feature = "benchmarks")]
+    {
+        let allocations = allocation_counter::measure(|| {
+            std::hint::black_box(parse_process_stat(stat));
+            std::hint::black_box(crate::process::parse_process(stat));
+        });
+        assert_eq!(allocations.count_total, 0);
+    }
     let identity = crate::process::parse_process(stat).context("live identity")?;
     assert_eq!((identity.parent, identity.start), (7, 99));
     for invalid in [stat.replace(") S", ") Z"), "malformed".into()] {
@@ -23,7 +31,24 @@ fn parses_proc_counters_and_live_identity_without_trusting_command_names() -> an
     assert_eq!(process.parent_pid, 7);
     assert_eq!(process.total_ticks, 150);
     assert_eq!(process.start_ticks, 99);
-    assert_eq!(process.major_faults, 0);
+    assert_eq!(process.major_faults, 17);
+    assert_eq!(process.thread_count, 5);
+    let fields = crate::process::process_stat_fields(stat)
+        .context("stat fields")?
+        .collect::<Vec<_>>();
+    for end in 0..20 {
+        let truncated = format!("42 (command) {}", fields[..end].join(" "));
+        assert!(parse_process_stat(&truncated).is_none());
+        assert!(crate::process::parse_process(&truncated).is_none());
+    }
+    let saturated = stat.replace("120 30", &format!("{} 30", u64::MAX));
+    assert_eq!(
+        parse_process_stat(&saturated)
+            .context("large counters")?
+            .total_ticks,
+        u64::MAX
+    );
+    assert!(parse_process_stat(&stat.replace("120 30", "invalid 30")).is_none());
     Ok(())
 }
 

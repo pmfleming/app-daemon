@@ -450,18 +450,23 @@ fn temporary_path(path: &Path) -> bool {
 }
 
 pub(super) fn parse_process_stat(value: &str) -> Option<ProcessStat> {
-    let fields = process_stat_fields(value)?;
+    let mut fields = process_stat_fields(value)?;
+    // Read in proc_pid_stat(5) field order; skip counts exclude the consumed field.
     Some(ProcessStat {
-        parent_pid: parse_field(&fields, 1)?,
-        total_ticks: parse_field::<u64>(&fields, 11)?.saturating_add(parse_field(&fields, 12)?),
-        start_ticks: parse_field(&fields, 19)?,
-        major_faults: parse_field(&fields, 9)?,
-        thread_count: parse_field(&fields, 17)?,
+        parent_pid: parse_field(&mut fields, 1)?,   // 4: ppid
+        major_faults: parse_field(&mut fields, 7)?, // 12: majflt
+        total_ticks: parse_field::<u64>(&mut fields, 1)? // 14: utime
+            .saturating_add(parse_field(&mut fields, 0)?), // 15: stime
+        thread_count: parse_field(&mut fields, 4)?, // 20: num_threads
+        start_ticks: parse_field(&mut fields, 1)?,  // 22: starttime
     })
 }
 
-fn parse_field<T: std::str::FromStr>(fields: &[&str], index: usize) -> Option<T> {
-    fields.get(index)?.parse().ok()
+fn parse_field<T: std::str::FromStr>(
+    fields: &mut std::str::SplitWhitespace<'_>,
+    skip: usize,
+) -> Option<T> {
+    fields.nth(skip)?.parse().ok()
 }
 
 fn read_process_io(pid: u32) -> Option<ProcessIo> {

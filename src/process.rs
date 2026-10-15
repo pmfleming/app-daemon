@@ -22,13 +22,13 @@ pub(crate) fn read_process(pid: u32) -> Option<Process> {
 }
 
 pub(crate) fn parse_process(stat: &str) -> Option<Process> {
-    let fields = process_stat_fields(stat)?;
-    if matches!(*fields.first()?, "Z" | "X") {
+    let mut fields = process_stat_fields(stat)?;
+    if matches!(fields.next()?, "Z" | "X") {
         return None;
     }
     Some(Process {
-        parent: fields.get(1)?.parse().ok()?,
-        start: fields.get(19)?.parse().ok()?,
+        parent: fields.next()?.parse().ok()?,
+        start: fields.nth(17)?.parse().ok()?, // starttime, field 22 in proc_pid_stat(5).
         cgroup: None,
     })
 }
@@ -62,9 +62,9 @@ pub(crate) fn read_processes<T>(parse: impl Fn(&str) -> Option<T>) -> HashMap<u3
         .collect()
 }
 
-pub(crate) fn process_stat_fields(value: &str) -> Option<Vec<&str>> {
+pub(crate) fn process_stat_fields(value: &str) -> Option<std::str::SplitWhitespace<'_>> {
     // comm can contain spaces and parentheses; state follows its final ')'.
-    Some(value.rsplit_once(')')?.1.split_whitespace().collect())
+    Some(value.rsplit_once(')')?.1.split_whitespace())
 }
 
 pub(crate) fn process_children(
