@@ -129,7 +129,43 @@ impl LaunchProgress<'_> {
     }
 }
 
-pub(super) async fn execute_action(
+impl super::ApplicationService {
+    pub(super) async fn run_operation(
+        &self,
+        catalog: &Catalog,
+        params: &ExecuteParams,
+        mut result: OperationResult,
+    ) {
+        result.status = "running".into();
+        result.message = "Operation running".into();
+        if !self.publish_running(result.clone()).await {
+            return;
+        }
+        let lock = self.launch_lock(&params.target_id);
+        let _launch = lock.lock().await;
+        match execute_action(catalog, params, self, &result.id).await {
+            Ok(outcome) => {
+                result.status = outcome.status.into();
+                result.message = outcome.message;
+                result.close = outcome.close;
+                if let Some(receipt) = outcome.launch {
+                    result.launch_backend = Some(receipt.backend);
+                    result.launch_scope = Some(receipt.scope);
+                    result.placement = receipt.placement;
+                }
+            }
+            Err(error) => {
+                result.status = "failed".into();
+                result.message = error.to_string();
+            }
+        }
+        if self.operations.lock().await.finish(result.clone()) {
+            let _ = self.operation_changes.send(result);
+        }
+    }
+}
+
+async fn execute_action(
     catalog: &Catalog,
     params: &ExecuteParams,
     service: &super::ApplicationService,

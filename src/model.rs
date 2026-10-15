@@ -2,9 +2,8 @@ use crate::metrics::{rate, rounded};
 use serde::{Deserialize, Serialize};
 
 /// CPU, memory, and GPU observations for the current interval.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
-#[derive(schemars::JsonSchema)]
 pub struct ComputeUsage {
     /// Top-compatible CPU usage: 100% is one fully occupied logical CPU.
     pub cpu_percent: f64,
@@ -42,9 +41,8 @@ impl ComputeUsage {
 }
 
 /// Interval I/O and allocated storage footprints, in bytes unless named otherwise.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
-#[derive(schemars::JsonSchema)]
 pub struct StorageUsage {
     /// Physical storage bytes completed during the current interval.
     pub disk_read_bytes: u64,
@@ -86,9 +84,8 @@ impl StorageUsage {
 }
 
 /// Socket-attributed byte deltas, rates, and connection count.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
-#[derive(schemars::JsonSchema)]
 pub struct NetworkUsage {
     pub network_receive_bytes: u64,
     pub network_transmit_bytes: u64,
@@ -107,9 +104,8 @@ impl NetworkUsage {
 }
 
 /// Estimated energy attribution together with its source and confidence labels.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
-#[derive(schemars::JsonSchema)]
 pub struct EnergyUsage {
     /// Application-attributed energy. This is only populated for attributable domains.
     pub energy_mwh: f64,
@@ -124,9 +120,8 @@ pub struct EnergyUsage {
     pub energy_confidence: String,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
-#[derive(schemars::JsonSchema)]
 pub struct ResourceMeasurement {
     pub sample_interval_ms: u64,
     pub attribution_method: String,
@@ -239,9 +234,8 @@ pub struct ApplicationPage {
     pub hyprland_available: bool,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
-#[derive(schemars::JsonSchema)]
 pub struct ResourcePeaks {
     pub cpu_percent: f64,
     pub cpu_percent_of_machine: f64,
@@ -257,9 +251,8 @@ pub struct ResourcePeaks {
 
 /// A capability is true only when available throughout the observed bucket.
 /// Missing metadata in older history files means unknown, not measured zero.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
-#[derive(schemars::JsonSchema)]
 pub struct ResourceAvailability {
     pub cpu: bool,
     pub memory: bool,
@@ -301,9 +294,8 @@ impl ResourceAvailability {
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
-#[derive(schemars::JsonSchema)]
 pub struct HistoricalResourceUsage {
     #[serde(skip_deserializing)]
     pub metric_availability: crate::projection::MetricAvailability,
@@ -371,9 +363,8 @@ pub struct MetricSummary {
     pub coverage: f64,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
-#[derive(schemars::JsonSchema)]
 pub struct ApplicationEnergySummary {
     pub target_id: String,
     pub name: String,
@@ -382,9 +373,8 @@ pub struct ApplicationEnergySummary {
     pub share: f64,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
-#[derive(schemars::JsonSchema)]
 pub struct ApplicationEnergyOverview {
     pub since_ms: u64,
     pub until_ms: u64,
@@ -404,9 +394,8 @@ pub struct WorkspacePlacement {
     pub reason: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "kebab-case")]
-#[derive(schemars::JsonSchema)]
 pub enum PlacementStatus {
     Pending,
     Placed,

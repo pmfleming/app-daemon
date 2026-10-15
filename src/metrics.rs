@@ -1,3 +1,15 @@
+/// Stable within a build and independent of hash-map iteration order.
+pub(crate) fn unordered_revision<T: Ord + std::hash::Hash>(
+    values: impl IntoIterator<Item = T>,
+) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut values = values.into_iter().collect::<Vec<_>>();
+    values.sort_unstable();
+    let mut hash = std::collections::hash_map::DefaultHasher::new();
+    values.hash(&mut hash);
+    hash.finish()
+}
+
 pub(crate) fn add_counter(counter: &mut u64, value: u64) {
     *counter = counter.saturating_add(value);
 }

@@ -1,7 +1,11 @@
-use super::provider::{ProcessStat, ResourceProvider};
+use super::{
+    ProcessIdentity, ResourceSnapshot,
+    provider::{ProcessStat, ResourceProvider},
+    system::{cgroup_members_for_paths, cgroup_paths_for_roots},
+};
 use crate::{
     catalog::Catalog,
-    process::{descendants_where, process_children},
+    process::{descendants, descendants_where, process_children},
 };
 use std::{
     collections::{HashMap, HashSet, hash_map::Entry},
@@ -16,13 +20,112 @@ pub(super) struct KnownRoots {
     identities: HashMap<String, HashMap<u32, u64>>,
 }
 
-pub(super) struct Targets {
-    pub roots: HashMap<String, Vec<u32>>,
-    pub owners: Owners,
+struct Targets {
+    roots: HashMap<String, Vec<u32>>,
+    owners: Owners,
+}
+
+impl super::ResourceSampler {
+    pub fn sample_for_targets(
+        &mut self,
+        active_targets: &HashMap<String, Vec<u32>>,
+    ) -> ResourceSnapshot {
+        self.sample_with(|provider, _| {
+            let targets = Targets {
+                roots: active_targets.clone(),
+                owners: HashMap::new(),
+            };
+            ProcessSample::discover(provider, targets, provider.processes(), None)
+        })
+    }
+
+    pub(crate) fn sample_for_applications(
+        &mut self,
+        windows: &HashMap<String, Vec<u32>>,
+        catalog: &Catalog,
+        ownership: &crate::ownership::Snapshot,
+    ) -> ResourceSnapshot {
+        self.sample_with(|provider, known| {
+            let processes = provider.processes();
+            let targets = known.discover(provider, windows, &processes, catalog, ownership);
+            ProcessSample::discover(provider, targets, processes, Some(catalog))
+        })
+    }
+}
+
+/// Lightweight identity/topology discovery is separate from detailed sampling.
+pub(super) struct ProcessSample {
+    pub processes: HashMap<u32, ProcessStat>,
+    pub active: HashSet<u32>,
+    pub identities: HashSet<ProcessIdentity>,
+}
+
+impl ProcessSample {
+    fn discover(
+        provider: &dyn ResourceProvider,
+        targets: Targets,
+        processes: HashMap<u32, ProcessStat>,
+        catalog: Option<&Catalog>,
+    ) -> (Self, ResourceSnapshot) {
+        let children =
+            process_children(processes.iter().map(|(&pid, stat)| (pid, stat.parent_pid)));
+        let roots = targets
+            .roots
+            .values()
+            .flatten()
+            .copied()
+            .filter(|pid| *pid > 0)
+            .collect();
+        let cgroup_path_by_root = match catalog {
+            None => cgroup_paths_for_roots(provider, &roots),
+            Some(catalog) => roots
+                .iter()
+                .filter_map(|&root| {
+                    let path = provider.process_cgroup(root)?;
+                    let (target, path) = catalog.application_cgroup(&path)?;
+                    // A PID match does not authorize charging its launcher's entire
+                    // cgroup. Scope counters require the scope's own catalog identity.
+                    targets
+                        .roots
+                        .get(target)
+                        .is_some_and(|roots| roots.contains(&root))
+                        .then(|| (root, path.to_owned()))
+                })
+                .collect(),
+        };
+        let cgroup_members_by_path = cgroup_members_for_paths(provider, &cgroup_path_by_root);
+        let mut active = descendants(roots, &children);
+        active.extend(cgroup_members_by_path.values().flatten());
+        active.retain(|pid| processes.contains_key(pid));
+        let identities = active
+            .iter()
+            .filter_map(|&pid| Some((pid, processes.get(&pid)?.start_ticks)))
+            .collect();
+        let mut snapshot = ResourceSnapshot {
+            target_roots: targets.roots,
+            target_owners: targets.owners,
+            children,
+            cgroup_path_by_root,
+            cgroup_members_by_path,
+            ..Default::default()
+        };
+        snapshot.shared_pids = snapshot.shared_target_pids(&snapshot.target_roots);
+        snapshot
+            .shared_pids
+            .retain(|pid| !snapshot.target_owners.contains_key(pid));
+        (
+            Self {
+                processes,
+                active,
+                identities,
+            },
+            snapshot,
+        )
+    }
 }
 
 impl KnownRoots {
-    pub fn discover(
+    fn discover(
         &mut self,
         provider: &dyn ResourceProvider,
         windows: &HashMap<String, Vec<u32>>,

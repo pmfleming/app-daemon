@@ -115,7 +115,7 @@ pub(crate) fn registry(stream: &str) -> Value {
 }
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{StateRevision, changed, operation_gap, protocol, subscribed};
     #[test]
     fn payload_and_gap_are_canonical_and_emission_uses_the_envelope_stream() {
         let gap = operation_gap("sub", 4).into_value();

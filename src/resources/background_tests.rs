@@ -44,7 +44,7 @@ fn windowless_apps_are_discovered_published_and_added_to_history() -> anyhow::Re
         let mut state = provider.state.lock().unwrap();
         state.processes = HashMap::from([
             (42, process(1, 100)),
-            (43, process(42, 101)),
+            (43, process(1, 101)), // Independent roots sharing one application cgroup.
             (99, process(1, 1)),
         ]);
         state.cgroups = HashMap::from([
@@ -80,6 +80,8 @@ fn windowless_apps_are_discovered_published_and_added_to_history() -> anyhow::Re
         1,
         "launch-only scopes must not claim resources"
     );
+    assert_eq!(snapshot.cgroup_path_by_root.len(), 2);
+    assert_eq!(snapshot.cgroup_members_by_path.len(), 1);
     let usage = snapshot.usage_for_application("org.example.App.desktop", []);
     assert_eq!(usage.compute.process_count, 2);
     assert_eq!(usage.compute.cpu_percent, 20.0);

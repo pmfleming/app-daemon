@@ -47,17 +47,9 @@ impl<W> WatchRecovery<W> {
         if self.watcher.is_some() || now < self.retry_at {
             return Ok(());
         }
-        match create() {
-            Ok(watcher) => {
-                self.watcher = Some(watcher);
-                self.retry_delay = MIN_RETRY;
-                Ok(())
-            }
-            Err(error) => {
-                self.failed(now);
-                Err(error)
-            }
-        }
+        self.watcher = Some(create().inspect_err(|_| self.failed(now))?);
+        self.retry_delay = MIN_RETRY;
+        Ok(())
     }
 
     fn retry_deadline(&self) -> Option<Instant> {
@@ -72,7 +64,6 @@ pub(super) async fn track_state(service: std::sync::Weak<ApplicationService>) {
     let (catalog_sender, mut catalog_events) = mpsc::channel(64);
     let mut catalog_watch = WatchRecovery::new(Instant::now());
     let mut window_events_open = true;
-    let mut catalog_events_open = true;
     let mut window_connected = false;
     let Some(initial) = service.upgrade() else {
         return;
@@ -116,24 +107,19 @@ pub(super) async fn track_state(service: std::sync::Weak<ApplicationService>) {
                     continue;
                 };
                 if !observe_window_event(event, &mut window_connected) { continue; }
-                time::sleep(EVENT_DEBOUNCE).await;
-                while let Ok(event) = window_events.try_recv() {
+                drain_events(&mut window_events, |event| {
                     observe_window_event(event, &mut window_connected);
-                }
+                }).await;
                 window_available = service.refresh_windows().await;
                 window_refreshed = Instant::now();
             }
-            event = catalog_events.recv(), if catalog_events_open => {
-                let Some(event) = event else { catalog_events_open = false; continue; };
-                let mut failed = matches!(event, CatalogEvent::Failed);
-                let mut rewatch = matches!(event, CatalogEvent::Rewatch);
-                time::sleep(EVENT_DEBOUNCE).await;
-                while let Ok(event) = catalog_events.try_recv() {
-                    failed |= matches!(event, CatalogEvent::Failed);
-                    rewatch |= matches!(event, CatalogEvent::Rewatch);
+            Some(mut event) = catalog_events.recv() => {
+                drain_events(&mut catalog_events, |next| event = event.max(next)).await;
+                match event {
+                    CatalogEvent::Failed => catalog_watch.failed(Instant::now()),
+                    CatalogEvent::Rewatch => catalog_watch.rebuild(Instant::now()),
+                    CatalogEvent::Changed => {},
                 }
-                if failed { catalog_watch.failed(Instant::now()); }
-                else if rewatch { catalog_watch.rebuild(Instant::now()); }
                 service.refresh_catalog().await;
                 catalog_refreshed = Instant::now();
             }
@@ -154,6 +140,13 @@ pub(super) async fn track_state(service: std::sync::Weak<ApplicationService>) {
                 catalog_refreshed = Instant::now();
             }
         }
+    }
+}
+
+async fn drain_events<T>(events: &mut mpsc::Receiver<T>, mut observe: impl FnMut(T)) {
+    time::sleep(EVENT_DEBOUNCE).await;
+    while let Ok(event) = events.try_recv() {
+        observe(event);
     }
 }
 
@@ -203,10 +196,21 @@ async fn wait_for_watcher_retry(deadline: Option<Instant>) {
 
 #[cfg(test)]
 mod tests {
-    use super::{MAX_RETRY, MIN_RETRY, WatchRecovery};
+    use super::{CatalogEvent, MAX_RETRY, MIN_RETRY, WatchRecovery, drain_events, mpsc};
     use std::time::Instant;
-    #[test]
-    fn failed_initialization_retries_with_bounded_backoff_and_recovers() {
+    #[tokio::test]
+    async fn failed_initialization_retries_with_bounded_backoff_and_recovers() {
+        let (sender, mut events) = mpsc::channel(3);
+        for event in [
+            CatalogEvent::Failed,
+            CatalogEvent::Changed,
+            CatalogEvent::Rewatch,
+        ] {
+            assert!(sender.try_send(event).is_ok());
+        }
+        let mut event = CatalogEvent::Changed;
+        drain_events(&mut events, |next| event = event.max(next)).await;
+        assert_eq!(event, CatalogEvent::Failed);
         let start = Instant::now();
         let mut recovery = WatchRecovery::<()>::new(start);
         assert!(

@@ -5,7 +5,8 @@ use std::{
 };
 use tokio::sync::mpsc;
 
-#[derive(Debug, PartialEq, Eq)]
+// Batch priority: failure must win over rewatch, which wins over invalidation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(super) enum CatalogEvent {
     Changed,
     Rewatch,

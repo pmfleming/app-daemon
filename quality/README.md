@@ -1,5 +1,9 @@
 # RustQualityLens baseline
 
+The latest [sampling/orchestration review](sampling-orchestration-review.md) records
+fresh complexity, effort, locality/leverage, duplication and source-size changes,
+verification, allocation evidence and explicit measurement limits.
+
 The latest [query/sampling allocation review](query-allocation-review.md) records
 production refactors, benchmark allocation reductions, fresh RQLens measurements,
 and unchanged test counts, alongside explicit metric tradeoffs.

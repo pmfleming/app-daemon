@@ -1,8 +1,6 @@
 use super::{
     ResourceSampler,
-    provider::{
-        DiskFile, DiskFileId, MemoryUsage, NetworkCounters, ProcessFiles, ProcessIo, ProcessStat,
-    },
+    provider::{DiskFile, DiskFileId, MemoryUsage, NetworkCounters, ProcessFiles, ProcessStat},
     test_provider::TestProvider,
 };
 use std::{
@@ -23,13 +21,7 @@ fn set_process(provider: &TestProvider, start_ticks: u64, bytes: u64, socket: u6
             thread_count: 1,
         },
     );
-    state.io.insert(
-        42,
-        ProcessIo {
-            physical_read_bytes: bytes,
-            ..Default::default()
-        },
-    );
+    state.io.entry(42).or_default().storage.read_bytes = bytes;
     state.memory.insert(
         42,
         MemoryUsage {

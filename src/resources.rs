@@ -9,7 +9,7 @@ use shelllist_daemon_tokio::ResumeDetector;
 use crate::{
     metrics::{add_counter, available_label, finite_nonnegative, rate, rounded},
     model::{EnergyUsage, NetworkUsage, ResourceUsage},
-    process::{descendants, process_children},
+    process::descendants,
 };
 
 mod discovery;
@@ -22,16 +22,14 @@ mod provider;
 mod resume_tests;
 mod system;
 
+use discovery::ProcessSample;
 use disk::AppDiskCache;
 use energy::EnergySampler;
 use provider::{
-    CgroupCounters, CgroupIo, DiskBreakdown, DiskFile, DiskFileId, GpuProcessStat, MemoryUsage,
+    CgroupCounters, DiskBreakdown, DiskFile, DiskFileId, GpuProcessStat, IoCounters, MemoryUsage,
     NetworkCounters, ProcessFiles, ProcessIo, ProcessStat, ResourceProvider,
 };
-use system::{
-    LinuxResourceProvider, cgroup_members_for_paths, cgroup_paths_for_roots, merge_disk_files,
-    shared_target_pids,
-};
+use system::{LinuxResourceProvider, merge_disk_files};
 
 #[derive(Debug, Clone, Copy)]
 struct PreviousProcess {
@@ -44,7 +42,7 @@ struct PreviousProcess {
 #[derive(Debug, Clone, Copy, Default)]
 struct CgroupUsage {
     cpu_percent: Option<f64>,
-    io: Option<CgroupIo>,
+    io: Option<IoCounters>,
     memory_bytes: Option<u64>,
 }
 
@@ -73,7 +71,7 @@ pub struct ResourceSnapshot {
     target_owners: HashMap<u32, Arc<str>>,
     processes: HashMap<u32, ProcessUsage>,
     children: HashMap<u32, Vec<u32>>,
-    cgroup_members_by_root: HashMap<u32, HashSet<u32>>,
+    cgroup_members_by_path: HashMap<String, HashSet<u32>>,
     cgroup_path_by_root: HashMap<u32, String>,
     cgroup_usage: HashMap<String, CgroupUsage>,
     app_disk_by_target: HashMap<String, DiskBreakdown>,
@@ -113,12 +111,7 @@ struct ProcessAggregation {
 
 impl ResourceSnapshot {
     pub(crate) fn runtime_revision(&self) -> u64 {
-        use std::hash::{Hash, Hasher};
-        let mut targets = self.target_roots.keys().collect::<Vec<_>>();
-        targets.sort_unstable();
-        let mut hash = std::collections::hash_map::DefaultHasher::new();
-        targets.hash(&mut hash);
-        hash.finish()
+        crate::metrics::unordered_revision(self.target_roots.keys())
     }
 
     pub(crate) fn target_roots(&self) -> &HashMap<String, Vec<u32>> {
@@ -219,16 +212,37 @@ impl ResourceSnapshot {
         // the attribution even when the application root has a specific cgroup.
         let tree = descendants([root], &self.children);
         attribution.pids.extend(&tree);
-        let Some(members) = self.cgroup_members_by_root.get(&root) else {
+        let group = self
+            .cgroup_path_by_root
+            .get(&root)
+            .and_then(|path| Some((path, self.cgroup_members_by_path.get(path)?)));
+        let Some((path, members)) = group else {
             attribution.cgroups_cover_process_trees = false;
             return;
         };
         attribution.cgroups_cover_process_trees &= tree.is_subset(members);
         attribution.pids.extend(members);
-        if let Some(path) = self.cgroup_path_by_root.get(&root) {
-            attribution.cgroup_paths.insert(path.as_str());
-        }
+        attribution.cgroup_paths.insert(path.as_str());
         attribution.cgroup_roots += 1;
+    }
+
+    fn shared_target_pids(&self, targets: &HashMap<String, Vec<u32>>) -> HashSet<u32> {
+        let mut seen = HashSet::new();
+        targets
+            .values()
+            .flat_map(|roots| {
+                let mut pids = descendants(roots.iter().copied(), &self.children);
+                pids.extend(
+                    roots
+                        .iter()
+                        .filter_map(|root| self.cgroup_path_by_root.get(root))
+                        .filter_map(|path| self.cgroup_members_by_path.get(path))
+                        .flatten(),
+                );
+                pids
+            })
+            .filter(|pid| !seen.insert(*pid))
+            .collect()
     }
 
     fn aggregate_processes(&self, pids: &HashSet<u32>) -> ProcessAggregation {
@@ -280,7 +294,7 @@ impl ResourceSnapshot {
             usage.compute.memory_cgroup_bytes = memory;
         }
         // A missing controller must not replace valid procfs counters with zero.
-        if let Some(io) = groups().try_fold(CgroupIo::default(), |mut total, group| {
+        if let Some(io) = groups().try_fold(IoCounters::default(), |mut total, group| {
             let current = group.io?;
             add_counter(&mut total.read_bytes, current.read_bytes);
             add_counter(&mut total.write_bytes, current.write_bytes);
@@ -481,12 +495,12 @@ impl ProcessUsage {
 
         let storage = &mut usage.storage;
         let io = &self.io;
-        add_counter(&mut storage.disk_read_bytes, io.physical_read_bytes);
-        add_counter(&mut storage.disk_write_bytes, io.physical_write_bytes);
+        add_counter(&mut storage.disk_read_bytes, io.storage.read_bytes);
+        add_counter(&mut storage.disk_write_bytes, io.storage.write_bytes);
         add_counter(&mut storage.logical_read_bytes, io.logical_read_bytes);
         add_counter(&mut storage.logical_write_bytes, io.logical_write_bytes);
-        add_counter(&mut storage.read_operations, io.read_operations);
-        add_counter(&mut storage.write_operations, io.write_operations);
+        add_counter(&mut storage.read_operations, io.storage.read_operations);
+        add_counter(&mut storage.write_operations, io.storage.write_operations);
         add_counter(&mut storage.cancelled_write_bytes, io.cancelled_write_bytes);
     }
 }
@@ -557,27 +571,12 @@ impl ResourceSampler {
         self.open_files = ProcessCache::default();
     }
 
-    pub fn sample_for_targets(
+    fn sample_with(
         &mut self,
-        active_targets: &HashMap<String, Vec<u32>>,
-    ) -> ResourceSnapshot {
-        self.sample_with_catalog(active_targets, None, &crate::ownership::Snapshot::default())
-    }
-
-    pub(crate) fn sample_for_applications(
-        &mut self,
-        windows: &HashMap<String, Vec<u32>>,
-        catalog: &crate::catalog::Catalog,
-        ownership: &crate::ownership::Snapshot,
-    ) -> ResourceSnapshot {
-        self.sample_with_catalog(windows, Some(catalog), ownership)
-    }
-
-    fn sample_with_catalog(
-        &mut self,
-        active_targets: &HashMap<String, Vec<u32>>,
-        catalog: Option<&crate::catalog::Catalog>,
-        ownership: &crate::ownership::Snapshot,
+        discover: impl FnOnce(
+            &dyn ResourceProvider,
+            &mut discovery::KnownRoots,
+        ) -> (ProcessSample, ResourceSnapshot),
     ) -> ResourceSnapshot {
         if self.resume_clock.resumed() {
             self.reset_after_resume();
@@ -594,27 +593,7 @@ impl ResourceSampler {
             .previous_system_ticks
             .map(|previous| system_ticks.saturating_sub(previous))
             .filter(|delta| *delta > 0);
-        let processes = provider.processes();
-        let targets = match catalog {
-            Some(catalog) => self.known_roots.discover(
-                provider.as_ref(),
-                active_targets,
-                &processes,
-                catalog,
-                ownership,
-            ),
-            None => discovery::Targets {
-                roots: active_targets.clone(),
-                owners: HashMap::new(),
-            },
-        };
-        let (sample, mut snapshot) =
-            ProcessSample::discover(provider.as_ref(), &targets.roots, processes, catalog);
-        snapshot.target_roots = targets.roots;
-        snapshot.target_owners = targets.owners;
-        snapshot
-            .shared_pids
-            .retain(|pid| !snapshot.target_owners.contains_key(pid));
+        let (sample, mut snapshot) = discover(provider.as_ref(), &mut self.known_roots);
         snapshot.logical_cpus = logical_cpus;
         snapshot.interval_seconds = interval_seconds;
         let current_cgroups = snapshot
@@ -823,29 +802,7 @@ impl ResourceSampler {
     fn io_delta(&self, pid: u32, process: &ProcessStat, current: ProcessIo) -> ProcessIo {
         self.previous(pid, process)
             .and_then(|previous| previous.io)
-            .map_or_else(ProcessIo::default, |previous| ProcessIo {
-                physical_read_bytes: current
-                    .physical_read_bytes
-                    .saturating_sub(previous.physical_read_bytes),
-                physical_write_bytes: current
-                    .physical_write_bytes
-                    .saturating_sub(previous.physical_write_bytes),
-                logical_read_bytes: current
-                    .logical_read_bytes
-                    .saturating_sub(previous.logical_read_bytes),
-                logical_write_bytes: current
-                    .logical_write_bytes
-                    .saturating_sub(previous.logical_write_bytes),
-                read_operations: current
-                    .read_operations
-                    .saturating_sub(previous.read_operations),
-                write_operations: current
-                    .write_operations
-                    .saturating_sub(previous.write_operations),
-                cancelled_write_bytes: current
-                    .cancelled_write_bytes
-                    .saturating_sub(previous.cancelled_write_bytes),
-            })
+            .map_or_else(ProcessIo::default, |previous| current.delta(previous))
     }
 
     fn major_fault_delta(&self, pid: u32, process: &ProcessStat) -> u64 {
@@ -871,21 +828,9 @@ impl ResourceSampler {
                         rate(elapsed as f64, seconds * 10_000.0, 1)
                     }),
                     io: counters.io.map(|current| {
-                        previous.and_then(|value| value.io).map_or_else(
-                            CgroupIo::default,
-                            |previous| CgroupIo {
-                                read_bytes: current.read_bytes.saturating_sub(previous.read_bytes),
-                                write_bytes: current
-                                    .write_bytes
-                                    .saturating_sub(previous.write_bytes),
-                                read_operations: current
-                                    .read_operations
-                                    .saturating_sub(previous.read_operations),
-                                write_operations: current
-                                    .write_operations
-                                    .saturating_sub(previous.write_operations),
-                            },
-                        )
+                        previous
+                            .and_then(|value| value.io)
+                            .map_or_else(IoCounters::default, |previous| current.delta(previous))
                     }),
                     memory_bytes: counters.memory_bytes,
                 };
@@ -937,70 +882,6 @@ fn engine_scope(client_engine: &str) -> String {
         .unwrap_or(("unknown/unknown", client_engine));
     let (device, _) = client.rsplit_once('/').unwrap_or((client, "unknown"));
     format!("{device}/{engine}")
-}
-
-/// Lightweight identity/topology discovery is separate from detailed sampling.
-struct ProcessSample {
-    processes: HashMap<u32, ProcessStat>,
-    active: HashSet<u32>,
-    identities: HashSet<ProcessIdentity>,
-}
-
-impl ProcessSample {
-    fn discover(
-        provider: &dyn ResourceProvider,
-        targets: &HashMap<String, Vec<u32>>,
-        processes: HashMap<u32, ProcessStat>,
-        catalog: Option<&crate::catalog::Catalog>,
-    ) -> (Self, ResourceSnapshot) {
-        let children =
-            process_children(processes.iter().map(|(&pid, stat)| (pid, stat.parent_pid)));
-        let roots = targets
-            .values()
-            .flatten()
-            .copied()
-            .filter(|pid| *pid > 0)
-            .collect();
-        let cgroup_path_by_root = match catalog {
-            None => cgroup_paths_for_roots(provider, &roots),
-            Some(catalog) => roots
-                .iter()
-                .filter_map(|&root| {
-                    let path = provider.process_cgroup(root)?;
-                    let (target, path) = catalog.application_cgroup(&path)?;
-                    // A PID match does not authorize charging its launcher's entire
-                    // cgroup. Scope counters require the scope's own catalog identity.
-                    targets
-                        .get(target)
-                        .is_some_and(|roots| roots.contains(&root))
-                        .then(|| (root, path.to_owned()))
-                })
-                .collect(),
-        };
-        let cgroup_members_by_root = cgroup_members_for_paths(provider, &cgroup_path_by_root);
-        let mut active = descendants(roots, &children);
-        active.extend(cgroup_members_by_root.values().flatten());
-        active.retain(|pid| processes.contains_key(pid));
-        let identities = active
-            .iter()
-            .filter_map(|&pid| Some((pid, processes.get(&pid)?.start_ticks)))
-            .collect();
-        let shared_pids = shared_target_pids(targets, &children, &cgroup_members_by_root);
-        (
-            Self {
-                processes,
-                active,
-                identities,
-            },
-            ResourceSnapshot {
-                children,
-                cgroup_path_by_root,
-                cgroup_members_by_root,
-                shared_pids,
-                ..Default::default()
-            },
-        )
-    }
 }
 
 impl<T> ProcessCache<T> {

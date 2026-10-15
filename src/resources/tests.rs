@@ -1,7 +1,7 @@
 use super::{
     CgroupUsage, ProcessUsage, ResourceSnapshot,
     provider::{
-        CgroupIo, DiskBreakdown, DiskFile, DiskFileId, MemoryUsage, ProcessFiles, ProcessIo,
+        DiskBreakdown, DiskFile, DiskFileId, IoCounters, MemoryUsage, ProcessFiles, ProcessIo,
     },
     system::parse_process_stat,
 };
@@ -49,8 +49,11 @@ fn totals_resources_without_double_counting_roots_in_either_attribution_mode() {
             ..MemoryUsage::default()
         },
         io: ProcessIo {
-            physical_read_bytes: disk_read_bytes,
-            physical_write_bytes: disk_write_bytes,
+            storage: IoCounters {
+                read_bytes: disk_read_bytes,
+                write_bytes: disk_write_bytes,
+                ..Default::default()
+            },
             ..ProcessIo::default()
         },
         files: Some(Arc::new(ProcessFiles {
@@ -126,14 +129,14 @@ fn totals_resources_without_double_counting_roots_in_either_attribution_mode() {
 
     let path = "/user.slice/app-example.scope".to_owned();
     snapshot
-        .cgroup_members_by_root
-        .insert(10, HashSet::from([10, 11]));
+        .cgroup_members_by_path
+        .insert(path.clone(), HashSet::from([10, 11]));
     snapshot.cgroup_path_by_root.insert(10, path.clone());
     snapshot.cgroup_usage.insert(
-        path,
+        path.clone(),
         CgroupUsage {
             cpu_percent: Some(80.0),
-            io: Some(CgroupIo {
+            io: Some(IoCounters {
                 read_bytes: 4096,
                 ..Default::default()
             }),
@@ -146,12 +149,14 @@ fn totals_resources_without_double_counting_roots_in_either_attribution_mode() {
     assert_eq!(usage.storage.disk_read_bytes, 4096);
     assert_eq!(usage.compute.memory_cgroup_bytes, 8192);
     assert_eq!(snapshot.usage_for_roots([0, 10, 10]), usage);
+    snapshot.cgroup_path_by_root.insert(11, path.clone());
+    assert_eq!(snapshot.usage_for_roots([10, 11]), usage);
 
     // A child leaving the scope is still part of the application, but partial
     // cgroup totals must no longer replace complete process-tree accounting.
     snapshot
-        .cgroup_members_by_root
-        .insert(10, HashSet::from([10]));
+        .cgroup_members_by_path
+        .insert(path, HashSet::from([10]));
     let mixed = snapshot.usage_for_roots([10]);
     assert_eq!(mixed.compute.process_count, 2);
     assert_eq!(mixed.compute.cpu_percent, 5.5);

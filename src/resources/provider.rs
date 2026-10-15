@@ -56,28 +56,57 @@ pub(super) struct ProcessStat {
 
 #[derive(Debug, Clone, Copy, Default)]
 pub(super) struct ProcessIo {
-    pub physical_read_bytes: u64,
-    pub physical_write_bytes: u64,
+    pub storage: IoCounters,
     pub logical_read_bytes: u64,
     pub logical_write_bytes: u64,
-    pub read_operations: u64,
-    pub write_operations: u64,
     pub cancelled_write_bytes: u64,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
 pub(super) struct CgroupCounters {
     pub cpu_usage_usec: Option<u64>,
-    pub io: Option<CgroupIo>,
+    pub io: Option<IoCounters>,
     pub memory_bytes: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
-pub(super) struct CgroupIo {
+pub(super) struct IoCounters {
     pub read_bytes: u64,
     pub write_bytes: u64,
     pub read_operations: u64,
     pub write_operations: u64,
+}
+
+impl IoCounters {
+    pub fn delta(self, previous: Self) -> Self {
+        Self {
+            read_bytes: self.read_bytes.saturating_sub(previous.read_bytes),
+            write_bytes: self.write_bytes.saturating_sub(previous.write_bytes),
+            read_operations: self
+                .read_operations
+                .saturating_sub(previous.read_operations),
+            write_operations: self
+                .write_operations
+                .saturating_sub(previous.write_operations),
+        }
+    }
+}
+
+impl ProcessIo {
+    pub fn delta(self, previous: Self) -> Self {
+        Self {
+            storage: self.storage.delta(previous.storage),
+            logical_read_bytes: self
+                .logical_read_bytes
+                .saturating_sub(previous.logical_read_bytes),
+            logical_write_bytes: self
+                .logical_write_bytes
+                .saturating_sub(previous.logical_write_bytes),
+            cancelled_write_bytes: self
+                .cancelled_write_bytes
+                .saturating_sub(previous.cancelled_write_bytes),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default)]

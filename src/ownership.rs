@@ -66,12 +66,7 @@ impl Snapshot {
     }
 
     pub(crate) fn revision(&self) -> u64 {
-        use std::hash::{Hash, Hasher};
-        let mut entries = self.entries().collect::<Vec<_>>();
-        entries.sort_unstable();
-        let mut hash = std::collections::hash_map::DefaultHasher::new();
-        entries.hash(&mut hash);
-        hash.finish()
+        crate::metrics::unordered_revision(self.entries())
     }
 }
 

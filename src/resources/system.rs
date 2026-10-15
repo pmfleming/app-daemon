@@ -5,15 +5,15 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use crate::process::{descendants, process_cgroup, process_stat_fields, read_processes};
+use crate::process::{process_cgroup, process_stat_fields, read_processes};
 
 use super::{
     energy,
     gpu::read_gpu_processes,
     network::read_network_counters,
     provider::{
-        BatterySample, CgroupCounters, CgroupIo, DiskBreakdown, DiskFile, DiskFileId,
-        EnergyProvider, GpuProcessStat, MemoryUsage, NetworkCounters, ProcessFiles, ProcessIo,
+        BatterySample, CgroupCounters, DiskBreakdown, DiskFile, DiskFileId, EnergyProvider,
+        GpuProcessStat, IoCounters, MemoryUsage, NetworkCounters, ProcessFiles, ProcessIo,
         ProcessStat, ResourceProvider,
     },
 };
@@ -121,14 +121,17 @@ fn application_disk_usage(target_id: &str) -> Option<DiskBreakdown> {
 }
 
 fn application_directory_names(target: &str) -> HashSet<String> {
-    let lowercase = target.to_ascii_lowercase();
-    let mut names = HashSet::from([target.to_owned(), lowercase.clone()]);
-    for candidate in [target, &lowercase] {
-        if let Some(short) = candidate.rsplit('.').next().filter(|name| name.len() >= 4) {
-            names.insert(short.to_owned());
-        }
-    }
-    names
+    [target.to_owned(), target.to_ascii_lowercase()]
+        .into_iter()
+        .flat_map(|name| {
+            let short = name
+                .rsplit('.')
+                .next()
+                .filter(|name| name.len() >= 4)
+                .map(str::to_owned);
+            std::iter::once(name).chain(short)
+        })
+        .collect()
 }
 
 fn xdg_roots<const N: usize>(home: &Option<PathBuf>, roots: [(&str, &str); N]) -> Vec<PathBuf> {
@@ -225,33 +228,6 @@ fn allocated_directory_bytes(roots: &[PathBuf], budget: &mut DiskScanBudget) -> 
     (std::time::Instant::now() < budget.deadline).then(|| files.values().copied().sum())
 }
 
-pub(super) fn shared_target_pids(
-    targets: &HashMap<String, Vec<u32>>,
-    children: &HashMap<u32, Vec<u32>>,
-    cgroups: &HashMap<u32, HashSet<u32>>,
-) -> HashSet<u32> {
-    let mut owners = HashMap::<u32, u32>::new();
-    for roots in targets.values() {
-        for pid in target_processes(roots, children, cgroups) {
-            *owners.entry(pid).or_default() += 1;
-        }
-    }
-    owners
-        .into_iter()
-        .filter_map(|(pid, owners)| (owners > 1).then_some(pid))
-        .collect()
-}
-
-fn target_processes(
-    roots: &[u32],
-    children: &HashMap<u32, Vec<u32>>,
-    cgroups: &HashMap<u32, HashSet<u32>>,
-) -> HashSet<u32> {
-    let mut pids = descendants(roots.iter().copied(), children);
-    pids.extend(roots.iter().filter_map(|root| cgroups.get(root)).flatten());
-    pids
-}
-
 pub(super) fn cgroup_paths_for_roots(
     provider: &dyn ResourceProvider,
     roots: &HashSet<u32>,
@@ -270,16 +246,14 @@ pub(super) fn cgroup_paths_for_roots(
 pub(super) fn cgroup_members_for_paths(
     provider: &dyn ResourceProvider,
     paths: &HashMap<u32, String>,
-) -> HashMap<u32, HashSet<u32>> {
-    let mut by_path = HashMap::<String, HashSet<u32>>::new();
+) -> HashMap<String, HashSet<u32>> {
     paths
-        .iter()
-        .filter_map(|(&root, path)| {
-            let members = by_path
-                .entry(path.clone())
-                .or_insert_with_key(|path| provider.cgroup_members(path))
-                .clone();
-            (!members.is_empty()).then_some((root, members))
+        .values()
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .filter_map(|path| {
+            let members = provider.cgroup_members(path);
+            (!members.is_empty()).then(|| (path.clone(), members))
         })
         .collect()
 }
@@ -328,7 +302,11 @@ fn read_cgroup_counters(path: &str) -> Option<CgroupCounters> {
 fn read_cgroup_counters_at(root: &Path) -> Option<CgroupCounters> {
     let cpu_usage_usec = fs::read_to_string(root.join("cpu.stat"))
         .ok()
-        .and_then(|cpu| whitespace_key_values(&cpu).get("usage_usec").copied());
+        .and_then(|cpu| {
+            key_values(cpu.lines(), char::is_whitespace)
+                .get("usage_usec")
+                .copied()
+        });
     let memory_bytes = fs::read_to_string(root.join("memory.current"))
         .ok()
         .and_then(|value| value.trim().parse().ok());
@@ -342,12 +320,12 @@ fn read_cgroup_counters_at(root: &Path) -> Option<CgroupCounters> {
     })
 }
 
-fn parse_cgroup_io(value: &str) -> Option<CgroupIo> {
-    let mut counters = CgroupIo::default();
+fn parse_cgroup_io(value: &str) -> Option<IoCounters> {
+    let mut counters = IoCounters::default();
     // A readable empty io.stat is supported idle accounting; malformed records
     // are unavailable, not fabricated zeros.
     for line in value.lines().filter(|line| !line.trim().is_empty()) {
-        let values = equals_key_values(line);
+        let values = key_values(line.split_whitespace(), |ch| ch == '=');
         counters.read_bytes = counters.read_bytes.saturating_add(*values.get("rbytes")?);
         counters.write_bytes = counters.write_bytes.saturating_add(*values.get("wbytes")?);
         counters.read_operations = counters
@@ -360,19 +338,13 @@ fn parse_cgroup_io(value: &str) -> Option<CgroupIo> {
     Some(counters)
 }
 
-fn whitespace_key_values(value: &str) -> HashMap<&str, u64> {
-    value
-        .lines()
-        .filter_map(|line| line.split_once(char::is_whitespace))
+fn key_values<'a>(
+    fields: impl Iterator<Item = &'a str>,
+    separator: impl Fn(char) -> bool + Copy,
+) -> HashMap<&'a str, u64> {
+    fields
+        .filter_map(|field| field.split_once(separator))
         .filter_map(|(key, value)| Some((key, value.trim().parse().ok()?)))
-        .collect()
-}
-
-fn equals_key_values(value: &str) -> HashMap<&str, u64> {
-    value
-        .split_whitespace()
-        .filter_map(|field| field.split_once('='))
-        .filter_map(|(key, value)| Some((key, value.parse().ok()?)))
         .collect()
 }
 
@@ -494,24 +466,18 @@ fn parse_field<T: std::str::FromStr>(fields: &[&str], index: usize) -> Option<T>
 
 fn read_process_io(pid: u32) -> Option<ProcessIo> {
     let value = fs::read_to_string(format!("/proc/{pid}/io")).ok()?;
-    let values = numeric_key_values(&value);
+    let values = key_values(value.lines(), |ch| ch == ':');
     Some(ProcessIo {
-        physical_read_bytes: values.get("read_bytes").copied().unwrap_or(0),
-        physical_write_bytes: values.get("write_bytes").copied().unwrap_or(0),
+        storage: IoCounters {
+            read_bytes: values.get("read_bytes").copied().unwrap_or(0),
+            write_bytes: values.get("write_bytes").copied().unwrap_or(0),
+            read_operations: values.get("syscr").copied().unwrap_or(0),
+            write_operations: values.get("syscw").copied().unwrap_or(0),
+        },
         logical_read_bytes: values.get("rchar").copied().unwrap_or(0),
         logical_write_bytes: values.get("wchar").copied().unwrap_or(0),
-        read_operations: values.get("syscr").copied().unwrap_or(0),
-        write_operations: values.get("syscw").copied().unwrap_or(0),
         cancelled_write_bytes: values.get("cancelled_write_bytes").copied().unwrap_or(0),
     })
-}
-
-fn numeric_key_values(value: &str) -> HashMap<&str, u64> {
-    value
-        .lines()
-        .filter_map(|line| line.split_once(':'))
-        .filter_map(|(key, value)| Some((key, value.trim().parse().ok()?)))
-        .collect()
 }
 
 fn read_system_cpu() -> (u64, usize) {

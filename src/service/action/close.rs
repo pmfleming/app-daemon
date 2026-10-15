@@ -55,33 +55,36 @@ where
     result.status = "observing".into();
     publish(result.clone()).await;
     let deadline = tokio::time::Instant::now() + budget;
-    loop {
+    result.status = loop {
         let snapshot = backend.windows().await;
         if !snapshot.available {
-            result.status = "unknown".into();
-            return result;
+            break "unknown";
         }
-        let live = snapshot
-            .clients
-            .iter()
-            .map(|window| (window.address.as_str(), window.pid))
-            .collect::<HashSet<_>>();
-        result.remaining_window_ids = targets
-            .iter()
-            .filter(|target| live.contains(&(target.address.as_str(), target.pid)))
-            .map(|v| hyprland::window_id(&v.address))
-            .collect();
+        result.remaining_window_ids = remaining_windows(targets, &snapshot);
         if result.remaining_window_ids.is_empty() {
-            result.status = "closed".into();
-            return result;
+            break "closed";
         }
         if tokio::time::Instant::now() >= deadline {
-            result.status = "still-open".into();
-            return result;
+            break "still-open";
         }
         publish(result.clone()).await;
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
+    .into();
+    result
+}
+
+fn remaining_windows(targets: &[&Client], snapshot: &Snapshot) -> Vec<String> {
+    let live = snapshot
+        .clients
+        .iter()
+        .map(|window| (window.address.as_str(), window.pid))
+        .collect::<HashSet<_>>();
+    targets
+        .iter()
+        .filter(|target| live.contains(&(target.address.as_str(), target.pid)))
+        .map(|v| hyprland::window_id(&v.address))
+        .collect()
 }
 
 #[cfg(test)]

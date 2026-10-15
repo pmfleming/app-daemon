@@ -1,5 +1,8 @@
 use super::read_cgroup_counters_at;
-use crate::resources::{ProcessUsage, ResourceSampler, ResourceSnapshot, provider::ProcessIo};
+use crate::resources::{
+    ProcessUsage, ResourceSampler, ResourceSnapshot,
+    provider::{IoCounters, ProcessIo},
+};
 use std::{
     collections::{HashMap, HashSet},
     fs,
@@ -18,14 +21,17 @@ fn missing_or_invalid_controllers_fall_back_and_recovery_rebaselines_counters() 
             ProcessUsage {
                 cpu_percent: 3.0,
                 io: ProcessIo {
-                    physical_read_bytes: 123,
+                    storage: IoCounters {
+                        read_bytes: 123,
+                        ..Default::default()
+                    },
                     ..Default::default()
                 },
                 storage_available: true,
                 ..Default::default()
             },
         )]),
-        cgroup_members_by_root: HashMap::from([(42, HashSet::from([42]))]),
+        cgroup_members_by_path: HashMap::from([(path.clone(), HashSet::from([42]))]),
         cgroup_path_by_root: HashMap::from([(42, path.clone())]),
         ..Default::default()
     };

@@ -37,8 +37,8 @@ pub(crate) mod query;
 mod watcher;
 use operations::OperationRegistry;
 
+use action::operation_result;
 pub use action::{ApplicationAction, ExecuteParams};
-use action::{execute_action, operation_result};
 use identity::{group_windows, resolve_target};
 pub use query::QueryParams;
 use query::{combined_revision, page};
@@ -487,7 +487,6 @@ impl ApplicationService {
             "Operation accepted".into(),
             None,
         );
-        let operation_id = accepted.id.clone();
         let service = Arc::clone(self);
         let (start_sender, start_receiver) = oneshot::channel();
         let mut operations = self.operations.lock().await;
@@ -496,36 +495,10 @@ impl ApplicationService {
             "application service is shutting down"
         );
         operations.admit(owner.as_deref())?;
+        let running = accepted.clone();
         let task = tokio::spawn(async move {
             let _ = start_receiver.await;
-            let running = operation_result(
-                operation_id.clone(),
-                &params,
-                "running",
-                "Operation running".into(),
-                None,
-            );
-            if !service.publish_running(running).await {
-                return;
-            }
-            let lock = service.launch_lock(&params.target_id);
-            let _launch = lock.lock().await;
-            let (status, message, launch, close) =
-                match execute_action(&catalog, &params, &service, &operation_id).await {
-                    Ok(outcome) => (
-                        outcome.status,
-                        outcome.message,
-                        outcome.launch,
-                        outcome.close,
-                    ),
-                    Err(error) => ("failed", error.to_string(), None, None),
-                };
-            let mut completed =
-                operation_result(operation_id, &params, status, message, launch.as_ref());
-            completed.close = close;
-            if service.operations.lock().await.finish(completed.clone()) {
-                let _ = service.operation_changes.send(completed);
-            }
+            service.run_operation(&catalog, &params, running).await;
         });
         operations.insert(owner, task.abort_handle(), accepted.clone())?;
         let _ = start_sender.send(());
