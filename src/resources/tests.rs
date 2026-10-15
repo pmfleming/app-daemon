@@ -59,7 +59,7 @@ fn totals_resources_without_double_counting_roots_in_either_attribution_mode() {
             DiskFileId { device: 1, inode },
             DiskFile {
                 bytes,
-                temporary: false,
+                temporary: inode == 3,
             },
         )
     };
@@ -82,8 +82,9 @@ fn totals_resources_without_double_counting_roots_in_either_attribution_mode() {
             ..ProcessIo::default()
         },
         files: Some(Arc::new(ProcessFiles {
-            referenced: open_files.clone(),
             open: open_files,
+            // Overlap with open descriptors and with another process's mappings.
+            mapped: HashMap::from([file(1, 2048), file(3, 4096)]),
             fd_available: true,
         })),
         storage_available: true,
@@ -127,7 +128,9 @@ fn totals_resources_without_double_counting_roots_in_either_attribution_mode() {
     assert_eq!(usage.storage.disk_read_bytes_per_second, 20.0);
     assert_eq!(usage.storage.disk_write_bytes_per_second, 30.0);
     assert_eq!(usage.storage.open_file_disk_bytes, 3072);
-    assert_eq!(usage.storage.referenced_file_permanent_bytes, 3072);
+    assert_eq!(usage.storage.referenced_file_disk_bytes, 8192);
+    assert_eq!(usage.storage.referenced_file_permanent_bytes, 4096);
+    assert_eq!(usage.storage.referenced_file_temporary_bytes, 4096);
     assert_eq!(usage.energy.energy_mwh, 2.75);
     assert_eq!(usage.energy.energy_source, "rapl");
     assert!(usage.metric_availability.0["cpu_percent"]);

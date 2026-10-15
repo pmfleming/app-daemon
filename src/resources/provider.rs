@@ -134,7 +134,7 @@ pub(super) struct DiskFile {
 #[derive(Debug, Clone, Default)]
 pub(super) struct ProcessFiles {
     pub open: HashMap<DiskFileId, DiskFile>,
-    pub referenced: HashMap<DiskFileId, DiskFile>,
+    pub mapped: HashMap<DiskFileId, DiskFile>,
     pub fd_available: bool,
 }
 

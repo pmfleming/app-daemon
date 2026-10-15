@@ -15,5 +15,18 @@ covered. The all-feature test asserts **zero allocations** for both parsers.
 Validation: all-feature tests and strict all-target/all-feature Clippy pass;
 RQLens hotspots regenerated. No public API changes or test removals.
 
+## 2. Keep open and mapped files separate until aggregation
+
+`ProcessFiles` now caches the two raw observations instead of cloning the complete
+open-file map into a precomputed union. The response aggregates open files alone
+for open-file size and both sets for referenced size. Max-by-inode and temporary
+classification remain associative, so overlapping observations preserve the old
+results without the duplicated cache. Fixtures no longer clone their open maps.
+The resource regression covers open/mapped overlap, mapped-only temporary files,
+and duplicate mappings across processes.
+
+Validation: all-feature tests and strict all-target/all-feature Clippy pass;
+RQLens hotspots regenerated. No resource wire fields changed.
+
 Static metrics remain advisory/partial because framework-generated method items
 are not inventoried; passing tests do not include the ignored live-systemd fixtures.

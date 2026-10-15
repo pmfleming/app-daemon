@@ -262,7 +262,8 @@ impl ResourceSnapshot {
             if let Some(files) = process.files.as_ref().filter(|files| files.fd_available) {
                 aggregate.file_processes += 1;
                 merge_disk_files(&mut aggregate.open_files, &files.open);
-                merge_disk_files(&mut aggregate.referenced_files, &files.referenced);
+                merge_disk_files(&mut aggregate.referenced_files, &files.open);
+                merge_disk_files(&mut aggregate.referenced_files, &files.mapped);
             }
             aggregate
                 .network_sockets

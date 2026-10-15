@@ -370,14 +370,9 @@ fn read_process_file_sets(pid: u32) -> ProcessFiles {
     let Some(open) = read_open_files(&fd_directory) else {
         return ProcessFiles::default();
     };
-    let mut referenced = open.clone();
-    merge_disk_files(
-        &mut referenced,
-        &read_open_files(&format!("/proc/{pid}/map_files")).unwrap_or_default(),
-    );
     ProcessFiles {
         open,
-        referenced,
+        mapped: read_open_files(&format!("/proc/{pid}/map_files")).unwrap_or_default(),
         fd_available: true,
     }
 }

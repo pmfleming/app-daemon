@@ -43,8 +43,8 @@ fn set_process(provider: &TestProvider, start_ticks: u64, bytes: u64, socket: u6
     state.files.insert(
         42,
         ProcessFiles {
-            open: files.clone(),
-            referenced: files,
+            open: files,
+            mapped: HashMap::new(),
             fd_available: true,
         },
     );
