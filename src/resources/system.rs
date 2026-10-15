@@ -198,12 +198,23 @@ fn is_directory(root: &Path) -> Option<bool> {
     }
 }
 
-fn allocated_directory_bytes(roots: &[PathBuf], budget: &mut DiskScanBudget) -> Option<u64> {
-    let mut files = HashMap::<DiskFileId, u64>::new();
-    for root in roots {
+#[derive(Default)]
+struct AllocatedFiles {
+    seen: HashSet<DiskFileId>,
+    bytes: u64,
+}
+
+impl AllocatedFiles {
+    fn include(&mut self, id: DiskFileId, bytes: u64) {
+        if self.seen.insert(id) {
+            self.bytes = self.bytes.saturating_add(bytes);
+        }
+    }
+
+    fn scan_directory(&mut self, root: &Path, budget: &mut DiskScanBudget) -> Option<()> {
         budget.visit()?;
         if !is_directory(root)? {
-            continue;
+            return Some(());
         }
         for entry in walkdir::WalkDir::new(root)
             .follow_links(false)
@@ -217,15 +228,24 @@ fn allocated_directory_bytes(roots: &[PathBuf], budget: &mut DiskScanBudget) -> 
                 continue;
             }
             let metadata = entry.metadata().ok()?;
-            files
-                .entry(DiskFileId {
+            self.include(
+                DiskFileId {
                     device: metadata.dev(),
                     inode: metadata.ino(),
-                })
-                .or_insert_with(|| metadata.blocks().saturating_mul(512));
+                },
+                metadata.blocks().saturating_mul(512),
+            );
         }
+        Some(())
     }
-    (std::time::Instant::now() < budget.deadline).then(|| files.values().copied().sum())
+}
+
+fn allocated_directory_bytes(roots: &[PathBuf], budget: &mut DiskScanBudget) -> Option<u64> {
+    let mut files = AllocatedFiles::default();
+    roots
+        .iter()
+        .try_for_each(|root| files.scan_directory(root, budget))?;
+    (std::time::Instant::now() < budget.deadline).then_some(files.bytes)
 }
 
 pub(super) fn cgroup_paths_for_roots(

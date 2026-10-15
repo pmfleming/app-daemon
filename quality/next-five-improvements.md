@@ -57,5 +57,46 @@ The combined Halstead effort of the reader and its parsing helpers falls from
 Validation: all-feature tests and strict all-target/all-feature Clippy pass;
 RQLens hotspots regenerated.
 
+## 5. Bounded disk scanning with saturating totals
+
+Directory scanning is separated from multi-root orchestration. `AllocatedFiles`
+retains only device/inode identities, instead of a byte value for every visited
+file, and updates one saturating total. This removes the unchecked final sum
+(which could panic in debug builds or wrap in release builds). Deduplication still
+keeps the first observation, and budget/deadline exhaustion still returns no size.
+
+Tests cover hard links, repeated roots, root and nested symlinks, missing/non-directory
+roots, budget exhaustion, deadline expiry, cross-device inode identities and total
+overflow. The largest disk-walk cognitive complexity falls from 8 to 4.
+
+Validation: all-feature tests and strict all-target/all-feature Clippy pass;
+RQLens hotspots regenerated.
+
+## Aggregate results and tradeoffs
+
+Production-function metrics use the preceding review's path/name exclusions for
+tests and benchmarks. All extracted helper functions are included, not just the
+shorter callers.
+
+| Production metric | Baseline | After five improvements |
+| --- | ---: | ---: |
+| Cognitive sum | 563 | 560 |
+| Cyclomatic sum | 1,205 | 1,211 |
+| Halstead effort sum | 4,434,720 | 4,419,760 |
+| Functions | 467 | 471 |
+
+These are primarily allocation, ownership and correctness improvements, **not a
+uniform reduction of every metric**. Extracted/testable helpers increase aggregate
+cyclomatic complexity. Total Rust source grows by about 177 lines, predominantly
+regression tests; no tests or public APIs were removed to lower the counts.
+All five steps passed the full all-feature test suite and strict Clippy before
+being committed. The final suite has 49 passing library and 16 passing integration
+tests, with five registered tests/helpers still ignored. No runtime speedup is
+claimed; the process-parser allocation assertion is the focused executed evidence.
+
 Static metrics remain advisory/partial because framework-generated method items
 are not inventoried; passing tests do not include the ignored live-systemd fixtures.
+The sibling framework changed independently during the session. RQLens rejects
+measurements whose inputs change during extraction; rejected runs were not used.
+Final raw measurements should be interpreted with their recorded fingerprints,
+not as a complete policy/coverage baseline.

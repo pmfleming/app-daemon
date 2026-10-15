@@ -1,5 +1,9 @@
 # RustQualityLens baseline
 
+The [next five improvements](next-five-improvements.md) cover allocation-free stat
+parsing, file-cache ownership, borrowed cursors, memory parsing and bounded disk
+accounting, with per-step verification and explicit aggregate metric tradeoffs.
+
 The latest [sampling/orchestration review](sampling-orchestration-review.md) records
 fresh complexity, effort, locality/leverage, duplication and source-size changes,
 verification, allocation evidence and explicit measurement limits.
