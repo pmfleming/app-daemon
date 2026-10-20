@@ -166,16 +166,6 @@ impl HistoryStore {
         self.prune(timestamp_ms);
     }
 
-    pub fn query(
-        &mut self,
-        target_id: &str,
-        since_ms: Option<u64>,
-        cursor: Option<&str>,
-        limit: usize,
-    ) -> anyhow::Result<HistoryPage> {
-        self.query_window(target_id, since_ms, None, cursor, limit)
-    }
-
     pub fn query_window(
         &mut self,
         target_id: &str,

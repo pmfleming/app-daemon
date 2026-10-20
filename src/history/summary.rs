@@ -369,7 +369,11 @@ mod tests {
         assert_eq!(cpu.observed_ms, 22_500);
         assert_eq!(full.summary.metrics["gpu_busy_percent"].mean, None);
         assert!(!full.summary.metrics["gpu_busy_percent"].available);
-        assert!(store.query("another-app", None, Some(cursor), 1).is_err());
+        assert!(
+            store
+                .query_window("another-app", None, None, Some(cursor), 1)
+                .is_err()
+        );
         assert!(
             store
                 .query_window("app", Some(base + 30_000), Some(base), None, 1)

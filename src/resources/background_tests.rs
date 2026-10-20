@@ -139,7 +139,7 @@ fn windowless_apps_are_discovered_published_and_added_to_history() -> anyhow::Re
         );
     }
     let points = history
-        .query("org.example.App.desktop", None, None, 100)?
+        .query_window("org.example.App.desktop", None, None, None, 100)?
         .points;
     // A sample can straddle a history bucket boundary. Verify the complete
     // recorded interval and attribution rather than a wall-clock-dependent count.

@@ -102,7 +102,7 @@ fn split_buckets_persist_without_losing_totals_availability_or_energy_retention(
     store.record("example.desktop", bucket + 25_000, 20.0, &usage);
     // Final saving must include the partial second bucket, with its actual endpoint.
     persist_snapshot(store.snapshot(true))?;
-    let page = store.query("example.desktop", None, None, 10)?;
+    let page = store.query_window("example.desktop", None, None, None, 10)?;
     assert!(!page.has_more);
     assert_eq!(
         page.points
@@ -173,7 +173,7 @@ fn split_buckets_persist_without_losing_totals_availability_or_energy_retention(
     store.record("example.desktop", bucket + 29_000, 2.0, &usage);
     persist_snapshot(store.snapshot(true))?;
     let mut loaded = HistoryStore::load(Some(path));
-    let restored = loaded.query("example.desktop", None, None, 10)?;
+    let restored = loaded.query_window("example.desktop", None, None, None, 10)?;
     assert_eq!(restored.points.len(), 2);
     assert_eq!(restored.points.first(), page.points.first());
     let available = restored.points[1].resources.availability.unwrap();
@@ -187,7 +187,7 @@ fn split_buckets_persist_without_losing_totals_availability_or_energy_retention(
         loaded.record("other.desktop", timestamp, 1.0, &ResourceUsage::default());
         assert!(
             loaded
-                .query("example.desktop", None, None, 10)?
+                .query_window("example.desktop", None, None, None, 10)?
                 .points
                 .is_empty()
         );

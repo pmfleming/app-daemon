@@ -48,7 +48,13 @@ async fn shutdown_drains_sampling_and_serializes_final_save_after_older_writers(
     drop(old_writer);
     time::timeout(Duration::from_secs(2), shutdown).await??;
     let mut loaded = HistoryStore::load(Some(path));
-    assert_eq!(loaded.query("app", None, None, 10)?.points.len(), 2);
+    assert_eq!(
+        loaded
+            .query_window("app", None, None, None, 10)?
+            .points
+            .len(),
+        2
+    );
     assert!(service.request_permit().await.is_err());
     assert!(
         service

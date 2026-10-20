@@ -147,7 +147,8 @@ impl ResourceSnapshot {
         usage.with_availability()
     }
 
-    pub fn usage_for_roots(&self, roots: impl IntoIterator<Item = u32>) -> ResourceUsage {
+    #[cfg(test)]
+    fn usage_for_roots(&self, roots: impl IntoIterator<Item = u32>) -> ResourceUsage {
         self.usage_for_roots_filtered(roots, None)
             .with_availability()
     }

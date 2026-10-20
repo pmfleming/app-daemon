@@ -26,7 +26,8 @@ struct Targets {
 }
 
 impl super::ResourceSampler {
-    pub fn sample_for_targets(
+    #[cfg(any(test, feature = "benchmarks"))]
+    pub(super) fn sample_for_targets(
         &mut self,
         active_targets: &HashMap<String, Vec<u32>>,
     ) -> ResourceSnapshot {

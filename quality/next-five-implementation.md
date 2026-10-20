@@ -74,3 +74,34 @@ These helper costs remain included in aggregate measurements.
 Verification: all-feature library and private-session integration suites, strict
 Clippy, formatting and diff checks pass. Existing tests retain reparenting, catalog
 removal, migrated-scope boundaries, explicit anchors and conflicting claims.
+
+## 4. Audit and narrow test-oriented interfaces
+
+Searched 1,050 discovered sibling Rust files and 27 sibling Cargo manifests,
+excluding build outputs, in addition to this repository's production, test and
+benchmark callers. No sibling Rust dependency/import or call to these helpers was
+found. The only sibling `app-daemon` matches were framework build-policy fixtures
+and project names, not Rust API consumers. This is a local-consumer audit, not a
+claim about unknown external users.
+
+- `ResourceSampler::sample_for_targets`: restricted to the resources module and
+  compiled only for tests or the explicit `benchmarks` feature. Production uses
+  catalog/ownership-aware `sample_for_applications` instead of this fixture path.
+- `ResourceSnapshot::usage_for_roots`: private and test-only. Application paths
+  retain ownership-filtered `usage_for_target` / `usage_for_application`.
+- Removed `HistoryStore::query`, a redundant public wrapper. All its test callers
+  now exercise `query_window` directly, passing `None` for the end of the window.
+  No cursor, persistence, shutdown or resource-history test was removed.
+
+**Rust source compatibility:** these three formerly public helper interfaces are
+no longer exported. Any unobserved external source consumer must migrate history
+calls to `query_window(id, since, None, cursor, limit)`, resource queries to the
+target-aware API, or sampling to `ApplicationService`. IPC/JSON interfaces and
+other public Rust entrypoints are unchanged. This deliberate narrowing is not
+represented as a semver-compatible public API change.
+
+Verification: default all-target compilation, all-feature tests and strict Clippy,
+formatting, diff checks and all-feature rustdoc pass. Generated public docs were
+checked to contain none of the three removed/restricted methods. Feature-enabled
+benchmark callers still compile. Added cfg guards affect compiled surface; RQLens
+pre-cfg inventories may still count the test-only methods.
