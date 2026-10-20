@@ -25,6 +25,7 @@ pub(super) struct TestState {
     pub system_ticks: u64,
     pub rapl: HashMap<PathBuf, (u64, u64)>,
     pub processes: HashMap<u32, ProcessStat>,
+    pub gpu: HashMap<u32, GpuProcessStat>,
     pub io: HashMap<u32, ProcessIo>,
     pub memory: HashMap<u32, MemoryUsage>,
     pub files: HashMap<u32, ProcessFiles>,
@@ -87,8 +88,15 @@ impl ResourceProvider for TestProvider {
                 .collect(),
         )
     }
-    fn gpu_processes(&self, _: &HashSet<u32>) -> HashMap<u32, GpuProcessStat> {
-        HashMap::new()
+    fn gpu_processes(&self, pids: &HashSet<u32>) -> HashMap<u32, GpuProcessStat> {
+        self.state
+            .lock()
+            .unwrap()
+            .gpu
+            .iter()
+            .filter(|(pid, _)| pids.contains(pid))
+            .map(|(&pid, gpu)| (pid, gpu.clone()))
+            .collect()
     }
     fn process_cgroup(&self, pid: u32) -> Option<String> {
         self.state.lock().unwrap().cgroups.get(&pid).cloned()

@@ -24,27 +24,20 @@ impl Sampler {
         &mut self,
         current: impl IntoIterator<Item = (Identity, GpuProcessStat)>,
         seconds: f64,
-    ) -> HashMap<u32, Usage> {
-        // Replace the complete baseline: missing observations must not bridge gaps.
+    ) -> impl Iterator<Item = (u32, Usage)> {
+        // Consume the whole frame. Missing observations must not bridge gaps.
         let previous = std::mem::take(&mut self.previous);
-        current
-            .into_iter()
-            .map(|(identity, gpu)| {
-                let usage = Usage {
-                    available: true,
-                    engines: engine_percent(
-                        previous.get(&identity),
-                        &gpu.engine_nanoseconds,
-                        seconds,
-                    ),
-                    resident_bytes: gpu.resident_memory_bytes,
-                    allocated_bytes: gpu.allocated_memory_bytes,
-                };
-                // Move the counters and their keys instead of cloning every engine name.
-                self.previous.insert(identity, gpu.engine_nanoseconds);
-                (identity.0, usage)
-            })
-            .collect()
+        current.into_iter().map(move |(identity, gpu)| {
+            let usage = Usage {
+                available: true,
+                engines: engine_percent(previous.get(&identity), &gpu.engine_nanoseconds, seconds),
+                resident_bytes: gpu.resident_memory_bytes,
+                allocated_bytes: gpu.allocated_memory_bytes,
+            };
+            // Move the counters and their keys instead of cloning every engine name.
+            self.previous.insert(identity, gpu.engine_nanoseconds);
+            (identity.0, usage)
+        })
     }
 }
 

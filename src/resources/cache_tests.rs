@@ -1,6 +1,9 @@
 use super::{
     ResourceSampler,
-    provider::{DiskFile, DiskFileId, MemoryUsage, NetworkCounters, ProcessFiles, ProcessStat},
+    provider::{
+        DiskFile, DiskFileId, GpuProcessStat, MemoryUsage, NetworkCounters, ProcessFiles,
+        ProcessStat,
+    },
     test_provider::TestProvider,
 };
 use std::{
@@ -19,6 +22,14 @@ fn set_process(provider: &TestProvider, start_ticks: u64, bytes: u64, socket: u6
             start_ticks,
             major_faults: bytes,
             thread_count: 1,
+        },
+    );
+    state.gpu.insert(
+        42,
+        GpuProcessStat {
+            engine_nanoseconds: HashMap::from([("device/client/gfx".into(), bytes * 1_000_000)]),
+            resident_memory_bytes: bytes,
+            ..Default::default()
         },
     );
     state.io.entry(42).or_default().storage.read_bytes = bytes;
@@ -72,6 +83,8 @@ fn identity_changes_resume_and_exit_rebaseline_resource_caches() {
     set_process(&provider, 1, 200, 10);
     let current = sampler.sample_for_targets(&targets).usage_for_roots([42]);
     assert_eq!(current.compute.cpu_percent, 100.0);
+    assert!(current.measurement.gpu_available);
+    assert_eq!(current.compute.gpu_memory_bytes, 200);
     assert_eq!(current.storage.disk_read_bytes, 100);
     assert_eq!(current.network.network_receive_bytes, 100);
     assert!(current.compute.major_faults_per_second > 0.0);
@@ -82,6 +95,7 @@ fn identity_changes_resume_and_exit_rebaseline_resource_caches() {
     assert_eq!(reused.storage.open_file_disk_bytes, 900);
     assert_eq!(reused.network.network_connection_count, 1);
     assert_eq!(reused.compute.cpu_percent, 0.0);
+    assert_eq!(reused.compute.gpu_percent, 0.0);
     assert_eq!(reused.storage.disk_read_bytes, 0);
     assert_eq!(reused.compute.major_faults_per_second, 0.0);
     assert_eq!(reused.network.network_receive_bytes, 0);
@@ -110,6 +124,7 @@ fn identity_changes_resume_and_exit_rebaseline_resource_caches() {
     assert_eq!(resumed.energy_source, "unavailable");
     let usage = resumed.usage_for_roots([42]);
     assert_eq!(usage.compute.cpu_percent, 0.0);
+    assert_eq!(usage.compute.gpu_percent, 0.0);
     assert_eq!(usage.storage.disk_read_bytes, 0);
     assert_eq!(usage.network.network_receive_bytes, 0);
     provider
@@ -132,9 +147,11 @@ fn identity_changes_resume_and_exit_rebaseline_resource_caches() {
     let returned = sampler.sample_for_targets(&targets).usage_for_roots([42]);
     assert_eq!(returned.storage.disk_read_bytes, 0);
     assert_eq!(returned.compute.cpu_percent, 0.0);
+    assert_eq!(returned.compute.gpu_percent, 0.0);
     let inactive = sampler
         .sample_for_targets(&HashMap::new())
         .usage_for_roots([42]);
     assert!(!inactive.measurement.referenced_files_available);
+    assert!(!inactive.measurement.gpu_available);
     assert_eq!(inactive.storage.open_file_disk_bytes, 0);
 }

@@ -16,7 +16,7 @@ pub(super) struct BatterySample {
     pub discharge_watts: f64,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub(super) struct GpuProcessStat {
     pub engine_nanoseconds: HashMap<String, u64>,
     pub resident_memory_bytes: u64,

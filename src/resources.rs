@@ -643,13 +643,7 @@ impl ResourceSampler {
                 .zip(self.previous_processes.get(pid))
                 .is_some_and(|(current, previous)| current.start_ticks == previous.start_ticks)
         });
-        let mut current_gpu = self.gpu.sample(
-            provider
-                .gpu_processes(active_processes)
-                .into_iter()
-                .filter_map(|(pid, gpu)| Some(((pid, current.get(&pid)?.start_ticks), gpu))),
-            interval_seconds,
-        );
+        let current_gpu = provider.gpu_processes(active_processes);
         self.open_files
             .refresh(identities, now, OPEN_FILE_REFRESH_INTERVAL, |pid| {
                 Arc::new(provider.process_files(pid))
@@ -684,7 +678,7 @@ impl ResourceSampler {
                     memory,
                     thread_count: process.thread_count,
                     major_faults,
-                    gpu: current_gpu.remove(&pid).unwrap_or_default(),
+                    gpu: gpu::Usage::default(),
                     io,
                     files,
                     sockets: self.previous_sockets_by_pid.get(&pid).cloned(),
@@ -700,6 +694,16 @@ impl ResourceSampler {
                     io: sampled_io,
                 },
             );
+        }
+        for (pid, gpu) in self.gpu.sample(
+            current_gpu
+                .into_iter()
+                .filter_map(|(pid, gpu)| Some(((pid, current.get(&pid)?.start_ticks), gpu))),
+            interval_seconds,
+        ) {
+            if let Some(process) = snapshot.processes.get_mut(&pid) {
+                process.gpu = gpu;
+            }
         }
         self.previous_processes
             .retain(|pid, _| current.contains_key(pid));

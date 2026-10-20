@@ -25,8 +25,9 @@ fn sample(sampler: &mut ResourceSampler, start_ticks: u64, value: u64, seconds: 
     sampler
         .gpu
         .sample([((42, start_ticks), counter(value))], seconds)
-        .remove(&42)
+        .next()
         .unwrap()
+        .1
 }
 
 #[test]
@@ -85,7 +86,34 @@ fn drm_counters_aggregate_engines_and_rebaseline_on_identity_or_resume_changes()
     let resumed = sample(&mut sampler, 2, 300, 1.0);
     assert!(resumed.engines.values().all(|v| *v == 0.0));
     // Missing observations (including exited processes) discard their baselines.
-    assert!(sampler.gpu.sample([], 1.0).is_empty());
+    assert_eq!(sampler.gpu.sample([], 1.0).count(), 0);
     let recovered = sample(&mut sampler, 2, 400, 1.0);
     assert!(recovered.engines.values().all(|v| *v == 0.0));
+}
+
+#[cfg(feature = "benchmarks")]
+#[test]
+fn gpu_frame_allocations() {
+    let measure = |collect| {
+        let mut sampler = super::Sampler::default();
+        let input = (0..64)
+            .map(|pid| ((pid, 1), counter(100)))
+            .collect::<Vec<_>>();
+        allocation_counter::measure(|| {
+            let frame = sampler.sample(input, 1.0);
+            let count = if collect {
+                std::hint::black_box(frame.collect::<HashMap<_, _>>()).len()
+            } else {
+                frame.map(std::hint::black_box).count()
+            };
+            assert_eq!(count, 64);
+        })
+    };
+    let (streamed, collected) = (measure(false), measure(true));
+    assert!(streamed.count_total < collected.count_total);
+    assert!(streamed.bytes_total < collected.bytes_total);
+    eprintln!(
+        "GPU frame allocations/bytes: streamed {}/{}, collected {}/{}",
+        streamed.count_total, streamed.bytes_total, collected.count_total, collected.bytes_total
+    );
 }
