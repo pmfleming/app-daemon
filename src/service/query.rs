@@ -1,4 +1,8 @@
-use std::{cmp::Reverse, collections::HashMap};
+use std::{
+    cmp::Reverse,
+    collections::{HashMap, hash_map::DefaultHasher},
+    hash::{Hash, Hasher},
+};
 
 use serde::{Deserialize, Serialize};
 
@@ -9,10 +13,8 @@ use crate::{
         ApplicationIdentity, ApplicationPage, ApplicationRuntime, ApplicationSummary, WindowSummary,
     },
     resources::ResourceSnapshot,
-    settings::{SettingsStore, inferred_category},
+    settings::{ApplicationSettings, SettingsStore, inferred_category},
 };
-
-const JSON_SAFE_INTEGER_MASK: u64 = (1_u64 << 53) - 1;
 
 #[derive(Debug, Deserialize, Serialize, schemars::JsonSchema)]
 pub struct QueryParams {
@@ -39,11 +41,43 @@ pub(super) fn combined_revision(
     // Revisions cross JSON into QML's JavaScript runtime. Keep this opaque hash
     // exactly representable as a Number so an unchanged revision can be sent
     // back in expected_revision without being rounded.
-    (catalog.revision.rotate_left(17)
-        ^ windows.revision
-        ^ settings_revision.rotate_left(31)
-        ^ runtime_revision.rotate_left(7))
-        & JSON_SAFE_INTEGER_MASK
+    crate::metrics::json_revision(
+        catalog.revision.rotate_left(17)
+            ^ windows.revision
+            ^ settings_revision.rotate_left(31)
+            ^ runtime_revision.rotate_left(7),
+    )
+}
+
+/// Action precondition for one application, not the whole desktop. Keep launch
+/// metadata, preferences and window identity/placement; exclude presentation-only
+/// titles, focus order and sampled resources. Grouping already verifies ownership.
+pub(super) fn target_revision(
+    target_id: &str,
+    entry: Option<&CatalogEntry>,
+    clients: &[&Client],
+    settings: Option<&ApplicationSettings>,
+    available: bool,
+) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    (target_id, entry, settings, available).hash(&mut hasher);
+    let mut windows = clients
+        .iter()
+        .map(|window| {
+            (
+                &window.address,
+                window.pid,
+                &window.class,
+                &window.initial_class,
+                window.workspace.id,
+                &window.workspace.name,
+                window.mapped,
+            )
+        })
+        .collect::<Vec<_>>();
+    windows.sort_unstable();
+    windows.hash(&mut hasher);
+    crate::metrics::json_revision(hasher.finish())
 }
 
 pub(crate) fn page(
@@ -77,14 +111,14 @@ pub(crate) fn page(
                 grouped.remove(&entry.id).unwrap_or_default(),
                 resources,
                 settings,
-                revision,
+                available,
             )
         })
         .collect();
     applications.extend(
-        grouped
-            .into_iter()
-            .map(|(id, clients)| summary_for_unmatched(id, clients, resources, revision)),
+        grouped.into_iter().map(|(id, clients)| {
+            summary_for_unmatched(id, clients, resources, settings, available)
+        }),
     );
     let query = params.query.trim().to_lowercase();
     applications.retain_mut(|application| {
@@ -173,9 +207,10 @@ fn summary_for_entry(
     clients: Vec<&Client>,
     resources: &ResourceSnapshot,
     settings: &SettingsStore,
-    revision: u64,
+    available: bool,
 ) -> ApplicationSummary {
     let preferences = settings.for_application(&entry.id);
+    let revision = target_revision(&entry.id, Some(entry), &clients, preferences, available);
     let identity = ApplicationIdentity {
         id: entry.id.clone(),
         kind: entry.kind().into(),
@@ -205,8 +240,16 @@ fn summary_for_unmatched(
     id: String,
     clients: Vec<&Client>,
     resources: &ResourceSnapshot,
-    revision: u64,
+    settings: &SettingsStore,
+    available: bool,
 ) -> ApplicationSummary {
+    let revision = target_revision(
+        &id,
+        None,
+        &clients,
+        settings.for_application(&id),
+        available,
+    );
     let name = clients
         .first()
         .filter(|window| !window.class.is_empty())

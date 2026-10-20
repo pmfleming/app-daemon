@@ -141,7 +141,14 @@ impl ApiService {
         self.applications
             .execute_owned(params, owner)
             .await
-            .map_err(|error| (ErrorCode::OperationFailed, error.to_string()))
+            .map_err(|error| {
+                let code = if error.is::<crate::service::StaleState>() {
+                    ErrorCode::StaleState
+                } else {
+                    ErrorCode::OperationFailed
+                };
+                (code, error.to_string())
+            })
     }
 }
 

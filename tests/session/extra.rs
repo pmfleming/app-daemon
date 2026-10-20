@@ -43,6 +43,7 @@ async fn metadata_only_refresh_replaces_launch_behavior_and_rejects_old_revision
     )
     .await?;
     assert_eq!(rejected["ok"], false);
+    assert_eq!(rejected["error"]["code"], "stale-state");
     let mut stream = events(&proxy).await?;
     for (action, expected) in [
         ("launch", "--\nupdated-command\n--flag\n"),
@@ -79,6 +80,85 @@ async fn metadata_only_refresh_replaces_launch_behavior_and_rejects_old_revision
             assert!(arguments.lines().any(|arg| arg == required), "{arguments}");
         }
     }
+    drop(proxy);
+    session.shutdown().await
+}
+
+#[tokio::test]
+async fn row_actions_ignore_unrelated_activity_but_reject_changed_targets() -> Result<()> {
+    let mut session = Session::start(true).await?;
+    let proxy = session.proxy().await?;
+    session
+        .compositor
+        .set(r#"[{"address":"0x123","class":"ok","pid":0,"title":"before","focusHistoryID":0}]"#);
+    let original = call(&proxy, "applications.refresh", json!({})).await?;
+    let row_revision = |page: &serde_json::Value| {
+        page["data"]["applications"]["applications"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["id"] == "ok.desktop")
+            .unwrap()["revision"]
+            .clone()
+    };
+    let expected = row_revision(&original);
+    session.compositor.set(r#"[{"address":"0x123","class":"ok","pid":0,"title":"after","focusHistoryID":1},{"address":"0x456","class":"fail","pid":0,"focusHistoryID":0}]"#);
+    let changed = call(&proxy, "applications.refresh", json!({})).await?;
+    assert_ne!(
+        original["data"]["applications"]["revision"],
+        changed["data"]["applications"]["revision"]
+    );
+    assert_eq!(expected, row_revision(&changed));
+    let params = json!({"target_id":"ok.desktop", "action":"focus-window", "window_id":"window-123", "expected_revision":expected});
+    let mut strict = params.clone();
+    strict["expected_revision"] = original["data"]["applications"]["revision"].clone();
+    let rejected = call(&proxy, "applications.execute", strict).await?;
+    assert_eq!(
+        rejected["error"]["code"], "stale-state",
+        "legacy page tokens stay strict"
+    );
+    let mut stream = events(&proxy).await?;
+    let accepted = call(&proxy, "applications.execute", params.clone()).await?;
+    assert_eq!(accepted["ok"], true, "{accepted}");
+    operation(
+        &mut stream,
+        accepted["data"]["operation"]["id"]
+            .as_str()
+            .context("operation id")?,
+        "completed",
+    )
+    .await?;
+
+    // A newly opened target window must invalidate Close-all's observed scope,
+    // even though unrelated window changes above did not invalidate this row.
+    session.compositor.set(
+        r#"[{"address":"0x123","class":"ok","pid":0},{"address":"0x789","class":"ok","pid":0}]"#,
+    );
+    let changed = call(&proxy, "applications.refresh", json!({})).await?;
+    assert_ne!(expected, row_revision(&changed));
+    for action in [
+        "activate",
+        "launch",
+        "close",
+        "close-window",
+        "focus-window",
+        "move-to-workspace",
+        "desktop-action",
+    ] {
+        let mut stale = params.clone();
+        stale["action"] = json!(action);
+        let rejected = call(&proxy, "applications.execute", stale).await?;
+        assert_eq!(
+            rejected["error"]["code"], "stale-state",
+            "{action}: {rejected}"
+        );
+        assert!(rejected["data"]["operation"].is_null());
+    }
+    // A row token cannot authorize a different application.
+    let rejected = call(&proxy, "applications.execute", json!({
+        "target_id":"fail.desktop", "action":"launch", "expected_revision":row_revision(&changed)
+    })).await?;
+    assert_eq!(rejected["error"]["code"], "stale-state");
     drop(proxy);
     session.shutdown().await
 }

@@ -211,6 +211,7 @@ pub struct ApplicationRuntime {
 pub struct ApplicationSummary {
     #[serde(flatten)]
     pub identity: ApplicationIdentity,
+    // Target-scoped action precondition; intentionally distinct from the page revision.
     pub revision: u64,
     #[serde(flatten)]
     pub runtime: ApplicationRuntime,
@@ -227,6 +228,7 @@ pub struct ApplicationSummary {
 
 #[derive(Debug, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ApplicationPage {
+    // Whole-state invalidation token for refreshing cached queries.
     pub revision: u64,
     pub generation: u64,
     pub applications: Vec<ApplicationSummary>,

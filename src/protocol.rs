@@ -56,10 +56,12 @@ pub fn event_contract_fixture() -> Value {
                 stream,
                 "subscription-example",
                 crate::service::StateRevision {
-                    catalog: 1,
-                    windows: 2,
-                    settings: 3,
-                    runtime: 4,
+                    // Exercise real 64-bit hashes through the wire constructors,
+                    // not tiny examples that hide JavaScript precision failures.
+                    catalog: u64::MAX,
+                    windows: 1_u64 << 63,
+                    settings: (1_u64 << 53) + 1,
+                    runtime: u64::MAX - 7,
                 },
             )
             .into_value(),
@@ -68,7 +70,8 @@ pub fn event_contract_fixture() -> Value {
     for stream in [stream::APPLICATIONS, stream::WINDOWS] {
         fixture.insert(
             stream.into(),
-            crate::daemon::events::changed(stream, "subscription-example", 42).into_value(),
+            crate::daemon::events::changed(stream, "subscription-example", u64::MAX - 42)
+                .into_value(),
         );
     }
     Value::Object(fixture)

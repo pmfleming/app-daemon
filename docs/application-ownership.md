@@ -51,8 +51,10 @@ is persisted to disk. State is reconstructed from live evidence after restart.
 - Query grouping and action targeting use the same snapshot, validating the live
   PID/start-time before applying a cached claim. Unclaimed windows retain existing
   cgroup/class/desktop-ID fallback behavior.
-- Ownership changes participate in query/revision/admission tokens and state
-  publication. This includes reconciliation without a compositor window change.
+- Ownership changes participate in whole-state revisions and state publication,
+  including reconciliation without a compositor window change. Target-scoped row
+  action tokens include the resulting window membership/identity, not unrelated
+  applications' ownership or process churn.
 - Resource discovery validates the snapshot against its own process observation,
   removes displaced scope memberships and prevents ambiguous ownership from
   charging either application. Existing process deduplication, independent-child

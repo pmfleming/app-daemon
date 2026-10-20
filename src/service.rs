@@ -41,7 +41,18 @@ use action::operation_result;
 pub use action::{ApplicationAction, ExecuteParams};
 use identity::{group_windows, resolve_target};
 pub use query::QueryParams;
-use query::{combined_revision, page};
+use query::{combined_revision, page, target_revision};
+
+#[derive(Debug)]
+pub(crate) struct StaleState;
+
+impl std::fmt::Display for StaleState {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("application state changed; refresh and retry")
+    }
+}
+
+impl std::error::Error for StaleState {}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StateRevision {
@@ -453,17 +464,26 @@ impl ApplicationService {
         let catalog = Arc::clone(&*self.catalog.read().await);
         let settings = self.settings.read().await;
         if let Some(expected) = params.expected_revision {
-            anyhow::ensure!(
-                expected
-                    == combined_revision(
-                        &catalog,
-                        &windows,
-                        settings.revision,
-                        self.resources.read().await.runtime_revision()
-                            ^ self.ownership_snapshot().revision()
-                    ),
-                "application state changed; refresh and retry"
+            let ownership = self.ownership_snapshot();
+            let grouped = group_windows(&catalog, &windows, &ownership);
+            let target = target_revision(
+                &params.target_id,
+                catalog.by_id(&params.target_id),
+                grouped.get(&params.target_id).map_or(&[], Vec::as_slice),
+                settings.for_application(&params.target_id),
+                windows.available,
             );
+            // Page-wide tokens remain supported for existing API consumers;
+            // launcher rows use target tokens so unrelated activity cannot veto an action.
+            let global = combined_revision(
+                &catalog,
+                &windows,
+                settings.revision,
+                self.resources.read().await.runtime_revision() ^ ownership.revision(),
+            );
+            if expected != target && expected != global {
+                return Err(StaleState.into());
+            }
         }
 
         let mut params = params;

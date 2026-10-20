@@ -8,6 +8,88 @@ use super::{QueryParams, page};
 use crate::service::identity::group_windows;
 
 #[test]
+fn target_revision_tracks_action_inputs_not_presentation() -> anyhow::Result<()> {
+    use super::target_revision;
+    use crate::{hyprland::Client, settings::ApplicationSettings};
+
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join("example.desktop");
+    let desktop = "[Desktop Entry]\nType=Application\nName=Example\nExec=true\nActions=inspect;\n[Desktop Action inspect]\nName=Inspect\nExec=true --inspect\n";
+    fs::write(&path, desktop)?;
+    let load = || Catalog::from_paths(vec![directory.path().into()]);
+    let catalog = load();
+    let window: Client = serde_json::from_value(serde_json::json!({
+        "address":"0x123", "class":"example", "pid":42, "workspace":{"id":1,"name":"1"}
+    }))?;
+    let settings = ApplicationSettings {
+        category: "shell".into(),
+        workspace_id: Some("1".into()),
+    };
+    let token =
+        |catalog: &Catalog, windows: &[&Client], settings: &ApplicationSettings, available| {
+            target_revision(
+                "example.desktop",
+                catalog.by_id("example.desktop"),
+                windows,
+                Some(settings),
+                available,
+            )
+        };
+    let original = token(&catalog, &[&window], &settings, true);
+    assert_eq!(original as f64 as u64, original);
+    let mut renamed = window.clone();
+    renamed.title = "new song".into();
+    renamed.focus_rank = 7;
+    assert_eq!(original, token(&catalog, &[&renamed], &settings, true));
+    assert_eq!(
+        token(&catalog, &[&window, &renamed], &settings, true),
+        token(&catalog, &[&renamed, &window], &settings, true)
+    );
+    for field in ["address", "pid", "class", "initial_class", "workspace"] {
+        let mut changed = window.clone();
+        match field {
+            "address" => changed.address = "0x456".into(),
+            "pid" => changed.pid += 1,
+            "class" => changed.class = "other".into(),
+            "initial_class" => changed.initial_class = "other".into(),
+            _ => changed.workspace.id += 1,
+        }
+        assert_ne!(
+            original,
+            token(&catalog, &[&changed], &settings, true),
+            "{field}"
+        );
+    }
+    assert_ne!(original, token(&catalog, &[], &settings, true));
+    assert_ne!(original, token(&catalog, &[&window], &settings, false));
+    let changed_settings = ApplicationSettings {
+        category: "media".into(),
+        workspace_id: Some("4".into()),
+    };
+    assert_ne!(
+        original,
+        token(&catalog, &[&window], &changed_settings, true)
+    );
+    for (from, to) in [
+        ("Exec=true\n", "Exec=changed\n"),
+        ("Exec=true\n", "Exec=true\nTerminal=true\n"),
+        ("Exec=true\n", "Exec=true\nPath=/different\n"),
+        ("Exec=true\n", "Exec=true\nDBusActivatable=true\n"),
+        ("Exec=true --inspect", "Exec=changed --inspect"),
+    ] {
+        fs::write(&path, desktop.replace(from, to))?;
+        assert_ne!(
+            original,
+            token(&load(), &[&window], &settings, true),
+            "{to}"
+        );
+    }
+    fs::remove_file(path)?;
+    assert_ne!(original, token(&load(), &[&window], &settings, true));
+    Ok(())
+}
+
+#[test]
 fn ranks_prefix_acronym_and_metadata_matches() -> anyhow::Result<()> {
     let directory = tempfile::tempdir()?;
     fs::write(

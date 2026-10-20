@@ -230,16 +230,16 @@ fn desktop_id(root: &Path, path: &Path) -> Option<String> {
     Some(relative.to_string_lossy().replace('/', "-"))
 }
 
-fn catalog_revision(entries: &[CatalogEntry]) -> u64 {
-    let mut hasher = DefaultHasher::new();
-    for entry in entries {
+impl Hash for CatalogEntry {
+    fn hash<H: Hasher>(&self, hasher: &mut H) {
+        let entry = self;
         // DesktopEntry's own Hash implementation includes only appid. Hash the
         // complete ordered group data instead, including action Exec and launch
         // metadata not exposed in the presentation model. Path affects %k too.
-        entry.entry.path.hash(&mut hasher);
+        entry.entry.path.hash(hasher);
         for (name, group) in &entry.entry.groups.0 {
-            name.hash(&mut hasher);
-            group.0.hash(&mut hasher);
+            name.hash(hasher);
+            group.0.hash(hasher);
         }
         (
             &entry.id,
@@ -253,8 +253,13 @@ fn catalog_revision(entries: &[CatalogEntry]) -> u64 {
             &entry.actions,
             entry.launch_only,
         )
-            .hash(&mut hasher);
+            .hash(hasher);
     }
+}
+
+fn catalog_revision(entries: &[CatalogEntry]) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    entries.hash(&mut hasher);
     hasher.finish()
 }
 

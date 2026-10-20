@@ -23,7 +23,7 @@ const CATEGORY_HINTS: &[(&str, &[&str])] = &[
     ("text", &["Office", "TextEditor", "WordProcessor", "Viewer"]),
 ];
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ApplicationSettings {
     pub category: String,

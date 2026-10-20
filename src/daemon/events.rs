@@ -60,15 +60,22 @@ pub(crate) fn subscribed(
         subscription_id,
         "subscribed",
         SubscribedData {
-            catalog_revision: revision.catalog,
-            window_revision: revision.windows,
-            settings_revision: revision.settings,
-            runtime_revision: revision.runtime,
+            catalog_revision: crate::metrics::json_revision(revision.catalog),
+            window_revision: crate::metrics::json_revision(revision.windows),
+            settings_revision: crate::metrics::json_revision(revision.settings),
+            runtime_revision: crate::metrics::json_revision(revision.runtime),
         },
     )
 }
 pub(crate) fn changed(stream: &'static str, subscription_id: &str, revision: u64) -> Event {
-    envelope(stream, subscription_id, "changed", ChangedData { revision })
+    envelope(
+        stream,
+        subscription_id,
+        "changed",
+        ChangedData {
+            revision: crate::metrics::json_revision(revision),
+        },
+    )
 }
 fn envelope(
     stream: &'static str,

@@ -1,3 +1,8 @@
+/// Opaque revisions cross JSON into JavaScript; retain exact integer round trips.
+pub(crate) const fn json_revision(value: u64) -> u64 {
+    value & ((1_u64 << 53) - 1)
+}
+
 /// Stable within a build and independent of hash-map iteration order.
 pub(crate) fn unordered_revision<T: Ord + std::hash::Hash>(
     values: impl IntoIterator<Item = T>,
