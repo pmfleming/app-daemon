@@ -164,11 +164,7 @@ impl Snapshot {
                 .filter(|identity| {
                     let process = &processes[&identity.0];
                     anchors.contains_key(identity)
-                        || !processes.get(&process.parent).is_some_and(|parent| {
-                            self.owners
-                                .get(&(process.parent, parent.start))
-                                .is_some_and(|owner| accepts(catalog, process, owner))
-                        })
+                        || self.parent_owner(catalog, process, processes).is_none()
                 })
                 .map(|id| id.0),
         );
@@ -179,17 +175,35 @@ impl Snapshot {
             }
             let identity = (pid, processes[&pid].start);
             let owner = Arc::clone(&self.owners[&identity]);
-            for &child in children.get(&pid).into_iter().flatten() {
-                let identity = (child, processes[&child].start);
-                if anchors.contains_key(&identity) || !accepts(catalog, &processes[&child], &owner)
-                {
-                    continue;
-                }
+            let inheriting = children
+                .get(&pid)
+                .into_iter()
+                .flatten()
+                .filter_map(|&child| {
+                    let process = &processes[&child];
+                    let identity = (child, process.start);
+                    (!anchors.contains_key(&identity) && accepts(catalog, process, &owner))
+                        .then_some(identity)
+                });
+            for identity in inheriting {
                 self.owners
                     .insert(identity, self.inherited_owner(identity, &owner));
-                pending.push_back(child);
+                pending.push_back(identity.0);
             }
         }
+    }
+
+    fn parent_owner(
+        &self,
+        catalog: &Catalog,
+        process: &Process,
+        processes: &HashMap<u32, Process>,
+    ) -> Option<&Owner> {
+        let parent = process.live_parent(processes)?;
+        self.owners
+            .get(&(process.parent, parent.start))
+            .map(Arc::as_ref)
+            .filter(|owner| accepts(catalog, process, owner))
     }
 
     fn inherited_owner(&self, identity: Identity, owner: &Arc<Owner>) -> Arc<Owner> {
@@ -232,10 +246,7 @@ fn can_retain(
         if !accepts(catalog, process, owner) {
             return false;
         }
-        if processes
-            .get(&process.parent)
-            .is_some_and(|parent| parent.start > process.start)
-        {
+        if process.live_parent(processes).is_none() {
             break;
         }
         pid = process.parent;

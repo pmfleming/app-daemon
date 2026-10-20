@@ -13,6 +13,15 @@ pub(crate) struct Process {
     pub(crate) cgroup: Option<String>,
 }
 
+impl Process {
+    /// A reused parent PID cannot establish ancestry for an older process.
+    pub(crate) fn live_parent<'a>(&self, processes: &'a HashMap<u32, Self>) -> Option<&'a Self> {
+        processes
+            .get(&self.parent)
+            .filter(|parent| parent.start <= self.start)
+    }
+}
+
 pub(crate) fn process_identity(pid: u32) -> Option<Identity> {
     Some((pid, read_process(pid)?.start))
 }
@@ -36,8 +45,8 @@ pub(crate) fn parse_process(stat: &str) -> Option<Process> {
 /// Exclude impossible ancestry edges caused by PID reuse during a procfs scan.
 pub(crate) fn live_process_children(processes: &HashMap<u32, Process>) -> HashMap<u32, Vec<u32>> {
     process_children(processes.iter().filter_map(|(&pid, process)| {
-        let parent = processes.get(&process.parent)?;
-        (process.start >= parent.start).then_some((pid, process.parent))
+        process.live_parent(processes)?;
+        Some((pid, process.parent))
     }))
 }
 

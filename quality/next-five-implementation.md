@@ -51,3 +51,26 @@ Clippy, formatting and diff checks pass. Two new deterministic tests cover cappe
 retry delays, reset on success/rebuild, skipped/healthy install attempts,
 healthy/degraded polling intervals, and conditional refresh timestamps (including
 an unrequested pending future that must not be polled).
+
+## 3. Simplify ownership eligibility and propagation
+
+`Process::live_parent` now supplies one PID-reuse/ancestry rule to child-map
+construction, retained-lineage checks and root eligibility. Parent-owner lookup
+is separate from queue traversal; eligible child identities are filtered before
+propagation. Breadth-first ordering, explicit-anchor precedence, conflict markers
+and the visited set remain intact.
+
+This also fixes a demonstrated bug: a retained child whose parent PID was reused
+could be incorrectly excluded from traversal roots, preventing its new descendants
+from inheriting the retained owner. The new regression **fails on the step-2
+commit** in a temporary worktree and passes with this fix. It also exercises a
+same-start ancestry cycle and preservation of an explicit conflicting anchor.
+
+`Snapshot::inherit` cognitive / cyclomatic complexity falls **10 / 7 → 7 / 6**;
+its effort falls **44,267 → 39,488**. The new parent-owner helper costs 4,702 effort,
+while shared parent validation reduces `can_retain` effort **23,590 → 18,962**.
+These helper costs remain included in aggregate measurements.
+
+Verification: all-feature library and private-session integration suites, strict
+Clippy, formatting and diff checks pass. Existing tests retain reparenting, catalog
+removal, migrated-scope boundaries, explicit anchors and conflicting claims.

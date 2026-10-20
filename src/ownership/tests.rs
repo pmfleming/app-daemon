@@ -62,6 +62,45 @@ fn ownership_survives_reparenting_but_expires_on_pid_reuse_and_catalog_removal()
 }
 
 #[test]
+fn reused_parents_do_not_suppress_retained_roots_and_cycles_terminate() {
+    let (_dir, catalog) = catalog();
+    let mut tracker = Ownership::default();
+    let mut processes = HashMap::from([
+        (10, process(0, 100, "/unidentified")),
+        (11, process(10, 101, "/unidentified")),
+    ]);
+    tracker.remember("pocket.desktop", [(10, 100)]);
+    tracker.reconcile(&catalog, &processes);
+    processes.insert(10, process(0, 200, "/unidentified"));
+    processes.insert(12, process(11, 102, "/unidentified"));
+    tracker.remember("other.desktop", [(10, 200)]);
+    tracker.reconcile(&catalog, &processes);
+    assert_eq!(
+        tracker.snapshot().target((10, 200)),
+        Some(Some("other.desktop"))
+    );
+    for identity in [(11, 101), (12, 102)] {
+        assert_eq!(
+            tracker.snapshot().target(identity),
+            Some(Some("pocket.desktop"))
+        );
+    }
+    // Malformed same-start ancestry must not loop or overwrite the explicit anchor.
+    processes.insert(13, process(11, 101, "/unidentified"));
+    processes.get_mut(&11).unwrap().parent = 13;
+    processes.get_mut(&10).unwrap().parent = 13;
+    tracker.reconcile(&catalog, &processes);
+    assert_eq!(
+        tracker.snapshot().target((13, 101)),
+        Some(Some("pocket.desktop"))
+    );
+    assert_eq!(
+        tracker.snapshot().target((10, 200)),
+        Some(Some("other.desktop"))
+    );
+}
+
+#[test]
 fn application_boundaries_override_retained_descendants_and_contain_conflicts() {
     let (_dir, catalog) = catalog();
     let mut tracker = Ownership::default();
