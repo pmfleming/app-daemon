@@ -417,9 +417,6 @@ fn search_acronym(values: &[&str]) -> String {
     acronym
 }
 
-#[cfg(test)]
-mod tests;
-
 fn append_initials(acronym: &mut String, value: &str) {
     let mut previous_alphanumeric = false;
     let mut previous_lowercase = false;

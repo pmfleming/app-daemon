@@ -6,7 +6,14 @@ use serde_json::json;
 async fn metadata_only_refresh_replaces_launch_behavior_and_rejects_old_revision() -> Result<()> {
     let mut session = Session::start(false).await?;
     let proxy = session.proxy().await?;
-    let original = call(&proxy, "applications.query", json!({})).await?;
+    // The real public query selects the application before its metadata changes;
+    // ranking-score permutations are not part of this user-facing contract.
+    let original = call(&proxy, "applications.query", json!({"query":"OK"})).await?;
+    let matches = original["data"]["applications"]["applications"]
+        .as_array()
+        .context("filtered application rows")?;
+    assert_eq!(matches.len(), 1);
+    assert_eq!(matches[0]["id"], "ok.desktop");
     let revision = original["data"]["applications"]["revision"].clone();
     let directory = session.root.path().join("data");
     let entry_path = directory.join("applications/ok.desktop");

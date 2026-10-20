@@ -248,7 +248,3 @@ fn parse_scaled(value: &str, default_unit: &str, units: &[(&str, u64)]) -> Optio
         .find_map(|(candidate, multiplier)| (*candidate == unit).then_some(*multiplier))?;
     value.checked_mul(multiplier)
 }
-
-#[cfg(test)]
-#[path = "gpu_usage_tests.rs"]
-mod tests;

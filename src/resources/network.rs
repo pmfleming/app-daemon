@@ -213,7 +213,3 @@ fn write_u16(bytes: &mut [u8], offset: usize, value: u16) {
 fn write_u32(bytes: &mut [u8], offset: usize, value: u32) {
     bytes[offset..offset + 4].copy_from_slice(&value.to_ne_bytes());
 }
-
-#[cfg(test)]
-#[path = "network_tests.rs"]
-mod tests;

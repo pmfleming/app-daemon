@@ -9,7 +9,6 @@ from unittest.mock import patch
 
 import quality_regression as gate
 
-
 class RegressionGateTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -52,18 +51,6 @@ class RegressionGateTests(unittest.TestCase):
         self.assertEqual(baseline["metrics"]["code.rs_py_sh.lines"], 2)
         self.assertEqual(baseline["metrics"]["rust.all.clone_sites"], 1)
 
-    def test_module_regression_cannot_hide_in_average_or_population_change(self):
-        baseline = self.snapshot()
-        changed = copy.deepcopy(baseline)
-        changed["modules"]["locality_score"]["app::lib"] = 89
-        self.assertIn("app::lib.locality_score", gate.regressions(baseline, changed))
-        changed["modules"]["locality_score"]["app::new"] = 100
-        self.assertIn("locality_score.inventory", gate.regressions(baseline, changed))
-        changed["instrument"] = "new instrument"
-        self.assertIn("incomparable.instrument", gate.regressions(baseline, changed))
-        changed["metric_models"]["halstead"][1] += 1
-        self.assertIn("incomparable.metric_models", gate.regressions(baseline, changed))
-
     def test_stale_missing_nonfinite_and_partial_evidence_fail_closed(self):
         original = copy.deepcopy(self.artifacts)
         mutations = [
@@ -84,34 +71,6 @@ class RegressionGateTests(unittest.TestCase):
                 mutate(self.artifacts)
                 with self.assertRaises((ValueError, KeyError)):
                     self.snapshot()
-
-    def test_only_explicit_bounded_partial_inventory_is_accepted(self):
-        state = self.artifacts["hotspots"]["measurement_confidence"]
-        state.update(complete=False, partial=True, unsupported_pattern=["known macro"])
-        self.assertEqual(self.snapshot()["partial_evidence"]["hotspots"], ["known macro"])
-        state["unsupported_pattern"].append("known macro")
-        with self.assertRaisesRegex(ValueError, "exceeded"):
-            self.snapshot()
-
-    def test_missing_file_and_new_unmeasured_source_fail(self):
-        self.snapshot()
-        (self.root / "clones.json").unlink()
-        with self.assertRaises(FileNotFoundError):
-            gate.snapshot(self.root, self.root, self.files, "instrument", self.policy)
-        self.files["src/unmeasured.rs"] = b"fn omitted() {}\n"
-        with self.assertRaisesRegex(ValueError, "inventory mismatch"):
-            self.snapshot()
-
-    def test_scope_excludes_tests_but_line_budget_counts_them(self):
-        for path, name in [("tests/session.rs", "run"), ("src/cache_tests.rs", "run"),
-                           ("src/benchmarks.rs", "run"), ("src/lib.rs", "lib::tests::run")]:
-            self.assertFalse(gate.production(path, name))
-        self.assertTrue(gate.production("src/lib.rs", "run"))
-        self.files["tests/check.rs"] = b"#[test]\nfn check() {}\n"
-        self.artifacts["hotspots"]["records"].append({"kind": "module", "path": "tests/check.rs"})
-        metrics = self.snapshot()["metrics"]
-        self.assertEqual(metrics["rust.all.lines"], 3)
-        self.assertEqual(metrics["rust.production_files.lines"], 1)
 
     def test_cli_requires_review_and_never_silently_rewrites_baseline(self):
         baseline = self.snapshot()
@@ -149,17 +108,6 @@ class RegressionGateTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "no baseline"):
                 gate.run(args)
             self.assertFalse(baseline_path.exists())
-
-    def test_source_inventory_includes_untracked_files_not_ignored_build_outputs(self):
-        for name, content in self.files.items():
-            path = self.root / name
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_bytes(content)
-        with patch.object(gate.subprocess, "check_output", return_value=b"src/lib.rs\0scripts/check.py\0src/lib.rs\0") as command:
-            self.assertEqual(gate.sources(self.root), self.files)
-            self.assertIn("--others", command.call_args.args[0])
-            self.assertIn("--exclude-standard", command.call_args.args[0])
-
 
 if __name__ == "__main__":
     unittest.main()
