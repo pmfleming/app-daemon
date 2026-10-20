@@ -25,7 +25,7 @@ pub(super) fn group_windows<'a>(
 pub(super) fn resolve_target<'a>(
     catalog: &'a Catalog,
     window: &Client,
-    ownership: &crate::ownership::Snapshot,
+    ownership: &'a crate::ownership::Snapshot,
 ) -> Cow<'a, str> {
     match ownership.live_target(window.pid) {
         Some(Some(target))
@@ -33,7 +33,7 @@ pub(super) fn resolve_target<'a>(
                 .by_id(target)
                 .is_some_and(|entry| !entry.launch_only) =>
         {
-            Cow::Owned(target.to_owned())
+            Cow::Borrowed(target)
         }
         Some(None) => unmatched(window),
         _ => resolve_target_with_cgroup(catalog, window, process_cgroup(window.pid).as_deref()),

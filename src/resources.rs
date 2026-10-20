@@ -24,8 +24,8 @@ use discovery::ProcessSample;
 use disk::AppDiskCache;
 use energy::EnergySampler;
 use provider::{
-    CgroupCounters, DiskBreakdown, DiskFile, DiskFileId, GpuProcessStat, IoCounters, MemoryUsage,
-    NetworkCounters, ProcessFiles, ProcessIo, ProcessStat, ResourceProvider,
+    CgroupCounters, DiskBreakdown, DiskFile, DiskFileId, IoCounters, MemoryUsage, NetworkCounters,
+    ProcessFiles, ProcessIo, ProcessStat, ResourceProvider,
 };
 use system::{LinuxResourceProvider, merge_disk_files};
 
@@ -50,10 +50,7 @@ struct ProcessUsage {
     memory: MemoryUsage,
     thread_count: u64,
     major_faults: u64,
-    gpu_available: bool,
-    gpu_engine_percent: HashMap<String, f64>,
-    gpu_memory_resident_bytes: u64,
-    gpu_memory_allocated_bytes: u64,
+    gpu: gpu::Usage,
     io: ProcessIo,
     files: Option<Arc<ProcessFiles>>,
     sockets: Option<Arc<HashSet<u64>>>,
@@ -251,8 +248,8 @@ impl ResourceSnapshot {
             aggregate.covered_processes += 1;
             aggregate.memory_processes += u64::from(process.memory.rss_available);
             aggregate.pss_processes += u64::from(process.memory.pss_available);
-            aggregate.gpu_processes += u64::from(process.gpu_available);
-            for (engine, percent) in &process.gpu_engine_percent {
+            aggregate.gpu_processes += u64::from(process.gpu.available);
+            for (engine, percent) in &process.gpu.engines {
                 *gpu_engines.entry(engine).or_default() += percent;
             }
             aggregate.network_processes += u64::from(process.sockets.is_some());
@@ -475,19 +472,19 @@ impl ProcessUsage {
         add_counter(&mut compute.process_count, 1);
         add_counter(&mut compute.thread_count, self.thread_count);
         compute.major_faults_per_second += self.major_faults as f64;
-        compute.gpu_percent += self.gpu_engine_percent.values().sum::<f64>();
+        compute.gpu_percent += self.gpu.engines.values().sum::<f64>();
         add_counter(
             &mut compute.gpu_memory_resident_bytes,
-            self.gpu_memory_resident_bytes,
+            self.gpu.resident_bytes,
         );
         add_counter(
             &mut compute.gpu_memory_allocated_bytes,
-            self.gpu_memory_allocated_bytes,
+            self.gpu.allocated_bytes,
         );
         add_counter(
             &mut compute.gpu_memory_bytes,
-            match self.gpu_memory_resident_bytes {
-                0 => self.gpu_memory_allocated_bytes,
+            match self.gpu.resident_bytes {
+                0 => self.gpu.allocated_bytes,
                 resident => resident,
             },
         );
@@ -509,7 +506,7 @@ pub struct ResourceSampler {
     known_roots: discovery::KnownRoots,
     provider: Arc<dyn ResourceProvider>,
     previous_processes: HashMap<u32, PreviousProcess>,
-    previous_gpu_engines: HashMap<(u32, u64, String), u64>,
+    gpu: gpu::Sampler,
     previous_system_ticks: Option<u64>,
     previous_cgroups: HashMap<String, CgroupCounters>,
     previous_network_counters: HashMap<u64, NetworkCounters>,
@@ -529,7 +526,7 @@ impl Default for ResourceSampler {
             known_roots: discovery::KnownRoots::default(),
             provider: Arc::new(LinuxResourceProvider),
             previous_processes: HashMap::new(),
-            previous_gpu_engines: HashMap::new(),
+            gpu: gpu::Sampler::default(),
             previous_system_ticks: None,
             previous_cgroups: HashMap::new(),
             previous_network_counters: HashMap::new(),
@@ -558,7 +555,7 @@ impl ResourceSampler {
     /// deltas or short-lived process caches across an unobserved sleep cycle.
     pub(crate) fn reset_after_resume(&mut self) {
         self.previous_processes.clear();
-        self.previous_gpu_engines.clear();
+        self.gpu = gpu::Sampler::default();
         self.previous_system_ticks = None;
         self.previous_cgroups.clear();
         self.previous_network_counters.clear();
@@ -646,7 +643,13 @@ impl ResourceSampler {
                 .zip(self.previous_processes.get(pid))
                 .is_some_and(|(current, previous)| current.start_ticks == previous.start_ticks)
         });
-        let current_gpu = provider.gpu_processes(active_processes);
+        let mut current_gpu = self.gpu.sample(
+            provider
+                .gpu_processes(active_processes)
+                .into_iter()
+                .filter_map(|(pid, gpu)| Some(((pid, current.get(&pid)?.start_ticks), gpu))),
+            interval_seconds,
+        );
         self.open_files
             .refresh(identities, now, OPEN_FILE_REFRESH_INTERVAL, |pid| {
                 Arc::new(provider.process_files(pid))
@@ -657,7 +660,6 @@ impl ResourceSampler {
             .refresh(identities, now, MEMORY_REFRESH_INTERVAL, |pid| {
                 provider.process_memory(pid)
             });
-        let mut next_gpu_engines = HashMap::new();
         for (&pid, process) in current {
             let cpu_percent = self.cpu_percent(pid, process, system_delta, logical_cpus);
             let identity = (pid, process.start_ticks);
@@ -673,14 +675,6 @@ impl ResourceSampler {
                 .flatten();
             let io = self.io_delta(pid, process, sampled_io.unwrap_or_default());
             let major_faults = self.major_fault_delta(pid, process);
-            let gpu = current_gpu.get(&pid);
-            let gpu_engine_percent = self.gpu_percent(
-                pid,
-                process.start_ticks,
-                gpu,
-                interval_seconds,
-                &mut next_gpu_engines,
-            );
             let files = self.open_files.samples.get(&identity).cloned();
             snapshot.total_process_cpu_percent += cpu_percent;
             snapshot.processes.insert(
@@ -690,10 +684,7 @@ impl ResourceSampler {
                     memory,
                     thread_count: process.thread_count,
                     major_faults,
-                    gpu_available: gpu.is_some(),
-                    gpu_engine_percent,
-                    gpu_memory_resident_bytes: gpu.map_or(0, |gpu| gpu.resident_memory_bytes),
-                    gpu_memory_allocated_bytes: gpu.map_or(0, |gpu| gpu.allocated_memory_bytes),
+                    gpu: current_gpu.remove(&pid).unwrap_or_default(),
                     io,
                     files,
                     sockets: self.previous_sockets_by_pid.get(&pid).cloned(),
@@ -710,7 +701,6 @@ impl ResourceSampler {
                 },
             );
         }
-        self.previous_gpu_engines = next_gpu_engines;
         self.previous_processes
             .retain(|pid, _| current.contains_key(pid));
     }
@@ -843,44 +833,6 @@ impl ResourceSampler {
             .get(&pid)
             .filter(|previous| previous.start_ticks == process.start_ticks)
     }
-
-    fn gpu_percent(
-        &self,
-        pid: u32,
-        start_ticks: u64,
-        gpu: Option<&GpuProcessStat>,
-        seconds: f64,
-        next: &mut HashMap<(u32, u64, String), u64>,
-    ) -> HashMap<String, f64> {
-        let mut engines = HashMap::<String, f64>::new();
-        let Some(gpu) = gpu else {
-            return engines;
-        };
-        for (client_engine, &nanoseconds) in &gpu.engine_nanoseconds {
-            let key = (pid, start_ticks, client_engine.clone());
-            let previous = self.previous_gpu_engines.get(&key).copied();
-            // Seed the baseline even on the first (zero-duration) sample.
-            next.insert(key, nanoseconds);
-            let elapsed = previous.map_or(0, |value| nanoseconds.saturating_sub(value));
-            let percent = if seconds > 0.0 {
-                finite_nonnegative(elapsed as f64 / (seconds * 1_000_000_000.0) * 100.0)
-            } else {
-                0.0
-            };
-            *engines.entry(engine_scope(client_engine)).or_default() += percent;
-        }
-        engines
-    }
-}
-
-/// Counters use device/client/engine keys; occupancy is summed by device/engine.
-/// Keep the device in the key so separate GPUs are not treated as one engine.
-fn engine_scope(client_engine: &str) -> String {
-    let (client, engine) = client_engine
-        .rsplit_once('/')
-        .unwrap_or(("unknown/unknown", client_engine));
-    let (device, _) = client.rsplit_once('/').unwrap_or((client, "unknown"));
-    format!("{device}/{engine}")
 }
 
 impl<T> ProcessCache<T> {

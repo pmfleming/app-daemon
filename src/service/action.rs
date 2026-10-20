@@ -185,7 +185,7 @@ async fn execute_action(
             launch_on_workspace(catalog, &windows, params, &progress, false).await
         }
         ApplicationAction::FocusWindow => {
-            hyprland::focus(target_address(catalog, &windows, params, &ownership)?)
+            hyprland::focus(&selected_window(catalog, &windows, params, &ownership)?.address)
                 .await
                 .map(|()| ActionOutcome::new(catalog, target_id, "Focused"))
         }
@@ -454,17 +454,12 @@ async fn move_to_workspace(
     params: &ExecuteParams,
     ownership: &OwnershipSnapshot,
 ) -> anyhow::Result<()> {
-    let address = target_address(catalog, windows, params, ownership)?;
+    let window = selected_window(catalog, windows, params, ownership)?;
     let workspace = params
         .workspace_id
         .as_deref()
         .context("workspace_id is required")?;
-    let window = windows
-        .clients
-        .iter()
-        .find(|window| window.address == address)
-        .context("window is no longer available")?;
-    hyprland::move_to_workspace(address, workspace).await?;
+    hyprland::move_to_workspace(&window.address, workspace).await?;
     verify_placement(window, workspace, |current| {
         resolve_target(catalog, current, ownership) == params.target_id
     })
@@ -483,7 +478,7 @@ async fn close_application(
         "compositor window observation is unavailable"
     );
     let address = if params.action == ApplicationAction::CloseWindow {
-        Some(target_address(catalog, windows, params, ownership)?)
+        Some(&selected_window(catalog, windows, params, ownership)?.address)
     } else {
         None
     };
@@ -493,7 +488,7 @@ async fn close_application(
         .filter(|window| {
             address.map_or_else(
                 || resolve_target(catalog, window, ownership) == params.target_id,
-                |address| window.address == address,
+                |address| &window.address == address,
             )
         })
         .collect::<Vec<_>>();
@@ -534,12 +529,12 @@ async fn close_application(
     Ok(outcome)
 }
 
-fn target_address<'a>(
+fn selected_window<'a>(
     catalog: &Catalog,
     windows: &'a Snapshot,
     params: &ExecuteParams,
     ownership: &OwnershipSnapshot,
-) -> anyhow::Result<&'a str> {
+) -> anyhow::Result<&'a Client> {
     let id = params
         .window_id
         .as_deref()
@@ -551,7 +546,7 @@ fn target_address<'a>(
         resolve_target(catalog, window, ownership) == params.target_id,
         "window no longer belongs to the selected application"
     );
-    Ok(&window.address)
+    Ok(window)
 }
 
 fn display_name<'a>(catalog: &'a Catalog, target_id: &'a str) -> &'a str {

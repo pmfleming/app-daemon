@@ -1,5 +1,9 @@
 # RustQualityLens baseline
 
+The latest [GPU/history/action review](gpu-history-refactor-review.md) records a
+fresh paired RQLens run, ownership/allocation refactors, verification, and explicit
+locality, test-size and total-line-count tradeoffs.
+
 The current [70 → 47 test-pruning review](test-pruning-70-to-47.md) records the
 33% registered-test reduction, retained behavior/regressions, source-size savings,
 and paired coverage results. Earlier test-count reports below are historical.

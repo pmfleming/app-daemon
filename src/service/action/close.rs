@@ -20,17 +20,12 @@ impl Backend for Compositor {
     }
 }
 
-pub(super) async fn observe<B, P, F>(
-    backend: &B,
+pub(super) async fn observe<F: Future<Output = ()>>(
+    backend: &impl Backend,
     targets: &[&Client],
-    mut publish: P,
+    mut publish: impl FnMut(CloseObservation) -> F,
     budget: Duration,
-) -> CloseObservation
-where
-    B: Backend,
-    P: FnMut(CloseObservation) -> F,
-    F: Future<Output = ()>,
-{
+) -> CloseObservation {
     let mut result = CloseObservation {
         targeted_window_ids: targets
             .iter()
@@ -54,24 +49,35 @@ where
     }
     result.status = "observing".into();
     publish(result.clone()).await;
+    result.status = wait_for_close(backend, targets, &mut result, &mut publish, budget)
+        .await
+        .into();
+    result
+}
+
+async fn wait_for_close<F: Future<Output = ()>>(
+    backend: &impl Backend,
+    targets: &[&Client],
+    result: &mut CloseObservation,
+    publish: &mut impl FnMut(CloseObservation) -> F,
+    budget: Duration,
+) -> &'static str {
     let deadline = tokio::time::Instant::now() + budget;
-    result.status = loop {
+    loop {
         let snapshot = backend.windows().await;
         if !snapshot.available {
-            break "unknown";
+            return "unknown";
         }
         result.remaining_window_ids = remaining_windows(targets, &snapshot);
         if result.remaining_window_ids.is_empty() {
-            break "closed";
+            return "closed";
         }
         if tokio::time::Instant::now() >= deadline {
-            break "still-open";
+            return "still-open";
         }
         publish(result.clone()).await;
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
-    .into();
-    result
 }
 
 fn remaining_windows(targets: &[&Client], snapshot: &Snapshot) -> Vec<String> {

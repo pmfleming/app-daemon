@@ -4,6 +4,78 @@ use std::{
 };
 
 use super::provider::GpuProcessStat;
+use crate::{metrics::finite_nonnegative, process::Identity};
+
+#[derive(Debug, Clone, Default)]
+pub(super) struct Usage {
+    pub available: bool,
+    pub engines: HashMap<String, f64>,
+    pub resident_bytes: u64,
+    pub allocated_bytes: u64,
+}
+
+#[derive(Debug, Default)]
+pub(super) struct Sampler {
+    previous: HashMap<Identity, HashMap<String, u64>>,
+}
+
+impl Sampler {
+    pub(super) fn sample(
+        &mut self,
+        current: impl IntoIterator<Item = (Identity, GpuProcessStat)>,
+        seconds: f64,
+    ) -> HashMap<u32, Usage> {
+        // Replace the complete baseline: missing observations must not bridge gaps.
+        let previous = std::mem::take(&mut self.previous);
+        current
+            .into_iter()
+            .map(|(identity, gpu)| {
+                let usage = Usage {
+                    available: true,
+                    engines: engine_percent(
+                        previous.get(&identity),
+                        &gpu.engine_nanoseconds,
+                        seconds,
+                    ),
+                    resident_bytes: gpu.resident_memory_bytes,
+                    allocated_bytes: gpu.allocated_memory_bytes,
+                };
+                // Move the counters and their keys instead of cloning every engine name.
+                self.previous.insert(identity, gpu.engine_nanoseconds);
+                (identity.0, usage)
+            })
+            .collect()
+    }
+}
+
+fn engine_percent(
+    previous: Option<&HashMap<String, u64>>,
+    current: &HashMap<String, u64>,
+    seconds: f64,
+) -> HashMap<String, f64> {
+    let mut engines = HashMap::new();
+    for (client_engine, &nanoseconds) in current {
+        let elapsed = previous
+            .and_then(|values| values.get(client_engine))
+            .map_or(0, |&value| nanoseconds.saturating_sub(value));
+        let percent = if seconds > 0.0 {
+            finite_nonnegative(elapsed as f64 / (seconds * 1_000_000_000.0) * 100.0)
+        } else {
+            0.0
+        };
+        *engines.entry(engine_scope(client_engine)).or_default() += percent;
+    }
+    engines
+}
+
+/// Sum occupancy by device/engine, not client or across unrelated GPUs.
+fn engine_scope(client_engine: &str) -> String {
+    let (client, engine) = client_engine
+        .rsplit_once('/')
+        .unwrap_or(("unknown/unknown", client_engine));
+    let (device, _) = client.rsplit_once('/').unwrap_or((client, "unknown"));
+    format!("{device}/{engine}")
+}
 
 #[derive(Debug, Default)]
 struct GpuClientStat {
@@ -18,10 +90,11 @@ pub(super) fn read_gpu_processes(pids: &HashSet<u32>) -> HashMap<u32, GpuProcess
         .map(|&pid| (pid, read_gpu_clients(pid)))
         .collect::<Vec<_>>();
     clients.sort_unstable_by_key(|(pid, _)| *pid);
-    group_clients_by_process(deduplicate_clients(clients))
-        .into_iter()
-        .map(|(pid, clients)| (pid, aggregate_gpu_clients(clients)))
-        .collect()
+    let mut processes = HashMap::<u32, GpuProcessStat>::new();
+    for (id, (pid, client)) in deduplicate_clients(clients) {
+        processes.entry(pid).or_default().add_client(id, client);
+    }
+    processes
 }
 
 fn deduplicate_clients(
@@ -41,16 +114,6 @@ fn deduplicate_clients(
     unique
 }
 
-fn group_clients_by_process(
-    unique: HashMap<String, (u32, GpuClientStat)>,
-) -> HashMap<u32, HashMap<String, GpuClientStat>> {
-    let mut by_process = HashMap::<u32, HashMap<String, GpuClientStat>>::new();
-    for (id, (pid, client)) in unique {
-        by_process.entry(pid).or_default().insert(id, client);
-    }
-    by_process
-}
-
 fn read_gpu_clients(pid: u32) -> HashMap<String, GpuClientStat> {
     let Ok(entries) = fs::read_dir(format!("/proc/{pid}/fdinfo")) else {
         return HashMap::new();
@@ -68,23 +131,21 @@ fn read_gpu_clients(pid: u32) -> HashMap<String, GpuClientStat> {
         )
 }
 
-fn aggregate_gpu_clients(clients: HashMap<String, GpuClientStat>) -> GpuProcessStat {
-    let mut process = GpuProcessStat::default();
-    for (client_id, client) in clients {
-        process.resident_memory_bytes = process
+impl GpuProcessStat {
+    fn add_client(&mut self, client_id: String, client: GpuClientStat) {
+        self.resident_memory_bytes = self
             .resident_memory_bytes
-            .saturating_add(client.resident_memory_bytes());
-        process.allocated_memory_bytes = process
+            .saturating_add(client.resident_regions.values().sum());
+        self.allocated_memory_bytes = self
             .allocated_memory_bytes
-            .saturating_add(client.allocated_memory_bytes());
-        process.engine_nanoseconds.extend(
+            .saturating_add(client.allocated_regions.values().sum());
+        self.engine_nanoseconds.extend(
             client
                 .engine_nanoseconds
                 .into_iter()
                 .map(|(engine, value)| (format!("{client_id}/{engine}"), value)),
         );
     }
-    process
 }
 
 fn parse_gpu_fdinfo(value: &str) -> Option<(String, GpuClientStat)> {
@@ -138,14 +199,6 @@ impl GpuClientStat {
         self.engine_nanoseconds.is_empty()
             && self.resident_regions.is_empty()
             && self.allocated_regions.is_empty()
-    }
-
-    fn resident_memory_bytes(&self) -> u64 {
-        self.resident_regions.values().copied().sum()
-    }
-
-    fn allocated_memory_bytes(&self) -> u64 {
-        self.allocated_regions.values().copied().sum()
     }
 }
 

@@ -5,6 +5,50 @@ use crate::model::{
 };
 
 #[test]
+fn energy_queries_combine_finished_and_pending_buckets_once() {
+    let mut store = HistoryStore::load(None);
+    let usage = ResourceUsage {
+        energy: EnergyUsage {
+            energy_mwh: 2.0,
+            energy_source: "rapl".into(),
+            energy_confidence: "low".into(),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let base = super::now_milliseconds() / 60_000 * 60_000;
+    for (id, offset) in [
+        ("both", 1),
+        ("finished", 1),
+        ("both", 60_001),
+        ("pending", 60_001),
+    ] {
+        store.record(id, base + offset, 1.0, &usage);
+    }
+    for (since, expected) in [
+        (
+            base,
+            vec![("both", 4.0), ("finished", 2.0), ("pending", 2.0)],
+        ),
+        (base + 60_001, vec![("both", 2.0), ("pending", 2.0)]),
+        (base + 120_001, vec![]),
+    ] {
+        let totals = store.energy_totals(since, base + 90_000);
+        assert!(
+            totals
+                .iter()
+                .all(|v| v.energy_source == "rapl" && v.energy_confidence == "low")
+        );
+        let mut actual: Vec<_> = totals
+            .iter()
+            .map(|v| (v.target_id.as_str(), v.energy_mwh))
+            .collect();
+        actual.sort_by_key(|v| v.0);
+        assert_eq!(actual, expected);
+    }
+}
+
+#[test]
 fn split_buckets_persist_without_losing_totals_availability_or_energy_retention()
 -> anyhow::Result<()> {
     let directory = tempfile::tempdir()?;

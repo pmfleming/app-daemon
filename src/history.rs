@@ -263,19 +263,55 @@ impl HistoryStore {
 
     pub fn energy_totals(&mut self, since_ms: u64, until_ms: u64) -> Vec<EnergyTotal> {
         self.flush_expired(until_ms);
-        let mut totals = HashMap::<String, PendingEnergy>::new();
-        add_recorded_energy(&mut totals, &self.energy_points, since_ms, until_ms);
-        add_pending_energy(&mut totals, &self.pending_energy, since_ms, until_ms);
-        totals
-            .into_iter()
-            .filter(|(_, total)| total.energy_mwh > 0.0)
-            .map(|(target_id, total)| EnergyTotal {
-                target_id,
-                energy_mwh: rounded(total.energy_mwh, 4),
-                energy_source: available_label(total.energy_source),
-                energy_confidence: available_label(total.energy_confidence),
+        self.energy_points
+            .keys()
+            .chain(
+                self.pending_energy
+                    .keys()
+                    .filter(|id| !self.energy_points.contains_key(*id)),
+            )
+            .filter_map(|id| {
+                let total = self.energy_total(id, since_ms, until_ms);
+                (total.energy_mwh > 0.0).then(|| EnergyTotal {
+                    target_id: id.clone(),
+                    energy_mwh: rounded(total.energy_mwh, 4),
+                    energy_source: available_label(total.energy_source),
+                    energy_confidence: available_label(total.energy_confidence),
+                })
             })
             .collect()
+    }
+
+    fn energy_total(&self, target_id: &str, since_ms: u64, until_ms: u64) -> PendingEnergy {
+        let mut total = PendingEnergy::default();
+        for point in self
+            .energy_points
+            .get(target_id)
+            .into_iter()
+            .flatten()
+            .filter(|point| point.timestamp_ms >= since_ms && point.timestamp_ms <= until_ms)
+        {
+            total.add(
+                point.energy_mwh,
+                &point.energy_source,
+                &point.energy_confidence,
+            );
+        }
+        // Pending buckets use their interval; finished buckets use their endpoint.
+        if let Some(point) = self.pending_energy.get(target_id).filter(|point| {
+            point
+                .timestamp_ms
+                .saturating_add(ENERGY_BUCKET_MILLISECONDS)
+                >= since_ms
+                && point.timestamp_ms <= until_ms
+        }) {
+            total.add(
+                point.energy_mwh,
+                &point.energy_source,
+                &point.energy_confidence,
+            );
+        }
+        total
     }
 
     pub fn snapshot(&mut self, final_save: bool) -> HistorySnapshot {
@@ -401,68 +437,16 @@ impl HistoryStore {
     fn prune(&mut self, timestamp_ms: u64) {
         let cutoff = timestamp_ms.saturating_sub(RETENTION_MILLISECONDS);
         self.points.retain(|_, points| {
-            while points
-                .front()
-                .is_some_and(|point| point.timestamp_ms < cutoff)
-            {
-                points.pop_front();
-            }
+            points.drain(..points.partition_point(|point| point.timestamp_ms < cutoff));
             !points.is_empty()
         });
         let energy_cutoff = timestamp_ms.saturating_sub(ENERGY_RETENTION_MILLISECONDS);
         self.cursor_epochs
             .retain(|id, _| self.points.contains_key(id) || self.pending.contains_key(id));
         self.energy_points.retain(|_, points| {
-            while points
-                .front()
-                .is_some_and(|point| point.timestamp_ms < energy_cutoff)
-            {
-                points.pop_front();
-            }
+            points.drain(..points.partition_point(|point| point.timestamp_ms < energy_cutoff));
             !points.is_empty()
         });
-    }
-}
-
-fn add_recorded_energy(
-    totals: &mut HashMap<String, PendingEnergy>,
-    points: &HashMap<String, VecDeque<EnergyHistoryPoint>>,
-    since_ms: u64,
-    until_ms: u64,
-) {
-    for (target_id, points) in points {
-        let total = totals.entry(target_id.clone()).or_default();
-        for point in points
-            .iter()
-            .filter(|point| point.timestamp_ms >= since_ms && point.timestamp_ms <= until_ms)
-        {
-            total.add(
-                point.energy_mwh,
-                &point.energy_source,
-                &point.energy_confidence,
-            );
-        }
-    }
-}
-
-fn add_pending_energy(
-    totals: &mut HashMap<String, PendingEnergy>,
-    points: &HashMap<String, PendingEnergy>,
-    since_ms: u64,
-    until_ms: u64,
-) {
-    for (target_id, point) in points.iter().filter(|(_, point)| {
-        point
-            .timestamp_ms
-            .saturating_add(ENERGY_BUCKET_MILLISECONDS)
-            >= since_ms
-            && point.timestamp_ms <= until_ms
-    }) {
-        totals.entry(target_id.clone()).or_default().add(
-            point.energy_mwh,
-            &point.energy_source,
-            &point.energy_confidence,
-        );
     }
 }
 
