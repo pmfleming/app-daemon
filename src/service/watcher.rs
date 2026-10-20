@@ -32,9 +32,7 @@ impl<W> WatchRecovery<W> {
     }
 
     fn rebuild(&mut self, now: Instant) {
-        self.watcher = None;
-        self.retry_at = now;
-        self.retry_delay = MIN_RETRY;
+        *self = Self::new(now);
     }
 
     fn failed(&mut self, now: Instant) {
@@ -43,11 +41,18 @@ impl<W> WatchRecovery<W> {
         self.retry_delay = (self.retry_delay * 2).min(MAX_RETRY);
     }
 
-    fn attempt<E>(&mut self, now: Instant, create: impl FnOnce() -> Result<W, E>) -> Result<(), E> {
+    fn attempt<E: std::fmt::Display>(
+        &mut self,
+        now: Instant,
+        create: impl FnOnce() -> Result<W, E>,
+    ) -> Result<(), E> {
         if self.watcher.is_some() || now < self.retry_at {
             return Ok(());
         }
-        self.watcher = Some(create().inspect_err(|_| self.failed(now))?);
+        self.watcher = Some(create().inspect_err(|error| {
+            self.failed(now);
+            tracing::warn!(%error, "catalog watcher unavailable; polling continues, retry scheduled");
+        })?);
         self.retry_delay = MIN_RETRY;
         Ok(())
     }
@@ -55,6 +60,13 @@ impl<W> WatchRecovery<W> {
     fn retry_deadline(&self) -> Option<Instant> {
         self.watcher.is_none().then_some(self.retry_at)
     }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Refresh {
+    Windows,
+    Catalog,
+    Both,
 }
 
 pub(super) async fn track_state(service: std::sync::Weak<ApplicationService>) {
@@ -83,21 +95,17 @@ pub(super) async fn track_state(service: std::sync::Weak<ApplicationService>) {
             window_connected && window_available,
             catalog_watch.retry_deadline().is_none(),
         );
-        tokio::select! {
+        let refresh = tokio::select! {
             _ = resumes.changed(), if resumes.has_changed().is_ok() => {
-                (_, window_available) = tokio::join!(service.refresh_catalog(), service.refresh_windows());
-                window_refreshed = Instant::now();
-                catalog_refreshed = window_refreshed;
-                catalog_watch.rebuild(catalog_refreshed);
+                catalog_watch.rebuild(Instant::now());
+                Refresh::Both
             }
             _ = wait_for_watcher_retry(catalog_watch.retry_deadline()) => {
-                if let Err(error) = catalog_watch.attempt(Instant::now(), || catalog_watch::create(catalog_sender.clone())) {
-                    tracing::warn!(%error, "catalog watcher unavailable; polling continues, retry scheduled");
-                } else {
-                    // Close the gap between the last snapshot and installing a watch.
-                    service.refresh_catalog().await;
-                    catalog_refreshed = Instant::now();
+                if catalog_watch.attempt(Instant::now(), || catalog_watch::create(catalog_sender.clone())).is_err() {
+                    continue;
                 }
+                // Close the gap between the last snapshot and installing a watch.
+                Refresh::Catalog
             }
             event = window_events.recv(), if window_events_open => {
                 let Some(event) = event else {
@@ -110,8 +118,7 @@ pub(super) async fn track_state(service: std::sync::Weak<ApplicationService>) {
                 drain_events(&mut window_events, |event| {
                     observe_window_event(event, &mut window_connected);
                 }).await;
-                window_available = service.refresh_windows().await;
-                window_refreshed = Instant::now();
+                Refresh::Windows
             }
             Some(mut event) = catalog_events.recv() => {
                 drain_events(&mut catalog_events, |next| event = event.max(next)).await;
@@ -120,27 +127,45 @@ pub(super) async fn track_state(service: std::sync::Weak<ApplicationService>) {
                     CatalogEvent::Rewatch => catalog_watch.rebuild(Instant::now()),
                     CatalogEvent::Changed => {},
                 }
-                service.refresh_catalog().await;
-                catalog_refreshed = Instant::now();
+                Refresh::Catalog
             }
-            _ = time::sleep_until(time::Instant::from_std(window_refreshed + window_interval)) => {
-                window_available = service.refresh_windows().await;
-                window_refreshed = Instant::now();
-            }
+            _ = time::sleep_until(time::Instant::from_std(window_refreshed + window_interval)) => Refresh::Windows,
             _ = time::sleep_until(time::Instant::from_std(catalog_refreshed + catalog_interval)) => {
-                // Install the repaired watch before taking a single snapshot,
-                // avoiding a second full catalog scan on every healthy timer.
+                // Repair before taking the snapshot, avoiding a second healthy-timer scan.
                 if catalog_watch.retry_deadline().is_none() {
                     catalog_watch.rebuild(Instant::now());
-                    if let Err(error) = catalog_watch.attempt(Instant::now(), || catalog_watch::create(catalog_sender.clone())) {
-                        tracing::warn!(%error, "catalog watch repair failed; polling continues");
-                    }
+                    let _ = catalog_watch.attempt(Instant::now(), || catalog_watch::create(catalog_sender.clone()));
                 }
-                service.refresh_catalog().await;
-                catalog_refreshed = Instant::now();
+                Refresh::Catalog
             }
-        }
+        };
+        let (_, available) = tokio::join!(
+            refresh_if(
+                refresh != Refresh::Windows,
+                service.refresh_catalog(),
+                &mut catalog_refreshed
+            ),
+            refresh_if(
+                refresh != Refresh::Catalog,
+                service.refresh_windows(),
+                &mut window_refreshed
+            ),
+        );
+        window_available = available.unwrap_or(window_available);
     }
+}
+
+async fn refresh_if<T>(
+    requested: bool,
+    refresh: impl std::future::Future<Output = T>,
+    updated: &mut Instant,
+) -> Option<T> {
+    if !requested {
+        return None;
+    }
+    let value = refresh.await;
+    *updated = Instant::now();
+    Some(value)
 }
 
 async fn drain_events<T>(events: &mut mpsc::Receiver<T>, mut observe: impl FnMut(T)) {
@@ -193,3 +218,6 @@ async fn wait_for_watcher_retry(deadline: Option<Instant>) {
         None => std::future::pending().await,
     }
 }
+
+#[cfg(test)]
+mod tests;

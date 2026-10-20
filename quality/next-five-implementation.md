@@ -30,3 +30,24 @@ Initial RQLens architecture attempts were rejected because the live sibling
 result is accepted as current evidence; final measurements must be regenerated
 against stable inputs. Source-size reduction is not claimed for this step:
 allocation and integration regressions add test code.
+
+## 2. Centralize watcher reconciliation
+
+Event branches now select a refresh scope instead of repeating I/O and timestamp
+updates. One `refresh_if` implementation is shared by catalog and window reads;
+resume still refreshes both concurrently, and unrequested futures are never
+polled. Catalog installation failures share one diagnostic/backoff path. Rebuild
+uses the same initial state as first installation, dropping the old watcher.
+The healthy catalog timer still repairs its watch before a single catalog scan.
+
+`track_state` Halstead effort falls **168,582 → 137,418 (18.5%)**, with cognitive /
+cyclomatic unchanged at **2 / 3**. The unusually low complexity of this function
+reflects RQLens's syntax view of `select!`, not proof that its event logic is simple.
+The helper and tests add lines; no total-size reduction is claimed here.
+
+Verification: all-feature library and private-session integration suites pass,
+including compositor failure/reconnect and catalog replacement scenarios; strict
+Clippy, formatting and diff checks pass. Two new deterministic tests cover capped
+retry delays, reset on success/rebuild, skipped/healthy install attempts,
+healthy/degraded polling intervals, and conditional refresh timestamps (including
+an unrequested pending future that must not be polled).
