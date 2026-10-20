@@ -124,7 +124,7 @@ fn read_gpu_clients(pid: u32) -> HashMap<String, GpuClientStat> {
         )
 }
 
-impl GpuProcessStat {
+impl crate::resources::provider::GpuProcessStat {
     fn add_client(&mut self, client_id: String, client: GpuClientStat) {
         self.resident_memory_bytes = self
             .resident_memory_bytes

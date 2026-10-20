@@ -1,5 +1,11 @@
 # RustQualityLens baseline
 
+Run `./scripts/check-quality.sh` for the new [regression gate](regression-gate.md).
+It tracks complexity, effort, locality/leverage, cloning, escape hatches and source
+size, and requires explicit review to accept regressions. The
+[five-target implementation](next-five-implementation.md) records each follow-up
+step; this focused gate does not replace the strict full-baseline workflow below.
+
 The latest [GPU/history/action review](gpu-history-refactor-review.md) records a
 fresh paired RQLens run, ownership/allocation refactors, verification, and explicit
 locality, test-size and total-line-count tradeoffs.

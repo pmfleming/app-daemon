@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "allowed_partial_patterns": [
+    {
+      "pattern": "src/protocol/methods\\.rs:[0-9]+: unexpanded item macro shelllist_daemon_core::declare_methods!; generated items/methods are not inventoried",
+      "max_matches": 1,
+      "reason": "Existing framework-generated method declarations are checked by compilation and private-bus contract tests; the static gate covers authored syntax only, not expanded inventory completeness."
+    }
+  ]
+}

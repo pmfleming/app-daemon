@@ -105,3 +105,72 @@ formatting, diff checks and all-feature rustdoc pass. Generated public docs were
 checked to contain none of the three removed/restricted methods. Feature-enabled
 benchmark callers still compile. Added cfg guards affect compiled surface; RQLens
 pre-cfg inventories may still count the test-only methods.
+
+## 5. Enforce reviewed regression budgets
+
+`./scripts/check-quality.sh` runs eight Python gate-contract tests, rustfmt,
+strict all-target/all-feature Clippy, all-feature tests, rustdoc and a fresh
+RQLens comparison. The checked-in baseline tracks all/production complexity and
+effort sums/maxima, per-module and mean locality/leverage, duplicate lines,
+copy-call text sites, escape hatches, production reliability findings and separate
+Rust / Rust+Python+shell physical-line budgets. The scripts count their own cost.
+
+The gate rejects missing, inconsistent, stale, non-finite or negative metrics,
+unmeasured files, incomplete semantic resolution, new unsupported patterns and
+instrument/model/config/policy changes. It checks source and tool stability and
+runs hotspots again last to detect mixed producer inputs. Default runs cannot
+rewrite the baseline. `--accept-reason` explicitly records the justification and
+every accepted regression, and still cannot bypass evidence validity checks.
+A real run rejected a one-line increase in the gate's own tests without rewriting
+the baseline; the reviewed initialization then explicitly accepted that negative-
+metric test. See [regression-gate.md](regression-gate.md) for usage and scope.
+
+Fully qualifying the GPU counter impl owner removes its lexical-identity warning.
+Only the pre-existing method-declaration macro remains a narrowly bounded,
+documented partial-inventory exception. This is an authored-source regression
+gate, **not** a claim that expanded inventory, coverage, mutation or live-systemd
+gates passed. The earlier sibling-input churn has stopped; final artifacts have
+matching input fingerprints and complete collected-reference identity resolution.
+
+### Aggregate result and remaining tradeoffs
+
+The starting and final raw runs use the same RQLens metric models. The final gate
+config additionally enables all features for verification and fingerprints
+`test_support`; its config digest differs from the exploratory starting config.
+These are descriptive authored-source comparisons, not a compatible-config strict
+RQLens regression-policy pass. The permanent gate starts from the explicit reviewed
+final baseline and requires that config/model to remain comparable in future runs.
+
+| Measurement | Start (`adc9558`) | Final |
+| --- | ---: | ---: |
+| Production cognitive sum / max | 552 / 10 | 553 / 9 |
+| Production cyclomatic sum / max | 1,201 / 15 | 1,206 / 15 |
+| Production function effort sum | 4,346,092 | 4,328,336 |
+| Production maximum function effort | 168,582 | 137,418 |
+| All-function cognitive / cyclomatic sums | 756 / 1,882 | 764 / 1,895 |
+| All-function effort sum | 8,913,828 | 9,093,872 |
+| Measured modules | 72 | 73 |
+| Mean locality / leverage | 98.542 / 24.306 | 98.562 / 24.110 |
+| Duplicated Rust lines | 638 | 678 |
+| Production-file clone/cloned sites | 99 | 99 |
+| All-Rust clone/cloned sites | 147 | 148 |
+| Escape-hatch findings | 0 | 0 |
+| Production-file Rust lines | 9,847 | 9,888 |
+| All Rust lines | 14,400 | 14,642 |
+| All `.rs` / `.py` / `.sh` lines | 14,742 | 15,400 |
+
+Locality is unchanged for every existing module; the new watcher test module
+scores 100. Watcher leverage rises 0 → 10 with its new test consumer; every other
+existing module's leverage is unchanged. The new test module has leverage 0,
+so the mean falls despite that local gain. This is not a universal architecture
+improvement or a net LOC reduction. Added tests, explicit scheduling and regression
+infrastructure increase size, duplication and some complexity totals. Those costs
+are retained and budgeted instead of being hidden through test deletion or broad
+exclusions. The previous main-resource locality regression was not further worsened.
+
+Final validation: **35 library tests + 14 private-session integration tests pass**,
+plus the internal launch helper exercised in its subprocess; eight gate-contract
+tests, strict Clippy, formatting and rustdoc pass. Three registrations remain
+ignored in the ordinary run (the internal helper and two systemd-lifetime fixtures).
+GPU allocation comparisons pass. No live compositor/systemd lifetime, coverage,
+mutation or end-to-end latency claim is made.

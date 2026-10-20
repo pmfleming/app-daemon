@@ -1,6 +1,7 @@
 /target
 .direnv
 /result
+__pycache__/
 
 # LLVM coverage artifacts
 *.profraw
