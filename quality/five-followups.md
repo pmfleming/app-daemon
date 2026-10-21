@@ -93,3 +93,67 @@ for the sampler/accessor helpers. Source +21 lines (+8 production files, +13 tes
 Mean leverage 25.3731 → 25.5224; locality 98.4552 → 98.4104 because the resource
 orchestrator now has an explicit network-module dependency. Duplicate lines +7
 from additional cache assertions; clone/escape counts are unchanged.
+
+## 5. Fail closed on incomplete netlink dumps
+
+The transport uses `MSG_TRUNC` to detect oversized datagrams and a shared 500ms
+receive deadline per address-family dump (rather than a fresh timeout for every
+packet). Empty datagrams and expired deadlines terminate the read. The budget
+covers receiving the dump, not kernel execution of the initial send.
+
+Checked, shared frame decoding validates message/attribute lengths and alignment.
+Numeric reads return `Option` instead of potentially panicking on a short slice
+or fabricating zero via a fallback. Interrupted dumps, error/overrun messages,
+failed DONE status and malformed requested observations make the provider return
+unavailable; partial counters are discarded by the caller. Valid short legacy
+`tcp_info` remains unsupported accounting, not a fabricated zero.
+
+Tests cover every truncated prefix of a valid observation, malformed attribute
+lengths, interrupt/error/overrun/DONE handling, sequence isolation, legacy layouts,
+and actual local datagram truncation/empty packets/deadlines. No live netlink or
+compositor fixture is required. Message disposition is separate from traversal,
+keeping the production cognitive maximum at 8.
+
+Step-local production effort 4,347,903 → 4,365,691, cognitive +4, cyclomatic +25:
+fallible decoding adds real checked failure paths. Source +151 lines consists of
+34 production lines and 117 inline test lines. Clone sites, architecture scores,
+escape-hatch and production reliability-finding counts are unchanged.
+
+## Final verification and tradeoffs
+
+All five steps were committed independently after validation, in addition to the
+initial checkpoint. Final all-feature tests pass **28 library + 15 session tests**;
+the subprocess helper also runs via its parent. Three registered helper/live
+systemd cases remain ignored by the outer harness. Default-feature tests, strict
+all-target/all-feature Clippy, formatting, rustdoc, Python gate tests and diff
+whitespace checks pass. Live systemd lifetime tests and coverage were not run.
+
+| RQLens/source metric, entire five-step series | Before | After |
+| --- | ---: | ---: |
+| Production cognitive sum / max | 540 / 8 | 547 / 8 |
+| Production cyclomatic sum | 1,199 | 1,234 |
+| Production effort sum | 4,365,912 | 4,365,691 |
+| All-code effort sum | 8,317,248 | 8,611,394 |
+| Mean leverage | 24.7761 | 25.5224 |
+| Mean locality | 98.5560 | 98.4104 |
+| Duplicate lines | 656 | 638 |
+| All-code clone sites | 141 | 141 |
+| Rust lines, including tests/benchmarks | 13,910 | 14,302 |
+| Escape hatches / production reliability findings | 0 / 8 | 0 / 8 |
+
+These five prioritize measured allocation reductions and correctness; they are
+**not** an across-the-board static-metric or source-size reduction. Added safety
+checks, explicit schemas, benchmark fixtures and regression tests explain the
+size/complexity tradeoffs. Net production effort is effectively flat. Leverage
+gains partly reflect new test consumers, not just production reuse.
+
+The strict regression gate still fails, including the new tradeoffs above and
+pre-existing historical instrument/inventory differences. Neither the tracked
+baseline nor its policy was relaxed. Reproduce fresh evidence/comparison with:
+
+```sh
+python3 scripts/quality_regression.py --baseline target/next-five-0.json
+```
+
+The local snapshots preserve fingerprints and module-level results. They are
+review evidence, not accepted replacements for `quality/regression-baseline.json`.

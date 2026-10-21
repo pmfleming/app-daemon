@@ -1,9 +1,8 @@
 use std::{
     collections::{HashMap, HashSet},
-    mem::size_of,
     os::fd::OwnedFd,
     sync::Arc,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use rustix::net::{
@@ -17,13 +16,14 @@ const TCP_PROTOCOL: u8 = 6;
 const SOCK_DIAG_BY_FAMILY: u16 = 20;
 const NLM_F_REQUEST: u16 = 0x01;
 const NLM_F_DUMP: u16 = 0x300;
-const NLMSG_ERROR: u16 = 0x02;
+const NLM_F_DUMP_INTR: u16 = 0x10;
+const NLMSG_NOOP: u16 = 0x01;
 const NLMSG_DONE: u16 = 0x03;
+const DUMP_TIMEOUT: Duration = Duration::from_millis(500);
 const INET_DIAG_INFO: u16 = 2;
 const INET_DIAG_MESSAGE_LENGTH: usize = 72;
 const TCP_INFO_BYTES_ACKED_OFFSET: usize = 120;
 const TCP_INFO_BYTES_RECEIVED_OFFSET: usize = 128;
-const TCP_INFO_COUNTERS_LENGTH: usize = TCP_INFO_BYTES_RECEIVED_OFFSET + size_of::<u64>();
 
 use super::provider::{NetworkCounters, ProcessStat, ResourceProvider};
 use crate::process::Identity;
@@ -121,17 +121,6 @@ pub(super) fn read_network_counters(
     if requested_inodes.is_empty() {
         return Some(HashMap::new());
     }
-    let descriptor = open_diag_socket()?;
-    let mut counters = HashMap::new();
-    if !dump_family(&descriptor, IPV4_FAMILY, 1, requested_inodes, &mut counters)
-        || !dump_family(&descriptor, IPV6_FAMILY, 2, requested_inodes, &mut counters)
-    {
-        return None;
-    }
-    Some(counters)
-}
-
-fn open_diag_socket() -> Option<OwnedFd> {
     let descriptor = socket_with(
         AddressFamily::NETLINK,
         SocketType::RAW,
@@ -139,8 +128,13 @@ fn open_diag_socket() -> Option<OwnedFd> {
         Some(netlink::SOCK_DIAG),
     )
     .ok()?;
-    set_socket_timeout(&descriptor, Timeout::Recv, Some(Duration::from_millis(500))).ok()?;
-    Some(descriptor)
+    let mut counters = HashMap::new();
+    if !dump_family(&descriptor, IPV4_FAMILY, 1, requested_inodes, &mut counters)
+        || !dump_family(&descriptor, IPV6_FAMILY, 2, requested_inodes, &mut counters)
+    {
+        return None;
+    }
+    Some(counters)
 }
 
 fn dump_family(
@@ -155,19 +149,32 @@ fn dump_family(
         return false;
     }
     let mut response = vec![0_u8; 64 * 1024];
-    loop {
-        let Ok((_, received)) = recv(descriptor, &mut response, RecvFlags::empty()) else {
-            return false;
-        };
-        match process_dump_messages(&response[..received], sequence, requested_inodes, counters) {
+    let deadline = Instant::now() + DUMP_TIMEOUT;
+    while let Some(packet) = receive_packet(descriptor, &mut response, deadline) {
+        match process_dump_messages(packet, sequence, requested_inodes, counters) {
             DumpStatus::Pending => {}
             DumpStatus::Complete => return true,
             DumpStatus::Failed => return false,
         }
     }
+    false
 }
 
-#[derive(Clone, Copy)]
+fn receive_packet<'a>(
+    descriptor: &OwnedFd,
+    buffer: &'a mut [u8],
+    deadline: Instant,
+) -> Option<&'a [u8]> {
+    let remaining = deadline
+        .checked_duration_since(Instant::now())
+        .filter(|duration| !duration.is_zero())?;
+    set_socket_timeout(descriptor, Timeout::Recv, Some(remaining)).ok()?;
+    // MSG_TRUNC reports the original datagram length, including bytes not copied.
+    let (_, received) = recv(descriptor, &mut *buffer, RecvFlags::TRUNC).ok()?;
+    buffer.get(..received).filter(|packet| !packet.is_empty())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DumpStatus {
     Pending,
     Complete,
@@ -180,8 +187,11 @@ fn process_dump_messages(
     requested_inodes: &HashSet<u64>,
     counters: &mut HashMap<u64, NetworkCounters>,
 ) -> DumpStatus {
+    if response.is_empty() {
+        return DumpStatus::Failed;
+    }
     let mut offset = 0;
-    while offset + 16 <= response.len() {
+    while offset < response.len() {
         let Some(message) = netlink_message(response, offset) else {
             return DumpStatus::Failed;
         };
@@ -189,10 +199,9 @@ fn process_dump_messages(
         if message.sequence != sequence {
             continue;
         }
-        match message.kind {
-            NLMSG_DONE => return DumpStatus::Complete,
-            NLMSG_ERROR => return DumpStatus::Failed,
-            _ => parse_diag_message(message.payload, requested_inodes, counters),
+        match message.apply(requested_inodes, counters) {
+            DumpStatus::Pending => {}
+            terminal => return terminal,
         }
     }
     DumpStatus::Pending
@@ -200,19 +209,46 @@ fn process_dump_messages(
 
 struct NetlinkMessage<'a> {
     kind: u16,
+    flags: u16,
     sequence: u32,
     payload: &'a [u8],
     next_offset: usize,
 }
 
+impl NetlinkMessage<'_> {
+    fn apply(
+        self,
+        requested: &HashSet<u64>,
+        counters: &mut HashMap<u64, NetworkCounters>,
+    ) -> DumpStatus {
+        if self.flags & NLM_F_DUMP_INTR != 0 {
+            return DumpStatus::Failed;
+        }
+        match self.kind {
+            NLMSG_NOOP => DumpStatus::Pending,
+            NLMSG_DONE if self.payload.is_empty() || read_u32(self.payload, 0) == Some(0) => {
+                DumpStatus::Complete
+            }
+            SOCK_DIAG_BY_FAMILY
+                if parse_diag_message(self.payload, requested, counters).is_some() =>
+            {
+                DumpStatus::Pending
+            }
+            // Includes error/overrun, failed DONE status and malformed observations.
+            _ => DumpStatus::Failed,
+        }
+    }
+}
+
 fn netlink_message(response: &[u8], offset: usize) -> Option<NetlinkMessage<'_>> {
-    let length = read_u32(response, offset) as usize;
-    let end = offset.checked_add(length)?;
-    (length >= 16 && end <= response.len()).then(|| NetlinkMessage {
-        kind: read_u16(response, offset + 4),
-        sequence: read_u32(response, offset + 8),
-        payload: &response[offset + 16..end],
-        next_offset: offset + align4(length),
+    let length = read_u32(response, offset)? as usize;
+    let (payload, next_offset) = frame(response, offset, length, 16)?;
+    Some(NetlinkMessage {
+        kind: read_u16(response, offset + 4)?,
+        flags: read_u16(response, offset + 6)?,
+        sequence: read_u32(response, offset + 8)?,
+        payload,
+        next_offset,
     })
 }
 
@@ -236,60 +272,57 @@ fn parse_diag_message(
     message: &[u8],
     requested_inodes: &HashSet<u64>,
     counters: &mut HashMap<u64, NetworkCounters>,
-) {
-    if message.len() < INET_DIAG_MESSAGE_LENGTH {
-        return;
-    }
-    let inode = read_u32(message, 68) as u64;
+) -> Option<()> {
+    let inode = read_u32(message, 68)? as u64;
     if !requested_inodes.contains(&inode) {
-        return;
+        return Some(());
     }
     let mut offset = INET_DIAG_MESSAGE_LENGTH;
-    while offset + 4 <= message.len() {
-        let Some((attribute_type, payload, next_offset)) = diag_attribute(message, offset) else {
-            return;
-        };
-        if attribute_type == INET_DIAG_INFO && payload.len() >= TCP_INFO_COUNTERS_LENGTH {
-            counters.insert(inode, tcp_counters(payload));
-            return;
+    while offset < message.len() {
+        let (attribute_type, payload, next_offset) = diag_attribute(message, offset)?;
+        // Older kernels can expose shorter tcp_info; that is unsupported, not zero.
+        if attribute_type == INET_DIAG_INFO
+            && let Some(usage) = tcp_counters(payload)
+        {
+            counters.insert(inode, usage);
         }
         offset = next_offset;
     }
+    Some(())
 }
 
 fn diag_attribute(message: &[u8], offset: usize) -> Option<(u16, &[u8], usize)> {
-    let length = read_u16(message, offset) as usize;
-    let end = offset.checked_add(length)?;
-    (length >= 4 && end <= message.len()).then(|| {
-        (
-            read_u16(message, offset + 2),
-            &message[offset + 4..end],
-            offset + align4(length),
-        )
+    let length = read_u16(message, offset)? as usize;
+    let (payload, next_offset) = frame(message, offset, length, 4)?;
+    Some((read_u16(message, offset + 2)?, payload, next_offset))
+}
+
+fn tcp_counters(payload: &[u8]) -> Option<NetworkCounters> {
+    Some(NetworkCounters {
+        transmitted_bytes: u64::from_ne_bytes(read_array(payload, TCP_INFO_BYTES_ACKED_OFFSET)?),
+        received_bytes: u64::from_ne_bytes(read_array(payload, TCP_INFO_BYTES_RECEIVED_OFFSET)?),
     })
 }
 
-fn tcp_counters(payload: &[u8]) -> NetworkCounters {
-    NetworkCounters {
-        transmitted_bytes: read_u64(payload, TCP_INFO_BYTES_ACKED_OFFSET),
-        received_bytes: read_u64(payload, TCP_INFO_BYTES_RECEIVED_OFFSET),
-    }
+// Both netlink messages and attributes use length-prefixed, four-byte-aligned frames.
+fn frame(bytes: &[u8], offset: usize, length: usize, header: usize) -> Option<(&[u8], usize)> {
+    let end = offset.checked_add(length)?;
+    let payload = bytes.get(offset.checked_add(header)?..end)?;
+    let next = offset.checked_add(length.checked_add(3)? & !3)?;
+    // An unpadded final frame is valid; a partial frame or inter-frame gap is not.
+    (next <= bytes.len() || end == bytes.len()).then_some((payload, next))
 }
 
-fn align4(value: usize) -> usize {
-    (value + 3) & !3
+fn read_array<const N: usize>(bytes: &[u8], offset: usize) -> Option<[u8; N]> {
+    bytes.get(offset..offset.checked_add(N)?)?.try_into().ok()
 }
 
-fn read_u16(bytes: &[u8], offset: usize) -> u16 {
-    u16::from_ne_bytes([bytes[offset], bytes[offset + 1]])
+fn read_u16(bytes: &[u8], offset: usize) -> Option<u16> {
+    read_array(bytes, offset).map(u16::from_ne_bytes)
 }
 
-fn read_u32(bytes: &[u8], offset: usize) -> u32 {
-    u32::from_ne_bytes(bytes[offset..offset + 4].try_into().unwrap_or_default())
-}
-
-fn read_u64(bytes: &[u8], offset: usize) -> u64 {
-    u64::from_ne_bytes(bytes[offset..offset + 8].try_into().unwrap_or_default())
+fn read_u32(bytes: &[u8], offset: usize) -> Option<u32> {
+    read_array(bytes, offset).map(u32::from_ne_bytes)
 }
 
 fn write_u16(bytes: &mut [u8], offset: usize, value: u16) {
@@ -298,4 +331,122 @@ fn write_u16(bytes: &mut [u8], offset: usize, value: u16) {
 
 fn write_u32(bytes: &mut [u8], offset: usize, value: u32) {
     bytes[offset..offset + 4].copy_from_slice(&value.to_ne_bytes());
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        DumpStatus, HashMap, HashSet, INET_DIAG_INFO, NLM_F_DUMP_INTR, NLMSG_DONE,
+        SOCK_DIAG_BY_FAMILY, process_dump_messages, receive_packet, write_u16, write_u32,
+    };
+
+    fn message(kind: u16, flags: u16, sequence: u32, payload: &[u8]) -> Vec<u8> {
+        let length = 16 + payload.len();
+        let mut bytes = vec![0; (length + 3) & !3];
+        write_u32(&mut bytes, 0, length as u32);
+        write_u16(&mut bytes, 4, kind);
+        write_u16(&mut bytes, 6, flags);
+        write_u32(&mut bytes, 8, sequence);
+        bytes[16..length].copy_from_slice(payload);
+        bytes
+    }
+
+    #[test]
+    fn dumps_reject_interruptions_truncation_and_malformed_frames() {
+        let requested = HashSet::from([7]);
+        let mut counters = HashMap::new();
+        let mut diag = vec![0; 72 + 4 + 136];
+        write_u32(&mut diag, 68, 7);
+        write_u16(&mut diag, 72, 140);
+        write_u16(&mut diag, 74, INET_DIAG_INFO);
+        diag[76 + 120..76 + 128].copy_from_slice(&200_u64.to_ne_bytes());
+        diag[76 + 128..].copy_from_slice(&100_u64.to_ne_bytes());
+        let mut complete = message(SOCK_DIAG_BY_FAMILY, 0, 1, &diag);
+        let observation_length = complete.len();
+        let done = message(NLMSG_DONE, 0, 1, &0_i32.to_ne_bytes());
+        complete.extend(&done);
+        let observation = &complete[..observation_length];
+        assert_eq!(
+            process_dump_messages(&complete, 1, &requested, &mut counters),
+            DumpStatus::Complete
+        );
+        assert_eq!(
+            (counters[&7].received_bytes, counters[&7].transmitted_bytes),
+            (100, 200)
+        );
+        for end in 0..observation.len() {
+            assert_eq!(
+                process_dump_messages(&observation[..end], 1, &requested, &mut counters),
+                DumpStatus::Failed
+            );
+        }
+        for packet in [
+            message(SOCK_DIAG_BY_FAMILY, NLM_F_DUMP_INTR, 1, &diag),
+            message(NLMSG_DONE, NLM_F_DUMP_INTR, 1, &[]),
+            message(NLMSG_DONE, 0, 1, &(-5_i32).to_ne_bytes()),
+            message(NLMSG_DONE, 0, 1, &[0]),
+            message(2, 0, 1, &[]), // NLMSG_ERROR
+            message(4, 0, 1, &[]), // NLMSG_OVERRUN
+        ] {
+            assert_eq!(
+                process_dump_messages(&packet, 1, &requested, &mut counters),
+                DumpStatus::Failed
+            );
+        }
+        assert_eq!(
+            process_dump_messages(&done, 2, &requested, &mut counters),
+            DumpStatus::Pending
+        );
+        for length in [0, 2, u16::MAX] {
+            write_u16(&mut diag, 72, length);
+            let packet = message(SOCK_DIAG_BY_FAMILY, 0, 1, &diag);
+            assert_eq!(
+                process_dump_messages(&packet, 1, &requested, &mut counters),
+                DumpStatus::Failed
+            );
+        }
+        // Short but well-framed tcp_info is a supported older-kernel layout.
+        diag.truncate(72 + 4 + 16);
+        write_u16(&mut diag, 72, 20);
+        counters.clear();
+        let packet = message(SOCK_DIAG_BY_FAMILY, 0, 1, &diag);
+        assert_eq!(
+            process_dump_messages(&packet, 1, &requested, &mut counters),
+            DumpStatus::Pending
+        );
+        assert!(counters.is_empty());
+    }
+
+    #[test]
+    fn receiving_rejects_truncated_empty_and_expired_datagrams() {
+        use rustix::net::{AddressFamily, SendFlags, SocketFlags, SocketType, send, socketpair};
+        use std::time::{Duration, Instant};
+        let (sender, receiver) = socketpair(
+            AddressFamily::UNIX,
+            SocketType::DGRAM,
+            SocketFlags::CLOEXEC,
+            None,
+        )
+        .unwrap();
+        let mut buffer = [0; 8];
+        send(&sender, &[0; 32], SendFlags::empty()).unwrap();
+        assert!(
+            receive_packet(
+                &receiver,
+                &mut buffer,
+                Instant::now() + Duration::from_secs(1)
+            )
+            .is_none()
+        );
+        send(&sender, &[], SendFlags::empty()).unwrap();
+        assert!(
+            receive_packet(
+                &receiver,
+                &mut buffer,
+                Instant::now() + Duration::from_secs(1)
+            )
+            .is_none()
+        );
+        assert!(receive_packet(&receiver, &mut buffer, Instant::now()).is_none());
+    }
 }
