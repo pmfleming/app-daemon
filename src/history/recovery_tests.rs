@@ -103,6 +103,24 @@ fn cursor_lifecycle_survives_restart_but_rejects_expiry_rewrites_and_backfills()
     let mut restarted = HistoryStore::load(Some(path));
     let gap = restarted.query_window("app", Some(t + 3000), Some(t + 5000), None, 10)?;
     assert_eq!(gap.summary.metrics["cpu_percent_of_machine"].observed_ms, 0);
+    // The 6000 endpoint contributes 500ms to the summary but not to pagination.
+    let clipped = restarted.query_window("app", Some(t), Some(t + 5500), None, 1)?;
+    assert_eq!(clipped.points.len(), 1);
+    assert!(!clipped.has_more);
+    assert_eq!(
+        clipped.summary.metrics["cpu_percent_of_machine"].observed_ms,
+        3500
+    );
+    let exhausted = restarted.query_window(
+        "app",
+        Some(t),
+        Some(t + 5500),
+        clipped.next_cursor.as_deref(),
+        1,
+    )?;
+    assert!(exhausted.points.is_empty());
+    assert_eq!(exhausted.next_cursor, clipped.next_cursor);
+    assert_eq!(exhausted.summary, clipped.summary);
     let cursor = restarted
         .query_window("app", None, None, None, 10)?
         .next_cursor;

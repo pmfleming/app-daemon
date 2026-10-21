@@ -30,3 +30,22 @@ RQLens tradeoffs: production cyclomatic sum 1,199 → 1,200 and effort
 regression tests +62. Mean leverage improves 24.7761 → 25.3731, locality declines
 98.5560 → 98.4552 (additional test dependencies and catalog fan-in). These static
 costs buy measured allocation reductions, not a universal metric improvement.
+
+## 2. Stream history selection and summaries
+
+`history::window_points` centralizes endpoint/overlap selection and returns a
+borrowed double-ended iterator. `summary::summarize` consumes that iterator once,
+tracking the same count/last endpoint for its revision. Queries no longer build a
+`Vec<&ResourceHistoryPoint>` proportional to the retained window; only returned
+page payloads are cloned. This is a source-level allocation guarantee, not a
+measured latency claim.
+
+Extended the cursor/restart regression with a summary-only right-boundary overlap:
+it contributes observed duration but neither advances pagination nor changes the
+summary on an exhausted page. Full all-feature tests passed before extracting the
+selection helper; history tests and strict Clippy passed again afterward.
+
+Step-local production effort falls 4,375,248 → 4,368,664; cognitive stays 540,
+cyclomatic adds one helper (1,200 → 1,201). Production-file lines +4 and test lines
++18. All-code effort rises due to added assertions in the existing long cursor
+scenario. Locality, leverage, clone-site counts and escape hatches are unchanged.

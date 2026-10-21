@@ -198,31 +198,18 @@ impl HistoryStore {
             );
         }
         let limit = limit.clamp(1, 10_000);
-        let window: Vec<_> = self
-            .points
-            .get(target_id)
-            .into_iter()
-            .flatten()
-            .filter(|point| since_ms.is_none_or(|since| point.timestamp_ms >= since))
-            // Summaries also need observations whose interval overlaps the
-            // right boundary, even when their bucket endpoint is outside it.
-            .filter(|point| {
-                until_ms.is_none_or(|until| {
-                    point.timestamp_ms <= until
-                        || point.timestamp_ms.saturating_sub(point.duration_ms) < until
-                })
-            })
-            .collect();
-        let end = until_ms
-            .unwrap_or_else(|| now_milliseconds().max(window.last().map_or(0, |p| p.timestamp_ms)));
+        // Recreate borrowed iterators instead of collecting the entire selected window.
+        let window = || window_points(self.points.get(target_id), since_ms, until_ms);
+        let end = until_ms.unwrap_or_else(|| {
+            now_milliseconds().max(window().next_back().map_or(0, |p| p.timestamp_ms))
+        });
         let start = since_ms.unwrap_or_else(|| {
-            window
-                .first()
+            window()
+                .next()
                 .map_or(end, |p| p.timestamp_ms.saturating_sub(p.duration_ms))
         });
-        let summary = summary::summarize(&window, start, end, epoch);
-        let mut matching = window
-            .into_iter()
+        let summary = summary::summarize(window(), start, end, epoch);
+        let mut matching = window()
             // Keep endpoint-based pagination: a summary-only overlapping
             // bucket must not advance the cursor past the selected window.
             .filter(|point| until_ms.is_none_or(|until| point.timestamp_ms <= until))
@@ -464,6 +451,24 @@ impl PendingEnergy {
             energy_confidence: available_label(self.energy_confidence),
         }
     }
+}
+
+fn window_points(
+    points: Option<&VecDeque<ResourceHistoryPoint>>,
+    since: Option<u64>,
+    until: Option<u64>,
+) -> impl DoubleEndedIterator<Item = &ResourceHistoryPoint> {
+    points
+        .into_iter()
+        .flatten()
+        .filter(move |point| since.is_none_or(|since| point.timestamp_ms >= since))
+        // Include summary-only overlaps; pagination separately checks endpoints.
+        .filter(move |point| {
+            until.is_none_or(|until| {
+                point.timestamp_ms <= until
+                    || point.timestamp_ms.saturating_sub(point.duration_ms) < until
+            })
+        })
 }
 
 fn new_cursor_epoch() -> String {

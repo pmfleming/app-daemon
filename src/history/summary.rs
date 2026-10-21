@@ -78,8 +78,8 @@ const METRICS: &[(&str, MetricReader)] = &[
     }),
 ];
 
-pub(super) fn summarize(
-    points: &[&ResourceHistoryPoint],
+pub(super) fn summarize<'a>(
+    points: impl IntoIterator<Item = &'a ResourceHistoryPoint>,
     start: u64,
     end: u64,
     epoch: &str,
@@ -88,7 +88,10 @@ pub(super) fn summarize(
         std::array::from_fn(|_| MetricSummary::default());
     let window_ms = end.saturating_sub(start).max(1);
     let mut confidence = None;
+    let (mut count, mut last) = (0, 0);
     for point in points {
+        count += 1;
+        last = point.timestamp_ms;
         let weight = point.timestamp_ms.min(end).saturating_sub(
             point
                 .timestamp_ms
@@ -113,11 +116,7 @@ pub(super) fn summarize(
         .into(),
         window_start_ms: start,
         window_end_ms: end,
-        revision: format!(
-            "{epoch}:{}:{}",
-            points.last().map_or(0, |p| p.timestamp_ms),
-            points.len()
-        ),
+        revision: format!("{epoch}:{last}:{count}"),
         weighting: "observed-duration".into(),
         metrics: METRICS
             .iter()
@@ -219,7 +218,7 @@ mod tests {
         let mut second = first.clone();
         second.timestamp_ms = 3000;
         second.resources.energy_confidence = "low".into();
-        let summary = super::summarize(&[&first, &second], 500, 2500, "test");
+        let summary = super::summarize([&first, &second], 500, 2500, "test");
         assert_eq!(
             summary.metrics["average_power_watts"].observed_total,
             Some(1.0)
@@ -230,7 +229,7 @@ mod tests {
         );
         assert_eq!(summary.energy_confidence, "low");
         second.resources.energy_source = "battery".into();
-        let summary = super::summarize(&[&first, &second], 500, 2500, "test");
+        let summary = super::summarize([&first, &second], 500, 2500, "test");
         assert_eq!(
             summary.metrics["average_power_watts"].observed_total,
             Some(0.5)
@@ -238,13 +237,13 @@ mod tests {
         assert_eq!(summary.energy_confidence, "high");
         for power in [f64::NAN, f64::INFINITY, -1.0] {
             first.resources.average_power_watts = power;
-            let summary = super::summarize(&[&first], 0, 1000, "test");
+            let summary = super::summarize([&first], 0, 1000, "test");
             assert_eq!(summary.energy_confidence, "unknown");
             assert_eq!(summary.metrics["average_power_watts"].observed_total, None);
         }
         first.resources.average_power_watts = 0.0;
         assert_eq!(
-            super::summarize(&[&first], 0, 1000, "test").metrics["average_power_watts"]
+            super::summarize([&first], 0, 1000, "test").metrics["average_power_watts"]
                 .observed_total,
             Some(0.0)
         );
