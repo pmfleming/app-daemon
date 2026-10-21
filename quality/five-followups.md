@@ -72,3 +72,24 @@ include the explicit selector loop and newly exposed parsing/benchmark helpers.
 Authored source grows 113 lines including fixed schema arrays, benchmark fixtures
 and regression assertions; this is an allocation/duplication win, not a size win.
 Architecture scores and clone/escape counts remain unchanged.
+
+## 4. Encapsulate network continuity
+
+`resources::network::Sampler` now owns descriptor observations, counters and
+availability. Resource orchestration no longer depends on three parallel fields
+or on CPU-counter state to validate socket owners. Owners are keyed by PID/start
+time; counter history is discarded when no continuing observed owner remains.
+This also fixes a concrete attribution gap: reuse of **both PID and socket inode**
+previously subtracted the old process's counters instead of establishing a new
+baseline. A live co-owner still preserves continuity for a shared socket.
+
+Extended cache regressions cover initial bytes of newly opened sockets, dump
+failure/recovery, reused PID+inode, resume and exit. All-feature tests and strict
+Clippy pass. The source analyzer required a fully qualified inherent-impl owner;
+no partial-evidence exception was added.
+
+Production effort falls 4,367,059 → 4,347,903; cognitive stays 543, cyclomatic +3
+for the sampler/accessor helpers. Source +21 lines (+8 production files, +13 tests).
+Mean leverage 25.3731 → 25.5224; locality 98.4552 → 98.4104 because the resource
+orchestrator now has an explicit network-module dependency. Duplicate lines +7
+from additional cache assertions; clone/escape counts are unchanged.

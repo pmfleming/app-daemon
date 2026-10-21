@@ -89,7 +89,19 @@ fn identity_changes_resume_and_exit_rebaseline_resource_caches() {
     assert_eq!(current.network.network_receive_bytes, 100);
     assert!(current.compute.major_faults_per_second > 0.0);
 
-    set_process(&provider, 2, 900, 20);
+    // A new socket in a continuously observed process includes its initial bytes.
+    set_process(&provider, 1, 250, 11);
+    let opened = sampler.sample_for_targets(&targets).usage_for_roots([42]);
+    assert_eq!(opened.network.network_receive_bytes, 250);
+    provider.state.lock().unwrap().network = None;
+    let missing = sampler.sample_for_targets(&targets).usage_for_roots([42]);
+    assert!(!missing.measurement.network_bytes_available);
+    set_process(&provider, 1, 300, 11);
+    let recovered = sampler.sample_for_targets(&targets).usage_for_roots([42]);
+    assert_eq!(recovered.network.network_receive_bytes, 0);
+
+    // Reusing both the PID and inode must not carry the old process's counters.
+    set_process(&provider, 2, 900, 11);
     let reused = sampler.sample_for_targets(&targets).usage_for_roots([42]);
     assert_eq!(reused.compute.memory_bytes, 900);
     assert_eq!(reused.storage.open_file_disk_bytes, 900);
@@ -148,6 +160,7 @@ fn identity_changes_resume_and_exit_rebaseline_resource_caches() {
     assert_eq!(returned.storage.disk_read_bytes, 0);
     assert_eq!(returned.compute.cpu_percent, 0.0);
     assert_eq!(returned.compute.gpu_percent, 0.0);
+    assert_eq!(returned.network.network_receive_bytes, 0);
     let inactive = sampler
         .sample_for_targets(&HashMap::new())
         .usage_for_roots([42]);

@@ -541,9 +541,7 @@ pub struct ResourceSampler {
     gpu: gpu::Sampler,
     previous_system_ticks: Option<u64>,
     previous_cgroups: HashMap<String, CgroupCounters>,
-    previous_network_counters: HashMap<u64, NetworkCounters>,
-    previous_sockets_by_pid: HashMap<u32, Arc<HashSet<u64>>>,
-    previous_network_available: bool,
+    network: network::Sampler,
     previous_sample: Option<Instant>,
     resume_clock: ResumeDetector,
     memory: ProcessCache<MemoryUsage>,
@@ -561,9 +559,7 @@ impl Default for ResourceSampler {
             gpu: gpu::Sampler::default(),
             previous_system_ticks: None,
             previous_cgroups: HashMap::new(),
-            previous_network_counters: HashMap::new(),
-            previous_sockets_by_pid: HashMap::new(),
-            previous_network_available: false,
+            network: network::Sampler::default(),
             previous_sample: None,
             resume_clock: ResumeDetector::default(),
             memory: ProcessCache::default(),
@@ -590,9 +586,7 @@ impl ResourceSampler {
         self.gpu = gpu::Sampler::default();
         self.previous_system_ticks = None;
         self.previous_cgroups.clear();
-        self.previous_network_counters.clear();
-        self.previous_sockets_by_pid.clear();
-        self.previous_network_available = false;
+        self.network = network::Sampler::default();
         self.previous_sample = None;
         self.energy = EnergySampler::default();
         self.memory = ProcessCache::default();
@@ -669,19 +663,13 @@ impl ResourceSampler {
         } = sample;
         let interval_seconds = snapshot.interval_seconds;
         let logical_cpus = snapshot.logical_cpus;
-        self.previous_sockets_by_pid.retain(|pid, _| {
-            current
-                .get(pid)
-                .zip(self.previous_processes.get(pid))
-                .is_some_and(|(current, previous)| current.start_ticks == previous.start_ticks)
-        });
         let current_gpu = provider.gpu_processes(active_processes);
         self.open_files
             .refresh(identities, now, OPEN_FILE_REFRESH_INTERVAL, |pid| {
                 Arc::new(provider.process_files(pid))
             });
         (snapshot.network_deltas, snapshot.network_counters_available) =
-            self.sample_network(provider, active_processes);
+            self.network.sample(provider, identities, current);
         self.memory
             .refresh(identities, now, MEMORY_REFRESH_INTERVAL, |pid| {
                 provider.process_memory(pid)
@@ -706,7 +694,7 @@ impl ResourceSampler {
                 .copied()
                 .unwrap_or_default();
             usage.files = self.open_files.samples.get(&identity).cloned();
-            usage.sockets = self.previous_sockets_by_pid.get(&pid).cloned();
+            usage.sockets = self.network.sockets(identity);
             snapshot.total_process_cpu_percent += usage.cpu_percent;
             snapshot.processes.insert(pid, usage);
             self.previous_processes.insert(
@@ -731,72 +719,6 @@ impl ResourceSampler {
         }
         self.previous_processes
             .retain(|pid, _| current.contains_key(pid));
-    }
-
-    fn sample_network(
-        &mut self,
-        provider: &dyn ResourceProvider,
-        active_processes: &HashSet<u32>,
-    ) -> (HashMap<u64, NetworkCounters>, bool) {
-        // Socket discovery is lightweight and must not share the file-footprint TTL.
-        let sockets_by_pid = active_processes
-            .iter()
-            .filter_map(|&pid| Some((pid, Arc::new(provider.process_sockets(pid)?))))
-            .collect::<HashMap<_, _>>();
-        let sockets = sockets_by_pid
-            .values()
-            .flat_map(|sockets| sockets.iter())
-            .copied()
-            .collect::<HashSet<_>>();
-        let previous_sockets = self
-            .previous_sockets_by_pid
-            .values()
-            .flat_map(|sockets| sockets.iter())
-            .copied()
-            .collect::<HashSet<_>>();
-        let newly_opened = sockets_by_pid
-            .iter()
-            .filter(|(pid, _)| self.previous_sockets_by_pid.contains_key(pid))
-            .flat_map(|(_, sockets)| sockets.iter().copied())
-            .filter(|inode| !previous_sockets.contains(inode))
-            .collect::<HashSet<_>>();
-        let sampled = provider.network_counters(&sockets);
-        let available = sampled.is_some();
-        let current = sampled.unwrap_or_default();
-        let deltas = current
-            .iter()
-            .map(|(&inode, &counters)| {
-                let previous = self
-                    .previous_network_counters
-                    .get(&inode)
-                    .copied()
-                    .unwrap_or_else(|| {
-                        // Baseline existing sockets on startup, newly attributed processes,
-                        // or recovery. Include initial bytes only for newly opened sockets
-                        // in processes whose descriptors we observed last interval.
-                        if self.previous_network_available && newly_opened.contains(&inode) {
-                            NetworkCounters::default()
-                        } else {
-                            counters
-                        }
-                    });
-                (
-                    inode,
-                    NetworkCounters {
-                        received_bytes: counters
-                            .received_bytes
-                            .saturating_sub(previous.received_bytes),
-                        transmitted_bytes: counters
-                            .transmitted_bytes
-                            .saturating_sub(previous.transmitted_bytes),
-                    },
-                )
-            })
-            .collect();
-        self.previous_sockets_by_pid = sockets_by_pid;
-        self.previous_network_available = available;
-        self.previous_network_counters = current;
-        (deltas, available)
     }
 
     fn cgroup_usage(

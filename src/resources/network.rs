@@ -2,6 +2,7 @@ use std::{
     collections::{HashMap, HashSet},
     mem::size_of,
     os::fd::OwnedFd,
+    sync::Arc,
     time::Duration,
 };
 
@@ -24,7 +25,92 @@ const TCP_INFO_BYTES_ACKED_OFFSET: usize = 120;
 const TCP_INFO_BYTES_RECEIVED_OFFSET: usize = 128;
 const TCP_INFO_COUNTERS_LENGTH: usize = TCP_INFO_BYTES_RECEIVED_OFFSET + size_of::<u64>();
 
-use super::provider::NetworkCounters;
+use super::provider::{NetworkCounters, ProcessStat, ResourceProvider};
+use crate::process::Identity;
+
+type SocketOwners = HashMap<Identity, Arc<HashSet<u64>>>;
+
+/// Own socket continuity independently of CPU sampling and file-cache TTLs.
+#[derive(Debug, Default)]
+pub(super) struct Sampler {
+    counters: HashMap<u64, NetworkCounters>,
+    sockets: SocketOwners,
+    available: bool,
+}
+
+impl Sampler {
+    pub(super) fn sockets(&self, identity: Identity) -> Option<Arc<HashSet<u64>>> {
+        self.sockets.get(&identity).cloned()
+    }
+
+    pub(super) fn sample(
+        &mut self,
+        provider: &dyn ResourceProvider,
+        active: &HashSet<Identity>,
+        processes: &HashMap<u32, ProcessStat>,
+    ) -> (HashMap<u64, NetworkCounters>, bool) {
+        self.sockets.retain(|&(pid, start), _| {
+            processes
+                .get(&pid)
+                .is_some_and(|process| process.start_ticks == start)
+        });
+        let previous_sockets = socket_inodes(&self.sockets);
+        // A recycled PID/inode without a continuing observer is a new baseline.
+        self.counters
+            .retain(|inode, _| previous_sockets.contains(inode));
+        let sockets = active
+            .iter()
+            .filter_map(|&identity| {
+                Some((identity, Arc::new(provider.process_sockets(identity.0)?)))
+            })
+            .collect::<SocketOwners>();
+        let newly_opened = sockets
+            .iter()
+            .filter(|(identity, _)| self.sockets.contains_key(identity))
+            .flat_map(|(_, sockets)| sockets.iter().copied())
+            .filter(|inode| !previous_sockets.contains(inode))
+            .collect::<HashSet<_>>();
+        let sampled = provider.network_counters(&socket_inodes(&sockets));
+        let available = sampled.is_some();
+        let current = sampled.unwrap_or_default();
+        let deltas = current
+            .iter()
+            .map(|(&inode, &counters)| {
+                // Count initial bytes only for newly opened sockets in an observed process.
+                let previous = self.counters.get(&inode).copied().unwrap_or_else(|| {
+                    if self.available && newly_opened.contains(&inode) {
+                        NetworkCounters::default()
+                    } else {
+                        counters
+                    }
+                });
+                (inode, counters.delta(previous))
+            })
+            .collect();
+        self.sockets = sockets;
+        self.available = available;
+        self.counters = current;
+        (deltas, available)
+    }
+}
+
+fn socket_inodes(owners: &SocketOwners) -> HashSet<u64> {
+    owners
+        .values()
+        .flat_map(|sockets| sockets.iter().copied())
+        .collect()
+}
+
+impl crate::resources::provider::NetworkCounters {
+    fn delta(self, previous: Self) -> Self {
+        Self {
+            received_bytes: self.received_bytes.saturating_sub(previous.received_bytes),
+            transmitted_bytes: self
+                .transmitted_bytes
+                .saturating_sub(previous.transmitted_bytes),
+        }
+    }
+}
 
 /// Reads cumulative TCP counters for the requested socket inodes through INET_DIAG.
 /// UDP and Unix sockets do not expose equivalent lifetime byte counters, so callers
