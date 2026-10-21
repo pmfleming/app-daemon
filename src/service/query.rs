@@ -97,28 +97,27 @@ pub(crate) fn page(
             grouped.entry(target.clone()).or_default();
         }
     }
-    let mut applications: Vec<ApplicationSummary> = catalog
+    let mut applications: Vec<Candidate<'_>> = catalog
         .entries
         .iter()
         .map(|entry| {
             summary_for_entry(
                 entry,
                 grouped.remove(&entry.id).unwrap_or_default(),
-                resources,
                 settings,
                 available,
             )
         })
         .collect();
     applications.extend(
-        grouped.into_iter().map(|(id, clients)| {
-            summary_for_unmatched(id, clients, resources, settings, available)
-        }),
+        grouped
+            .into_iter()
+            .map(|(id, clients)| summary_for_unmatched(id, clients, settings, available)),
     );
     let query = params.query.trim().to_lowercase();
-    applications.retain_mut(|application| {
-        (params.category.is_empty() || application.identity.category == params.category)
-            && rank(application, &query)
+    applications.retain_mut(|candidate| {
+        (params.category.is_empty() || candidate.identity.category == params.category)
+            && rank(candidate, &query)
     });
     applications.sort_by_cached_key(|app| {
         (
@@ -133,7 +132,10 @@ pub(crate) fn page(
     ApplicationPage {
         revision,
         generation: params.generation,
-        applications,
+        applications: applications
+            .into_iter()
+            .map(|candidate| candidate.finish(resources))
+            .collect(),
         has_more,
         hyprland_available: available,
     }
@@ -162,48 +164,77 @@ fn instances(
         .collect()
 }
 
+// Ranking needs metadata and focus order, not process aggregation or window payloads.
+struct Candidate<'a> {
+    identity: ApplicationIdentity,
+    desktop_actions: Vec<crate::model::DesktopActionSummary>,
+    revision: u64,
+    clients: Vec<&'a Client>,
+    focused: bool,
+    runtime_score: i64,
+    match_score: i64,
+    match_kind: &'static str,
+    score: i64,
+}
+
+impl Candidate<'_> {
+    fn finish(self, resources: &ResourceSnapshot) -> ApplicationSummary {
+        let usage = resources.usage_for_application(
+            &self.identity.id,
+            self.clients.iter().map(|window| window.pid),
+        );
+        let instances = instances(&self.identity.id, &self.clients, resources);
+        ApplicationSummary {
+            identity: self.identity,
+            desktop_actions: self.desktop_actions,
+            revision: self.revision,
+            runtime: ApplicationRuntime {
+                running: !instances.is_empty() || usage.compute.process_count > 0,
+                focused: self.focused,
+                running_count: instances.len(),
+                resources: usage,
+                instances,
+            },
+            runtime_score: self.runtime_score,
+            match_score: self.match_score,
+            match_kind: self.match_kind.into(),
+            score: self.score,
+        }
+    }
+}
+
 fn summary(
     identity: ApplicationIdentity,
     desktop_actions: Vec<crate::model::DesktopActionSummary>,
     clients: Vec<&Client>,
-    resources: &ResourceSnapshot,
     revision: u64,
-) -> ApplicationSummary {
-    let usage =
-        resources.usage_for_application(&identity.id, clients.iter().map(|window| window.pid));
-    let instances = instances(&identity.id, &clients, resources);
-    let focused = instances.iter().any(|window| window.focused);
-    let best_rank = instances
+) -> Candidate<'_> {
+    let focused = clients.iter().any(|window| window.focus_rank == 0);
+    let best_rank = clients
         .iter()
         .map(|window| window.focus_rank)
         .min()
         .unwrap_or(i64::MAX);
     let runtime_score = running_score(focused, best_rank);
-    ApplicationSummary {
+    Candidate {
         identity,
         revision,
-        runtime: ApplicationRuntime {
-            running: !instances.is_empty() || usage.compute.process_count > 0,
-            focused,
-            running_count: instances.len(),
-            resources: usage,
-            instances,
-        },
         desktop_actions,
+        clients,
+        focused,
         match_score: 0,
-        match_kind: "none".into(),
+        match_kind: "none",
         runtime_score,
         score: runtime_score,
     }
 }
 
-fn summary_for_entry(
+fn summary_for_entry<'a>(
     entry: &CatalogEntry,
-    clients: Vec<&Client>,
-    resources: &ResourceSnapshot,
+    clients: Vec<&'a Client>,
     settings: &SettingsStore,
     available: bool,
-) -> ApplicationSummary {
+) -> Candidate<'a> {
     let preferences = settings.for_application(&entry.id);
     let revision = target_revision(&entry.id, Some(entry), &clients, preferences, available);
     let identity = ApplicationIdentity {
@@ -222,22 +253,15 @@ fn summary_for_entry(
         default_workspace_id: preferences.and_then(|value| value.workspace_id.clone()),
         startup_class: entry.startup_class.clone(),
     };
-    summary(
-        identity,
-        entry.actions.clone(),
-        clients,
-        resources,
-        revision,
-    )
+    summary(identity, entry.actions.clone(), clients, revision)
 }
 
-fn summary_for_unmatched(
+fn summary_for_unmatched<'a>(
     id: String,
-    clients: Vec<&Client>,
-    resources: &ResourceSnapshot,
+    clients: Vec<&'a Client>,
     settings: &SettingsStore,
     available: bool,
-) -> ApplicationSummary {
+) -> Candidate<'a> {
     let revision = target_revision(
         &id,
         None,
@@ -270,7 +294,7 @@ fn summary_for_unmatched(
         default_workspace_id: None,
         startup_class: String::new(),
     };
-    summary(identity, Vec::new(), clients, resources, revision)
+    summary(identity, Vec::new(), clients, revision)
 }
 
 pub(super) fn running_score(focused: bool, focus_rank: i64) -> i64 {
@@ -288,12 +312,12 @@ struct SearchMatch {
     kind: &'static str,
 }
 
-fn rank(application: &mut ApplicationSummary, query: &str) -> bool {
+fn rank(application: &mut Candidate<'_>, query: &str) -> bool {
     let Some(matched) = search_match(application, query) else {
         return false;
     };
     application.match_score = matched.score;
-    application.match_kind = matched.kind.into();
+    application.match_kind = matched.kind;
     application.score = if query.is_empty() {
         application.runtime_score
     } else {
@@ -306,7 +330,7 @@ fn rank(application: &mut ApplicationSummary, query: &str) -> bool {
 }
 
 // The caller normalizes the query once for the entire page.
-fn search_match(application: &ApplicationSummary, query: &str) -> Option<SearchMatch> {
+fn search_match(application: &Candidate<'_>, query: &str) -> Option<SearchMatch> {
     if query.is_empty() {
         return Some(SearchMatch {
             score: 0,
@@ -383,7 +407,7 @@ fn direct_match(name: &str, id: &str, id_stem: &str, query: &str) -> Option<Sear
     })
 }
 
-fn search_values(application: &ApplicationSummary) -> Vec<&str> {
+fn search_values<'a>(application: &'a Candidate<'_>) -> Vec<&'a str> {
     [
         application.identity.name.as_str(),
         application.identity.generic_name.as_str(),
@@ -396,8 +420,7 @@ fn search_values(application: &ApplicationSummary) -> Vec<&str> {
     .chain(application.identity.categories.iter().map(String::as_str))
     .chain(
         application
-            .runtime
-            .instances
+            .clients
             .iter()
             .flat_map(|window| [window.title.as_str(), window.class.as_str()]),
     )

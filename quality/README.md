@@ -1,5 +1,8 @@
 # RustQualityLens baseline
 
+The [five follow-up improvements](five-followups.md) record the next independently
+validated commits, allocation evidence, and explicit static-metric tradeoffs.
+
 The latest [launch/sampling refactor review](launch-sampling-refactor-review.md)
 records fresh paired metrics, allocation/ownership changes, verification, and
 explicit module-level and historical-baseline gate failures.

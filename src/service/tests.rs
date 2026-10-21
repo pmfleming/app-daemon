@@ -24,6 +24,68 @@ async fn query_waiting_for_settings_does_not_block_resource_publication() {
         .expect("query should finish after the settings update");
 }
 
+#[test]
+fn query_ranks_window_metadata_before_hydrating_only_selected_rows() {
+    use super::query::{QueryParams, page};
+    use crate::{
+        catalog::Catalog, hyprland::Snapshot, resources::ResourceSnapshot, settings::SettingsStore,
+    };
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::write(
+        directory.path().join("editor.desktop"),
+        "[Desktop Entry]\nType=Application\nName=Editor\nExec=true\nCategories=Development;\n",
+    )
+    .unwrap();
+    let catalog = Catalog::from_paths(vec![directory.path().into()]);
+    let windows: Vec<crate::hyprland::Client> = serde_json::from_value(serde_json::json!([
+        {"address":"0x1", "pid":10, "title":"needle document", "class":"Editor", "focusHistoryID":0},
+        {"address":"0x2", "pid":20, "title":"needle terminal", "class":"Terminal", "focusHistoryID":1}
+    ])).unwrap();
+    let snapshot = Snapshot {
+        available: true,
+        ..Default::default()
+    };
+    let settings = SettingsStore::load(None);
+    let resources = ResourceSnapshot::default();
+    let query = |limit, category: &str| {
+        page(
+            &catalog,
+            &snapshot,
+            &resources,
+            &settings,
+            &QueryParams {
+                query: "needle".into(),
+                category: category.into(),
+                generation: 42,
+                limit,
+            },
+            std::collections::HashMap::from([
+                ("editor.desktop".into(), vec![&windows[0]]),
+                ("window-group:Terminal".into(), vec![&windows[1]]),
+            ]),
+            0,
+        )
+    };
+    let full = query(10, "");
+    let limited = query(1, "");
+    assert_eq!(full.applications.len(), 2);
+    assert!(limited.has_more);
+    assert_eq!(limited.generation, 42);
+    assert_eq!(
+        serde_json::to_value(&limited.applications[0]).unwrap(),
+        serde_json::to_value(&full.applications[0]).unwrap()
+    );
+    let editor = &query(10, "code").applications[0];
+    assert_eq!(editor.identity.id, "editor.desktop");
+    assert!(editor.runtime.focused && editor.runtime.running);
+    assert_eq!(editor.runtime.instances[0].title, "needle document");
+    assert_eq!(editor.runtime.instances[0].id, "window-1");
+    assert_eq!(
+        query(10, "shell").applications[0].identity.id,
+        "window-group:Terminal"
+    );
+}
+
 pub(super) fn close_missing(expected_revision: Option<u64>) -> ExecuteParams {
     ExecuteParams {
         target_id: "missing-window-group".into(),
