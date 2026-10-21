@@ -280,15 +280,6 @@ impl ApplicationService {
         }
     }
 
-    async fn remember_launch(&self, target: &str, receipt: &crate::launch::LaunchReceipt) {
-        let refresh = Arc::clone(&self.ownership_refresh).lock_owned().await;
-        self.ownership
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remember(target, receipt.ownership_roots());
-        self.update_ownership(false, refresh).await;
-    }
-
     pub async fn query(&self, params: QueryParams) -> ApplicationPage {
         self.mark_resource_demand();
         let windows = Arc::clone(&*self.windows.read().await);
@@ -607,10 +598,8 @@ async fn track_resources(service: std::sync::Weak<ApplicationService>) {
         }
         sample_resources(&service, &mut sampler).await;
         last_sample = Some(Instant::now());
-        if service.stopping.load(Ordering::Acquire) {
-            return;
-        }
-        if last_save.elapsed() >= HISTORY_SAVE_INTERVAL {
+        if last_save.elapsed() >= HISTORY_SAVE_INTERVAL && !service.stopping.load(Ordering::Acquire)
+        {
             service.save_history().await;
             last_save = Instant::now();
         }

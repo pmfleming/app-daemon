@@ -118,14 +118,10 @@ impl HistoryStore {
         };
         // Repair old files with duplicate or out-of-order buckets too.
         for (id, points) in file.applications {
-            for point in points {
-                store.insert_point(id.clone(), point);
-            }
+            store.insert_points(id, points);
         }
         for (id, points) in file.energy_applications {
-            for point in points {
-                store.insert_energy_point(id.clone(), point);
-            }
+            store.insert_energy_points(id, points);
         }
         store.prune(now_milliseconds());
         store
@@ -327,7 +323,7 @@ impl HistoryStore {
             self.finish_pending(id, pending);
         }
         for (id, pending) in std::mem::take(&mut self.pending_energy) {
-            self.insert_energy_point(id, pending.finish());
+            self.insert_energy_points(id, [pending.finish()]);
         }
     }
 
@@ -351,7 +347,7 @@ impl HistoryStore {
             })
             .collect::<Vec<_>>();
         for (id, pending) in expired_energy {
-            self.insert_energy_point(id, pending.finish());
+            self.insert_energy_points(id, [pending.finish()]);
         }
     }
 
@@ -363,7 +359,7 @@ impl HistoryStore {
             .is_some_and(|pending| pending.timestamp_ms != bucket_start)
             && let Some(pending) = self.pending_energy.remove(target_id)
         {
-            self.insert_energy_point(target_id.to_owned(), pending.finish());
+            self.insert_energy_points(target_id.to_owned(), [pending.finish()]);
         }
         let pending = self.pending_energy.entry(target_id.to_owned()).or_default();
         pending.timestamp_ms = bucket_start;
@@ -374,16 +370,22 @@ impl HistoryStore {
         );
     }
 
-    fn insert_energy_point(&mut self, id: String, point: EnergyHistoryPoint) {
+    fn insert_energy_points(
+        &mut self,
+        id: String,
+        incoming: impl IntoIterator<Item = EnergyHistoryPoint>,
+    ) {
         let points = self.energy_points.entry(id).or_default();
-        match points.binary_search_by_key(&point.timestamp_ms, |point| point.timestamp_ms) {
-            Ok(index) => {
-                let previous = &mut points[index];
-                previous.energy_mwh += point.energy_mwh;
-                merge_label(&mut previous.energy_source, &point.energy_source);
-                merge_label(&mut previous.energy_confidence, &point.energy_confidence);
+        for point in incoming {
+            match points.binary_search_by_key(&point.timestamp_ms, |point| point.timestamp_ms) {
+                Ok(index) => {
+                    let previous = &mut points[index];
+                    previous.energy_mwh += point.energy_mwh;
+                    merge_label(&mut previous.energy_source, &point.energy_source);
+                    merge_label(&mut previous.energy_confidence, &point.energy_confidence);
+                }
+                Err(index) => points.insert(index, point),
             }
-            Err(index) => points.insert(index, point),
         }
     }
 
@@ -400,27 +402,32 @@ impl HistoryStore {
                 point = PendingPoint::merge_finished(&previous, &point);
                 self.cursor_epochs.insert(id.clone(), new_cursor_epoch());
             }
-            self.insert_point(id, point);
+            self.insert_points(id, [point]);
         }
     }
 
-    fn insert_point(&mut self, id: String, point: ResourceHistoryPoint) {
+    fn insert_points(
+        &mut self,
+        id: String,
+        incoming: impl IntoIterator<Item = ResourceHistoryPoint>,
+    ) {
         let points = self.points.entry(id.clone()).or_default();
         let epoch = self
             .cursor_epochs
             .entry(id)
             .or_insert_with(new_cursor_epoch);
-        if points
-            .back()
-            .is_some_and(|last| point.timestamp_ms <= last.timestamp_ms)
-        {
-            // A previously returned bucket changed, or the wall clock went back.
-            // Existing callers must resync; `timestamp > cursor` would lose data.
-            *epoch = new_cursor_epoch();
-        }
-        match points.binary_search_by_key(&point.timestamp_ms, |point| point.timestamp_ms) {
-            Ok(index) => points[index] = PendingPoint::merge_finished(&points[index], &point),
-            Err(index) => points.insert(index, point),
+        for point in incoming {
+            if points
+                .back()
+                .is_some_and(|last| point.timestamp_ms <= last.timestamp_ms)
+            {
+                // Backfills and rewrites invalidate cursors, including during recovery.
+                *epoch = new_cursor_epoch();
+            }
+            match points.binary_search_by_key(&point.timestamp_ms, |point| point.timestamp_ms) {
+                Ok(index) => points[index] = PendingPoint::merge_finished(&points[index], &point),
+                Err(index) => points.insert(index, point),
+            }
         }
     }
 

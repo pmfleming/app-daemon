@@ -1,8 +1,3 @@
-use std::{
-    collections::hash_map::DefaultHasher,
-    hash::{Hash, Hasher},
-};
-
 use serde::Deserialize;
 
 #[derive(Debug, Clone, Default, Deserialize, Hash)]
@@ -64,11 +59,9 @@ impl Snapshot {
         };
         clients.retain(|client| client.mapped && valid_address(&client.address));
         clients.sort_by_key(|client| client.focus_rank);
-        let mut hasher = DefaultHasher::new();
-        clients.hash(&mut hasher);
         Self {
             available: true,
-            revision: hasher.finish(),
+            revision: crate::metrics::revision(&clients),
             clients,
         }
     }

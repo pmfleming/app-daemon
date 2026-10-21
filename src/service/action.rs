@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use tokio::time;
 
 use crate::{
-    catalog::{Catalog, CatalogEntry},
+    catalog::Catalog,
     hyprland::{self, Client, Snapshot},
     launch::{self, LaunchReceipt},
     model::{OperationResult, PlacementStatus, WorkspacePlacement},
@@ -128,6 +128,17 @@ impl LaunchProgress<'_> {
 }
 
 impl super::ApplicationService {
+    async fn remember_launch(&self, target: &str, receipt: &LaunchReceipt) {
+        let refresh = std::sync::Arc::clone(&self.ownership_refresh)
+            .lock_owned()
+            .await;
+        self.ownership
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remember(target, receipt.ownership_roots());
+        self.update_ownership(false, refresh).await;
+    }
+
     pub(super) async fn run_operation(
         &self,
         catalog: &Catalog,
@@ -236,15 +247,20 @@ async fn launch_on_workspace(
             .filter(|window| resolve_target(catalog, window, &ownership) == params.target_id)
             .map(|window| window.pid),
     );
-    let mut launch = if params.action == ApplicationAction::DesktopAction {
-        launch_action(catalog, params).await?
-    } else {
-        launch(catalog, &params.target_id).await?
-    };
-    launch.include_existing(existing);
-    let launch_only = catalog
+    let action = (params.action == ApplicationAction::DesktopAction)
+        .then(|| {
+            params
+                .desktop_action_id
+                .as_deref()
+                .context("desktop_action_id is required")
+        })
+        .transpose()?;
+    let entry = catalog
         .by_id(&params.target_id)
-        .is_some_and(|entry| entry.launch_only);
+        .context("application is no longer available")?;
+    let mut launch = launch::launch_entry(entry, action).await?;
+    launch.include_existing(existing);
+    let launch_only = entry.launch_only;
     if !launch_only {
         launch.placement = params
             .workspace_id
@@ -554,92 +570,4 @@ fn display_name<'a>(catalog: &'a Catalog, target_id: &'a str) -> &'a str {
         || target_id.strip_prefix("window-group:").unwrap_or(target_id),
         |entry| entry.name.as_str(),
     )
-}
-
-async fn launch(catalog: &Catalog, target_id: &str) -> anyhow::Result<LaunchReceipt> {
-    let entry = catalog
-        .by_id(target_id)
-        .context("application is no longer available")?;
-    if let Some(receipt) = activate_dbus_entry(entry, None).await? {
-        return Ok(receipt);
-    }
-    if entry.requires_terminal() && launch::LaunchBackend::detect() != launch::LaunchBackend::Uwsm {
-        return launch_in_terminal(
-            target_id,
-            entry.launch_command()?,
-            entry.working_directory(),
-        )
-        .await;
-    }
-    launch::launch_desktop(target_id).await
-}
-
-async fn activate_dbus_entry(
-    entry: &CatalogEntry,
-    action: Option<&str>,
-) -> anyhow::Result<Option<LaunchReceipt>> {
-    if !entry.dbus_activatable() {
-        return Ok(None);
-    }
-    match launch::activate_dbus(&entry.id, action).await {
-        Ok(receipt) => Ok(Some(receipt)),
-        Err(error) => {
-            let fallback = action.map_or_else(
-                || entry.launch_command(),
-                |action| entry.parse_action(action),
-            );
-            if fallback.is_err() {
-                return Err(error.context("activate desktop entry without an Exec fallback"));
-            }
-            tracing::debug!(target_id = %entry.id, %error, "D-Bus activation failed; using desktop Exec fallback");
-            Ok(None)
-        }
-    }
-}
-
-async fn launch_in_terminal(
-    target_id: &str,
-    command: Vec<String>,
-    directory: Option<&str>,
-) -> anyhow::Result<LaunchReceipt> {
-    let (program, command_arguments) = command
-        .split_first()
-        .context("desktop application command is empty")?;
-    let mut arguments = Vec::with_capacity(command_arguments.len() + 2);
-    arguments.extend(["--", program.as_str()]);
-    arguments.extend(command_arguments.iter().map(String::as_str));
-    launch::spawn_for_application(target_id, "xdg-terminal-exec", arguments, directory)
-        .await
-        .context("start application in the default terminal")
-}
-
-async fn launch_action(catalog: &Catalog, params: &ExecuteParams) -> anyhow::Result<LaunchReceipt> {
-    let target_id = &params.target_id;
-    let action_id = params
-        .desktop_action_id
-        .as_deref()
-        .context("desktop_action_id is required")?;
-    let entry = catalog
-        .by_id(target_id)
-        .context("application is no longer available")?;
-    anyhow::ensure!(
-        entry.actions.iter().any(|action| action.id == action_id),
-        "desktop action is unavailable"
-    );
-    if let Some(receipt) = activate_dbus_entry(entry, Some(action_id)).await? {
-        return Ok(receipt);
-    }
-    let args = entry.parse_action(action_id)?;
-    if launch::LaunchBackend::detect() == launch::LaunchBackend::Uwsm {
-        return launch::launch_desktop_action(target_id, action_id).await;
-    }
-    let (program, arguments) = args
-        .split_first()
-        .context("desktop action command is empty")?;
-    if entry.requires_terminal() {
-        return launch_in_terminal(target_id, args, entry.working_directory()).await;
-    }
-    launch::spawn_for_application(target_id, program, arguments, entry.working_directory())
-        .await
-        .context("start desktop action")
 }

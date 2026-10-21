@@ -29,7 +29,9 @@ pub(super) struct NetworkCounters {
     pub transmitted_bytes: u64,
 }
 
-pub(super) trait ResourceProvider: Debug + EnergyProvider + Send + Sync {
+pub(super) trait ResourceProvider:
+    Debug + EnergyProvider + Send + Sync + std::panic::RefUnwindSafe
+{
     fn system_cpu(&self) -> (u64, usize);
     fn processes(&self) -> HashMap<u32, ProcessStat>;
     fn process_memory(&self, pid: u32) -> MemoryUsage;

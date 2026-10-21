@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet, hash_map::Entry},
+    collections::{HashMap, HashSet},
     fs,
 };
 
@@ -96,12 +96,12 @@ fn deduplicate_clients(
     let mut unique = HashMap::<String, (u32, GpuClientStat)>::new();
     for (pid, clients) in clients {
         for (id, client) in clients {
-            match unique.entry(id) {
-                Entry::Occupied(mut entry) => entry.get_mut().1.merge(client),
-                Entry::Vacant(entry) => {
-                    entry.insert((pid, client));
-                }
-            }
+            // Input is PID-sorted: retain the first owner while merging shared FDs.
+            unique
+                .entry(id)
+                .or_insert_with(|| (pid, GpuClientStat::default()))
+                .1
+                .merge(client);
         }
     }
     unique
@@ -247,4 +247,21 @@ fn parse_scaled(value: &str, default_unit: &str, units: &[(&str, u64)]) -> Optio
         .iter()
         .find_map(|(candidate, multiplier)| (*candidate == unit).then_some(*multiplier))?;
     value.checked_mul(multiplier)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{HashMap, deduplicate_clients, parse_gpu_fdinfo};
+
+    #[test]
+    fn shared_client_retains_first_owner_and_maximum_counters() {
+        let sample = |pid, ns| {
+            let client =
+                parse_gpu_fdinfo(&format!("drm-client-id: 1\ndrm-engine-render: {ns} ns")).unwrap();
+            (pid, HashMap::from([client]))
+        };
+        let unique = deduplicate_clients(vec![sample(10, 12), sample(20, 8), sample(30, 20)]);
+        let (pid, client) = &unique["unknown/1"];
+        assert_eq!((*pid, client.engine_nanoseconds["render"]), (10, 20));
+    }
 }

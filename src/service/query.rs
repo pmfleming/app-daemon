@@ -1,8 +1,4 @@
-use std::{
-    cmp::Reverse,
-    collections::{HashMap, hash_map::DefaultHasher},
-    hash::{Hash, Hasher},
-};
+use std::{cmp::Reverse, collections::HashMap};
 
 use serde::{Deserialize, Serialize};
 
@@ -59,8 +55,6 @@ pub(super) fn target_revision(
     settings: Option<&ApplicationSettings>,
     available: bool,
 ) -> u64 {
-    let mut hasher = DefaultHasher::new();
-    (target_id, entry, settings, available).hash(&mut hasher);
     let mut windows = clients
         .iter()
         .map(|window| {
@@ -76,8 +70,9 @@ pub(super) fn target_revision(
         })
         .collect::<Vec<_>>();
     windows.sort_unstable();
-    windows.hash(&mut hasher);
-    crate::metrics::json_revision(hasher.finish())
+    crate::metrics::json_revision(crate::metrics::revision(&(
+        target_id, entry, settings, available, windows,
+    )))
 }
 
 pub(crate) fn page(

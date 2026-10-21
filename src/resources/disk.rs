@@ -37,20 +37,20 @@ impl DiskWorkers {
             std::thread::Builder::new()
                 .name(format!("app-disk-{index}"))
                 .spawn(move || {
-                    loop {
-                        let request = receiver
+                    // Release the receiver lock before scanning; workers share only dequeueing.
+                    let mut requests = std::iter::from_fn(|| {
+                        receiver
                             .lock()
                             .unwrap_or_else(std::sync::PoisonError::into_inner)
-                            .recv();
-                        let Ok(target) = request else { break };
-                        let usage = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                            provider.application_disk_usage(&target)
-                        }))
-                        .unwrap_or(None);
-                        if sender.send(DiskResult { target, usage }).is_err() {
-                            break;
-                        }
-                    }
+                            .recv()
+                            .ok()
+                    });
+                    let _ = requests.try_for_each(|target| {
+                        let usage =
+                            std::panic::catch_unwind(|| provider.application_disk_usage(&target))
+                                .unwrap_or(None);
+                        sender.send(DiskResult { target, usage })
+                    });
                 })?;
         }
         Ok(Self { requests, results })

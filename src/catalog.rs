@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashSet, hash_map::DefaultHasher},
+    collections::HashSet,
     env,
     hash::{Hash, Hasher},
     path::{Path, PathBuf},
@@ -99,7 +99,7 @@ impl Catalog {
                 .cmp(&right.name.to_lowercase())
                 .then(left.id.cmp(&right.id))
         });
-        let revision = catalog_revision(&entries);
+        let revision = crate::metrics::revision(&entries);
         Self { revision, entries }
     }
 
@@ -255,12 +255,6 @@ impl Hash for CatalogEntry {
         )
             .hash(hasher);
     }
-}
-
-fn catalog_revision(entries: &[CatalogEntry]) -> u64 {
-    let mut hasher = DefaultHasher::new();
-    entries.hash(&mut hasher);
-    hasher.finish()
 }
 
 #[cfg(test)]

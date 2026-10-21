@@ -34,16 +34,16 @@ impl Provenance {
     }
 
     pub(super) fn merge(&mut self, other: Self) {
-        for (pid, start) in other.identities {
-            if read_process(pid).is_some_and(|process| process.start == start) {
-                self.identities.insert(pid, start);
-            }
-        }
-        for (pid, start) in other.anchors {
-            if self.identities.get(&pid) == Some(&start) {
-                self.anchors.insert(pid, start);
-            }
-        }
+        self.identities
+            .extend(other.identities.into_iter().filter(|&(pid, start)| {
+                read_process(pid).is_some_and(|process| process.start == start)
+            }));
+        self.anchors.extend(
+            other
+                .anchors
+                .into_iter()
+                .filter(|(pid, start)| self.identities.get(pid) == Some(start)),
+        );
     }
 
     pub(super) fn remember(&mut self, pid: u32) {
@@ -53,13 +53,10 @@ impl Provenance {
         }
     }
 
-    pub(super) fn roots(&self) -> Vec<Identity> {
-        self.anchors
-            .iter()
-            .filter_map(|(&pid, &start)| {
-                (read_process(pid)?.start == start).then_some((pid, start))
-            })
-            .collect()
+    pub(super) fn roots(&self) -> impl Iterator<Item = Identity> + '_ {
+        self.anchors.iter().filter_map(|(&pid, &start)| {
+            (read_process(pid)?.start == start).then_some((pid, start))
+        })
     }
 
     pub(super) fn owns(&self, pid: u32) -> bool {

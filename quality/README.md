@@ -1,5 +1,9 @@
 # RustQualityLens baseline
 
+The latest [launch/sampling refactor review](launch-sampling-refactor-review.md)
+records fresh paired metrics, allocation/ownership changes, verification, and
+explicit module-level and historical-baseline gate failures.
+
 Run `./scripts/check-quality.sh` for the new [regression gate](regression-gate.md).
 It tracks complexity, effort, locality/leverage, cloning, escape hatches and source
 size, and requires explicit review to accept regressions. The

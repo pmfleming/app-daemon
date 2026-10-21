@@ -7,11 +7,16 @@ pub(crate) const fn json_revision(value: u64) -> u64 {
 pub(crate) fn unordered_revision<T: Ord + std::hash::Hash>(
     values: impl IntoIterator<Item = T>,
 ) -> u64 {
-    use std::hash::{Hash, Hasher};
     let mut values = values.into_iter().collect::<Vec<_>>();
     values.sort_unstable();
+    revision(&values)
+}
+
+/// Shared hashing for catalog, compositor and action-precondition revisions.
+pub(crate) fn revision(value: &(impl std::hash::Hash + ?Sized)) -> u64 {
+    use std::hash::Hasher;
     let mut hash = std::collections::hash_map::DefaultHasher::new();
-    values.hash(&mut hash);
+    value.hash(&mut hash);
     hash.finish()
 }
 

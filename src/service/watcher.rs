@@ -139,19 +139,26 @@ pub(super) async fn track_state(service: std::sync::Weak<ApplicationService>) {
                 Refresh::Catalog
             }
         };
+        window_available = refresh
+            .apply(&service, &mut catalog_refreshed, &mut window_refreshed)
+            .await
+            .unwrap_or(window_available);
+    }
+}
+
+impl Refresh {
+    /// Apply the selected invalidation concurrently and timestamp only completed reads.
+    async fn apply(
+        self,
+        service: &ApplicationService,
+        catalog: &mut Instant,
+        windows: &mut Instant,
+    ) -> Option<bool> {
         let (_, available) = tokio::join!(
-            refresh_if(
-                refresh != Refresh::Windows,
-                service.refresh_catalog(),
-                &mut catalog_refreshed
-            ),
-            refresh_if(
-                refresh != Refresh::Catalog,
-                service.refresh_windows(),
-                &mut window_refreshed
-            ),
+            refresh_if(self != Self::Windows, service.refresh_catalog(), catalog),
+            refresh_if(self != Self::Catalog, service.refresh_windows(), windows),
         );
-        window_available = available.unwrap_or(window_available);
+        available
     }
 }
 

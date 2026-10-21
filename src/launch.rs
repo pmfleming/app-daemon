@@ -4,7 +4,7 @@ use anyhow::Context;
 use serde::{Deserialize, Serialize};
 use tokio::process::Command;
 
-use crate::platform::command_available;
+use crate::{catalog::CatalogEntry, platform::command_available};
 
 mod provenance;
 pub(crate) use provenance::Provenance;
@@ -49,7 +49,7 @@ pub struct LaunchReceipt {
 }
 
 impl LaunchReceipt {
-    pub(crate) fn ownership_roots(&self) -> Vec<crate::process::Identity> {
+    pub(crate) fn ownership_roots(&self) -> impl Iterator<Item = crate::process::Identity> + '_ {
         self.provenance.roots()
     }
 
@@ -105,9 +105,83 @@ impl From<LaunchBackend> for LaunchReceipt {
     }
 }
 
+/// Keep desktop activation, fallback and terminal routing at the launch boundary.
+pub(crate) async fn launch_entry(
+    entry: &CatalogEntry,
+    action: Option<&str>,
+) -> anyhow::Result<LaunchReceipt> {
+    anyhow::ensure!(
+        action.is_none_or(|id| entry.actions.iter().any(|action| action.id == id)),
+        "desktop action is unavailable"
+    );
+    if let Some(receipt) = activate_dbus_entry(entry, action).await? {
+        return Ok(receipt);
+    }
+    let command = match action {
+        Some(action) => {
+            let command = entry.parse_action(action)?;
+            if LaunchBackend::detect() == LaunchBackend::Uwsm {
+                return launch_desktop_action(&entry.id, action).await;
+            }
+            command
+        }
+        None if !entry.requires_terminal() || LaunchBackend::detect() == LaunchBackend::Uwsm => {
+            return launch_desktop(&entry.id).await;
+        }
+        None => entry.launch_command()?,
+    };
+    launch_entry_command(entry, &command).await
+}
+
+async fn activate_dbus_entry(
+    entry: &CatalogEntry,
+    action: Option<&str>,
+) -> anyhow::Result<Option<LaunchReceipt>> {
+    if !entry.dbus_activatable() {
+        return Ok(None);
+    }
+    match activate_dbus(&entry.id, action).await {
+        Ok(receipt) => Ok(Some(receipt)),
+        Err(error) => {
+            let fallback = action.map_or_else(
+                || entry.launch_command(),
+                |action| entry.parse_action(action),
+            );
+            if fallback.is_err() {
+                return Err(error.context("activate desktop entry without an Exec fallback"));
+            }
+            tracing::debug!(target_id = %entry.id, %error, "D-Bus activation failed; using desktop Exec fallback");
+            Ok(None)
+        }
+    }
+}
+
+async fn launch_entry_command(
+    entry: &CatalogEntry,
+    command: &[String],
+) -> anyhow::Result<LaunchReceipt> {
+    let (program, arguments) = command
+        .split_first()
+        .context("desktop application command is empty")?;
+    if entry.requires_terminal() {
+        let arguments = std::iter::once("--").chain(command.iter().map(String::as_str));
+        return spawn_for_application(
+            &entry.id,
+            "xdg-terminal-exec",
+            arguments,
+            entry.working_directory(),
+        )
+        .await
+        .context("start application in the default terminal");
+    }
+    spawn_for_application(&entry.id, program, arguments, entry.working_directory())
+        .await
+        .context("start desktop action")
+}
+
 const LAUNCH_HANDOFF_TIMEOUT: Duration = Duration::from_secs(10);
 
-pub(crate) async fn activate_dbus(id: &str, action: Option<&str>) -> anyhow::Result<LaunchReceipt> {
+async fn activate_dbus(id: &str, action: Option<&str>) -> anyhow::Result<LaunchReceipt> {
     tokio::time::timeout(LAUNCH_HANDOFF_TIMEOUT, async {
         let (name, path) = activation_address(id)?;
         let connection = zbus::Connection::session()

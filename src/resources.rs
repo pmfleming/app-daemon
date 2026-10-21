@@ -454,6 +454,37 @@ fn memory_source(aggregate: &ProcessAggregation) -> String {
 }
 
 impl ProcessUsage {
+    fn from_counters(
+        process: &ProcessStat,
+        previous: Option<&PreviousProcess>,
+        io: Option<ProcessIo>,
+        system_delta: Option<u64>,
+        logical_cpus: usize,
+    ) -> Self {
+        let previous = previous.filter(|previous| previous.start_ticks == process.start_ticks);
+        Self {
+            cpu_percent: previous.zip(system_delta).map_or(0.0, |(previous, total)| {
+                finite_nonnegative(
+                    process.total_ticks.saturating_sub(previous.total_ticks) as f64 / total as f64
+                        * logical_cpus as f64
+                        * 100.0,
+                )
+            }),
+            major_faults: previous.map_or(0, |previous| {
+                process.major_faults.saturating_sub(previous.major_faults)
+            }),
+            io: previous
+                .and_then(|previous| previous.io)
+                .zip(io)
+                .map_or_else(ProcessIo::default, |(previous, current)| {
+                    current.delta(previous)
+                }),
+            thread_count: process.thread_count,
+            storage_available: io.is_some(),
+            ..Self::default()
+        }
+    }
+
     fn add_to(&self, usage: &mut ResourceUsage) {
         let compute = &mut usage.compute;
         compute.cpu_percent += self.cpu_percent;
@@ -656,36 +687,28 @@ impl ResourceSampler {
                 provider.process_memory(pid)
             });
         for (&pid, process) in current {
-            let cpu_percent = self.cpu_percent(pid, process, system_delta, logical_cpus);
             let identity = (pid, process.start_ticks);
-            let memory = self
+            let sampled_io = active_processes
+                .contains(&pid)
+                .then(|| provider.process_io(pid))
+                .flatten();
+            let mut usage = ProcessUsage::from_counters(
+                process,
+                self.previous_processes.get(&pid),
+                sampled_io,
+                system_delta,
+                logical_cpus,
+            );
+            usage.memory = self
                 .memory
                 .samples
                 .get(&identity)
                 .copied()
                 .unwrap_or_default();
-            let sampled_io = active_processes
-                .contains(&pid)
-                .then(|| provider.process_io(pid))
-                .flatten();
-            let io = self.io_delta(pid, process, sampled_io.unwrap_or_default());
-            let major_faults = self.major_fault_delta(pid, process);
-            let files = self.open_files.samples.get(&identity).cloned();
-            snapshot.total_process_cpu_percent += cpu_percent;
-            snapshot.processes.insert(
-                pid,
-                ProcessUsage {
-                    cpu_percent,
-                    memory,
-                    thread_count: process.thread_count,
-                    major_faults,
-                    gpu: gpu::Usage::default(),
-                    io,
-                    files,
-                    sockets: self.previous_sockets_by_pid.get(&pid).cloned(),
-                    storage_available: sampled_io.is_some(),
-                },
-            );
+            usage.files = self.open_files.samples.get(&identity).cloned();
+            usage.sockets = self.previous_sockets_by_pid.get(&pid).cloned();
+            snapshot.total_process_cpu_percent += usage.cpu_percent;
+            snapshot.processes.insert(pid, usage);
             self.previous_processes.insert(
                 pid,
                 PreviousProcess {
@@ -776,35 +799,6 @@ impl ResourceSampler {
         (deltas, available)
     }
 
-    fn cpu_percent(
-        &self,
-        pid: u32,
-        process: &ProcessStat,
-        system_delta: Option<u64>,
-        logical_cpus: usize,
-    ) -> f64 {
-        let Some((previous, total_delta)) = self.previous(pid, process).zip(system_delta) else {
-            return 0.0;
-        };
-        finite_nonnegative(
-            process.total_ticks.saturating_sub(previous.total_ticks) as f64 / total_delta as f64
-                * logical_cpus as f64
-                * 100.0,
-        )
-    }
-
-    fn io_delta(&self, pid: u32, process: &ProcessStat, current: ProcessIo) -> ProcessIo {
-        self.previous(pid, process)
-            .and_then(|previous| previous.io)
-            .map_or_else(ProcessIo::default, |previous| current.delta(previous))
-    }
-
-    fn major_fault_delta(&self, pid: u32, process: &ProcessStat) -> u64 {
-        self.previous(pid, process).map_or(0, |previous| {
-            process.major_faults.saturating_sub(previous.major_faults)
-        })
-    }
-
     fn cgroup_usage(
         &self,
         current: &HashMap<String, CgroupCounters>,
@@ -831,12 +825,6 @@ impl ResourceSampler {
                 (path.clone(), usage)
             })
             .collect()
-    }
-
-    fn previous(&self, pid: u32, process: &ProcessStat) -> Option<&PreviousProcess> {
-        self.previous_processes
-            .get(&pid)
-            .filter(|previous| previous.start_ticks == process.start_ticks)
     }
 }
 
