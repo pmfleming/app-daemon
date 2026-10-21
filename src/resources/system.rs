@@ -323,9 +323,7 @@ fn read_cgroup_counters_at(root: &Path) -> Option<CgroupCounters> {
     let cpu_usage_usec = fs::read_to_string(root.join("cpu.stat"))
         .ok()
         .and_then(|cpu| {
-            key_values(cpu.lines(), char::is_whitespace)
-                .get("usage_usec")
-                .copied()
+            selected_values(key_values(cpu.lines(), char::is_whitespace), ["usage_usec"])[0]
         });
     let memory_bytes = fs::read_to_string(root.join("memory.current"))
         .ok()
@@ -345,15 +343,14 @@ fn parse_cgroup_io(value: &str) -> Option<IoCounters> {
     // A readable empty io.stat is supported idle accounting; malformed records
     // are unavailable, not fabricated zeros.
     for line in value.lines().filter(|line| !line.trim().is_empty()) {
-        let values = key_values(line.split_whitespace(), |ch| ch == '=');
-        counters.read_bytes = counters.read_bytes.saturating_add(*values.get("rbytes")?);
-        counters.write_bytes = counters.write_bytes.saturating_add(*values.get("wbytes")?);
-        counters.read_operations = counters
-            .read_operations
-            .saturating_add(*values.get("rios")?);
-        counters.write_operations = counters
-            .write_operations
-            .saturating_add(*values.get("wios")?);
+        let [read, write, reads, writes] = selected_values(
+            key_values(line.split_whitespace(), |ch| ch == '='),
+            ["rbytes", "wbytes", "rios", "wios"],
+        );
+        counters.read_bytes = counters.read_bytes.saturating_add(read?);
+        counters.write_bytes = counters.write_bytes.saturating_add(write?);
+        counters.read_operations = counters.read_operations.saturating_add(reads?);
+        counters.write_operations = counters.write_operations.saturating_add(writes?);
     }
     Some(counters)
 }
@@ -361,11 +358,25 @@ fn parse_cgroup_io(value: &str) -> Option<IoCounters> {
 fn key_values<'a>(
     fields: impl Iterator<Item = &'a str>,
     separator: impl Fn(char) -> bool + Copy,
-) -> HashMap<&'a str, u64> {
+) -> impl Iterator<Item = (&'a str, u64)> {
     fields
-        .filter_map(|field| field.split_once(separator))
+        .filter_map(move |field| field.split_once(separator))
         .filter_map(|(key, value)| Some((key, value.trim().parse().ok()?)))
-        .collect()
+}
+
+// Fixed kernel schemas need neither owned keys nor a heap-allocated lookup table.
+// Preserve the old map semantics: the last successfully parsed occurrence wins.
+fn selected_values<'a, const N: usize>(
+    fields: impl Iterator<Item = (&'a str, u64)>,
+    keys: [&str; N],
+) -> [Option<u64>; N] {
+    let mut values = [None; N];
+    for (key, value) in fields {
+        if let Some(index) = keys.iter().position(|candidate| *candidate == key) {
+            values[index] = Some(value);
+        }
+    }
+    values
 }
 
 fn read_cgroup_members(path: &str) -> HashSet<u32> {
@@ -486,18 +497,42 @@ fn parse_field<T: std::str::FromStr>(
 
 fn read_process_io(pid: u32) -> Option<ProcessIo> {
     let value = fs::read_to_string(format!("/proc/{pid}/io")).ok()?;
-    let values = key_values(value.lines(), |ch| ch == ':');
-    Some(ProcessIo {
+    Some(parse_process_io(&value))
+}
+
+fn parse_process_io(value: &str) -> ProcessIo {
+    let [
+        read_bytes,
+        write_bytes,
+        read_operations,
+        write_operations,
+        logical_read_bytes,
+        logical_write_bytes,
+        cancelled_write_bytes,
+    ] = selected_values(
+        key_values(value.lines(), |ch| ch == ':'),
+        [
+            "read_bytes",
+            "write_bytes",
+            "syscr",
+            "syscw",
+            "rchar",
+            "wchar",
+            "cancelled_write_bytes",
+        ],
+    )
+    .map(Option::unwrap_or_default);
+    ProcessIo {
         storage: IoCounters {
-            read_bytes: values.get("read_bytes").copied().unwrap_or(0),
-            write_bytes: values.get("write_bytes").copied().unwrap_or(0),
-            read_operations: values.get("syscr").copied().unwrap_or(0),
-            write_operations: values.get("syscw").copied().unwrap_or(0),
+            read_bytes,
+            write_bytes,
+            read_operations,
+            write_operations,
         },
-        logical_read_bytes: values.get("rchar").copied().unwrap_or(0),
-        logical_write_bytes: values.get("wchar").copied().unwrap_or(0),
-        cancelled_write_bytes: values.get("cancelled_write_bytes").copied().unwrap_or(0),
-    })
+        logical_read_bytes,
+        logical_write_bytes,
+        cancelled_write_bytes,
+    }
 }
 
 fn read_system_cpu() -> (u64, usize) {
@@ -535,38 +570,60 @@ fn read_process_memory(pid: u32) -> MemoryUsage {
 }
 
 fn parse_memory_rollup(rollup: &str) -> MemoryUsage {
-    let values = memory_bytes(rollup);
+    let [rss, pss, clean, dirty, huge, swap_pss, swap] = selected_values(
+        memory_bytes(rollup),
+        [
+            "Rss",
+            "Pss",
+            "Private_Clean",
+            "Private_Dirty",
+            "Private_Hugetlb",
+            "SwapPss",
+            "Swap",
+        ],
+    );
     MemoryUsage {
-        rss_bytes: values.get("Rss").copied().unwrap_or(0),
-        pss_bytes: values.get("Pss").copied().unwrap_or(0),
-        private_bytes: values
-            .get("Private_Clean")
-            .copied()
-            .unwrap_or(0)
-            .saturating_add(values.get("Private_Dirty").copied().unwrap_or(0))
-            .saturating_add(values.get("Private_Hugetlb").copied().unwrap_or(0)),
-        swap_bytes: values
-            .get("SwapPss")
-            .or_else(|| values.get("Swap"))
-            .copied()
-            .unwrap_or(0),
-        rss_available: values.contains_key("Rss"),
-        pss_available: values.contains_key("Pss"),
+        rss_bytes: rss.unwrap_or(0),
+        pss_bytes: pss.unwrap_or(0),
+        private_bytes: [clean, dirty, huge]
+            .into_iter()
+            .flatten()
+            .fold(0, u64::saturating_add),
+        swap_bytes: swap_pss.or(swap).unwrap_or(0),
+        rss_available: rss.is_some(),
+        pss_available: pss.is_some(),
     }
 }
 
 fn parse_memory_status(status: &str) -> MemoryUsage {
-    let values = memory_bytes(status);
+    let [rss, swap] = selected_values(memory_bytes(status), ["VmRSS", "VmSwap"]);
     MemoryUsage {
-        rss_bytes: values.get("VmRSS").copied().unwrap_or(0),
-        swap_bytes: values.get("VmSwap").copied().unwrap_or(0),
-        rss_available: values.contains_key("VmRSS"),
+        rss_bytes: rss.unwrap_or(0),
+        swap_bytes: swap.unwrap_or(0),
+        rss_available: rss.is_some(),
         ..MemoryUsage::default()
     }
 }
 
+#[cfg(feature = "benchmarks")]
+pub(super) fn benchmark_parsers() {
+    use std::hint::black_box;
+    black_box(parse_memory_rollup(black_box(
+        "Rss: 4096 kB\nPss: 2048 kB\nPrivate_Clean: 16 kB\nPrivate_Dirty: 1024 kB\nSwapPss: 0 kB\n",
+    )));
+    black_box(parse_memory_status(black_box(
+        "Name: app\nVmRSS: 4096 kB\nVmSwap: 0 kB\nThreads: 4\n",
+    )));
+    black_box(parse_process_io(black_box(
+        "rchar: 4096\nwchar: 1024\nsyscr: 8\nsyscw: 2\nread_bytes: 8192\nwrite_bytes: 2048\ncancelled_write_bytes: 0\n",
+    )));
+    black_box(parse_cgroup_io(black_box(
+        "8:0 rbytes=8192 wbytes=2048 rios=8 wios=2 dbytes=0\n",
+    )));
+}
+
 // Both smaps_rollup and status report memory in KiB. Normalize once at the edge.
-fn memory_bytes(value: &str) -> HashMap<&str, u64> {
+fn memory_bytes(value: &str) -> impl Iterator<Item = (&str, u64)> {
     value
         .lines()
         .filter_map(|line| line.split_once(':'))
@@ -574,5 +631,53 @@ fn memory_bytes(value: &str) -> HashMap<&str, u64> {
             let kib: u64 = value.split_whitespace().next()?.parse().ok()?;
             Some((key, kib.saturating_mul(1024)))
         })
-        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{parse_cgroup_io, parse_memory_rollup, parse_memory_status, parse_process_io};
+
+    #[test]
+    fn fixed_fields_preserve_missing_duplicate_and_saturating_semantics() {
+        let memory = parse_memory_rollup(
+            "Rss: 2 kB\nRss: 4 kB\nRss: bad\nPss: 0 kB\nSwap: 3 kB\nSwapPss: 0 kB\nPrivate_Clean: 18446744073709551615 kB\nPrivate_Dirty: 1 kB\n",
+        );
+        assert_eq!(
+            (memory.rss_bytes, memory.pss_bytes, memory.swap_bytes),
+            (4096, 0, 0)
+        );
+        assert!(memory.rss_available && memory.pss_available);
+        assert_eq!(memory.private_bytes, u64::MAX);
+        let missing = parse_memory_status("Name: app\nVmRSS: invalid\nVmSwap: 3 kB\n");
+        assert!(!missing.rss_available);
+        assert_eq!(missing.swap_bytes, 3072);
+        let io = parse_process_io(
+            "read_bytes: 1\nread_bytes: 7\nread_bytes: bad\nrchar: 9\nunknown: 8\n",
+        );
+        assert_eq!(
+            (
+                io.storage.read_bytes,
+                io.storage.write_bytes,
+                io.logical_read_bytes
+            ),
+            (7, 0, 9)
+        );
+        assert_eq!(parse_cgroup_io("").unwrap().read_bytes, 0);
+        assert!(parse_cgroup_io("8:0 rbytes=1 wbytes=2 rios=3").is_none());
+        let io = parse_cgroup_io("8:0 rbytes=1 wbytes=2 rios=3 wios=4\n8:1 rbytes=5 rbytes=6 rbytes=bad wbytes=7 rios=8 wios=9").unwrap();
+        assert_eq!(
+            (
+                io.read_bytes,
+                io.write_bytes,
+                io.read_operations,
+                io.write_operations
+            ),
+            (7, 9, 11, 13)
+        );
+        #[cfg(feature = "benchmarks")]
+        assert_eq!(
+            allocation_counter::measure(super::benchmark_parsers).count_total,
+            0
+        );
+    }
 }

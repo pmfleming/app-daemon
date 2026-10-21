@@ -49,3 +49,26 @@ Step-local production effort falls 4,375,248 → 4,368,664; cognitive stays 540,
 cyclomatic adds one helper (1,200 → 1,201). Production-file lines +4 and test lines
 +18. All-code effort rises due to added assertions in the existing long cursor
 scenario. Locality, leverage, clone-site counts and escape hatches are unchanged.
+
+## 3. Allocation-free fixed-field procfs parsing
+
+CPU/cgroup I/O, process I/O, smaps and status parsers select borrowed fields into
+fixed-size option arrays rather than temporary hash maps. Selection preserves
+last-*valid*-duplicate behavior, supported zero versus missing observations,
+SwapPss precedence, strict required cgroup fields and saturating arithmetic.
+Tests cover these cases and enforce zero parser allocations with the benchmark
+feature enabled.
+
+The same new parser workload was measured with the original map implementation
+before switching algorithms, then afterward (release, 100 iterations): **7 → 0
+allocations**, **1,112 → 0 bytes**, median **1.363 → 0.461 µs**. Raw reports are
+`/tmp/app-parser-before.log` and `/tmp/app-parser-after.log`; reproduce the current
+workload with `APP_DAEMON_BENCH_ITERS=100 cargo bench --locked --features benchmarks
+--bench workloads` (`parsing/procfs`).
+
+All-feature tests and strict Clippy pass. Production effort decreases
+4,368,664 → 4,367,059; duplicated lines 656 → 631. Cognitive +3 and cyclomatic +5
+include the explicit selector loop and newly exposed parsing/benchmark helpers.
+Authored source grows 113 lines including fixed schema arrays, benchmark fixtures
+and regression assertions; this is an allocation/duplication win, not a size win.
+Architecture scores and clone/escape counts remain unchanged.

@@ -101,7 +101,15 @@ pub(crate) fn run(iterations: usize) -> anyhow::Result<Vec<Measurement>> {
     });
     *provider.disk_gate.lock().unwrap() = None;
     gate.wait();
-    Ok(vec![warm, busy])
+    Ok(vec![
+        warm,
+        busy,
+        measure(
+            "parsing/procfs",
+            iterations,
+            super::system::benchmark_parsers,
+        ),
+    ])
 }
 
 fn sample(
