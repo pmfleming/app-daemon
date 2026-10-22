@@ -304,6 +304,7 @@ pub struct HistoricalResourceUsage {
         skip_deserializing,
         skip_serializing_if = "crate::projection::MetricAvailability::is_empty"
     )]
+    #[schemars(!skip_serializing_if, default = "crate::projection::MetricAvailability::default")]
     pub metric_availability: crate::projection::MetricAvailability,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub availability: Option<ResourceAvailability>,
