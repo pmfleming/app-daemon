@@ -296,10 +296,14 @@ impl ResourceAvailability {
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct HistoricalResourceUsage {
-    #[serde(skip_deserializing)]
+    // Historical storage keeps only compact flags. Project the map at the API boundary.
+    #[serde(
+        skip_deserializing,
+        skip_serializing_if = "crate::projection::MetricAvailability::is_empty"
+    )]
     pub metric_availability: crate::projection::MetricAvailability,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub availability: Option<ResourceAvailability>,
@@ -319,6 +323,28 @@ pub struct HistoricalResourceUsage {
     pub sample_count: u64,
     pub coverage: f64,
     pub peaks: ResourcePeaks,
+}
+
+impl Default for HistoricalResourceUsage {
+    fn default() -> Self {
+        Self {
+            metric_availability: crate::projection::MetricAvailability::empty(),
+            availability: None,
+            compute: ComputeUsage::default(),
+            storage: StorageUsage::default(),
+            network: NetworkUsage::default(),
+            energy_mwh: 0.0,
+            battery_percent: 0.0,
+            average_power_watts: 0.0,
+            system_power_watts: 0.0,
+            attributed_fraction: 0.0,
+            energy_source: String::new(),
+            energy_confidence: String::new(),
+            sample_count: 0,
+            coverage: 0.0,
+            peaks: ResourcePeaks::default(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]

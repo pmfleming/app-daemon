@@ -7,6 +7,15 @@ use std::collections::BTreeMap;
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(transparent)]
 pub struct MetricAvailability(pub BTreeMap<String, bool>);
+impl MetricAvailability {
+    pub(crate) fn empty() -> Self {
+        Self(BTreeMap::new())
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
 impl Default for MetricAvailability {
     fn default() -> Self {
         ResourceAvailability::default().project()

@@ -403,7 +403,8 @@ impl HistoryStore {
             .cursor_epochs
             .entry(id)
             .or_insert_with(new_cursor_epoch);
-        for point in incoming {
+        for mut point in incoming {
+            point.resources.metric_availability = crate::projection::MetricAvailability::empty();
             if points
                 .back()
                 .is_some_and(|last| point.timestamp_ms <= last.timestamp_ms)
@@ -538,6 +539,8 @@ pub fn persist_snapshot(snapshot: HistorySnapshot) -> std::io::Result<()> {
     .map_err(std::io::Error::other)
 }
 
+#[cfg(test)]
+mod persistence_tests;
 #[cfg(test)]
 mod recovery_tests;
 #[cfg(test)]

@@ -188,7 +188,7 @@ impl PendingPoint {
             duration_ms: self.duration_ms,
             resources: HistoricalResourceUsage {
                 availability: self.availability,
-                metric_availability: Default::default(),
+                metric_availability: crate::projection::MetricAvailability::empty(),
                 compute: self.compute.finish(duration),
                 storage: self.storage.finish(duration),
                 network: self.network.finish(duration),
