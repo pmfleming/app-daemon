@@ -62,7 +62,7 @@ fn cursor_lifecycle_survives_restart_but_rejects_expiry_rewrites_and_backfills()
     let incremental = store.query_window("app", None, None, cursor.as_deref(), 1)?;
     assert!(incremental.points.is_empty());
     assert_eq!(incremental.next_cursor, cursor);
-    persist_snapshot(store.snapshot(false))?;
+    persist_snapshot(store.snapshot(false).unwrap())?;
 
     let mut restarted = HistoryStore::load(Some(path.clone()));
     assert!(
@@ -99,7 +99,7 @@ fn cursor_lifecycle_survives_restart_but_rejects_expiry_rewrites_and_backfills()
         3.0
     );
     restarted.record("app", t + 6000, 1.0, &usage(20.0, 1.0));
-    persist_snapshot(restarted.snapshot(true))?;
+    persist_snapshot(restarted.snapshot(true).unwrap())?;
     let mut restarted = HistoryStore::load(Some(path));
     let gap = restarted.query_window("app", Some(t + 3000), Some(t + 5000), None, 10)?;
     assert_eq!(gap.summary.metrics["cpu_percent_of_machine"].observed_ms, 0);

@@ -17,7 +17,7 @@ async fn shutdown_drains_sampling_and_serializes_final_save_after_older_writers(
         .lock()
         .await
         .record("app", t, 1.0, &ResourceUsage::default());
-    let old = service.history.lock().await.snapshot(true);
+    let old = service.history.lock().await.snapshot(true).unwrap();
     let old_writer = Arc::clone(&service.history_saves).lock_owned().await;
     let (sample_done, release_sample) = oneshot::channel();
     let sampler_service = Arc::clone(&service);

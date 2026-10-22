@@ -419,7 +419,9 @@ impl ApplicationService {
         // Transfer the guard to the writer: cancelling the awaiting future must
         // not release serialization while an older blocking write still runs.
         let save = Arc::clone(&self.history_saves).lock_owned().await;
-        let snapshot = self.history.lock().await.snapshot(final_save);
+        let Some(snapshot) = self.history.lock().await.snapshot(final_save) else {
+            return;
+        };
         match tokio::task::spawn_blocking(move || {
             let _save = save;
             persist_snapshot(snapshot)

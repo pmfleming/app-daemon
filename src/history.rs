@@ -1,6 +1,10 @@
 use std::{
     collections::{HashMap, VecDeque},
     path::{Path, PathBuf},
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -81,11 +85,15 @@ pub struct HistoryPage {
 pub struct HistorySnapshot {
     path: Option<PathBuf>,
     file: HistoryFile,
+    generation: u64,
+    saved_generation: Arc<AtomicU64>,
 }
 
 #[derive(Debug)]
 pub struct HistoryStore {
     path: Option<PathBuf>,
+    generation: u64,
+    saved_generation: Arc<AtomicU64>,
     points: HashMap<String, VecDeque<ResourceHistoryPoint>>,
     pending: HashMap<String, PendingPoint>,
     energy_points: HashMap<String, VecDeque<EnergyHistoryPoint>>,
@@ -110,6 +118,9 @@ impl HistoryStore {
             .unwrap_or_default();
         let mut store = Self {
             path,
+            // Rewrite once after load to persist repairs and compact legacy data.
+            generation: 1,
+            saved_generation: Arc::new(AtomicU64::new(0)),
             points: HashMap::new(),
             pending: HashMap::new(),
             energy_points: HashMap::new(),
@@ -287,22 +298,27 @@ impl HistoryStore {
         total
     }
 
-    pub fn snapshot(&mut self, final_save: bool) -> HistorySnapshot {
+    pub fn snapshot(&mut self, final_save: bool) -> Option<HistorySnapshot> {
         if final_save {
             self.flush_pending();
         } else {
             self.flush_expired(now_milliseconds());
         }
         self.prune(now_milliseconds());
-        HistorySnapshot {
+        if self.generation == self.saved_generation.load(Ordering::Acquire) {
+            return None;
+        }
+        Some(HistorySnapshot {
             path: self.path.clone(),
+            generation: self.generation,
+            saved_generation: Arc::clone(&self.saved_generation),
             file: HistoryFile {
                 version: FILE_VERSION,
                 applications: self.points.clone(),
                 energy_applications: self.energy_points.clone(),
                 cursor_epochs: self.cursor_epochs.clone(),
             },
-        }
+        })
     }
 
     fn flush_pending(&mut self) {
@@ -364,6 +380,7 @@ impl HistoryStore {
     ) {
         let points = self.energy_points.entry(id).or_default();
         for point in incoming {
+            self.generation += 1;
             match points.binary_search_by_key(&point.timestamp_ms, |point| point.timestamp_ms) {
                 Ok(index) => {
                     let previous = &mut points[index];
@@ -404,6 +421,7 @@ impl HistoryStore {
             .entry(id)
             .or_insert_with(new_cursor_epoch);
         for mut point in incoming {
+            self.generation += 1;
             point.resources.metric_availability = crate::projection::MetricAvailability::empty();
             if points
                 .back()
@@ -420,18 +438,29 @@ impl HistoryStore {
     }
 
     fn prune(&mut self, timestamp_ms: u64) {
+        let mut changed = false;
         let cutoff = timestamp_ms.saturating_sub(RETENTION_MILLISECONDS);
         self.points.retain(|_, points| {
-            points.drain(..points.partition_point(|point| point.timestamp_ms < cutoff));
+            let expired = points.partition_point(|point| point.timestamp_ms < cutoff);
+            changed |= expired > 0 || points.is_empty();
+            points.drain(..expired);
             !points.is_empty()
         });
         let energy_cutoff = timestamp_ms.saturating_sub(ENERGY_RETENTION_MILLISECONDS);
-        self.cursor_epochs
-            .retain(|id, _| self.points.contains_key(id) || self.pending.contains_key(id));
+        self.cursor_epochs.retain(|id, _| {
+            let keep = self.points.contains_key(id) || self.pending.contains_key(id);
+            changed |= !keep;
+            keep
+        });
         self.energy_points.retain(|_, points| {
-            points.drain(..points.partition_point(|point| point.timestamp_ms < energy_cutoff));
+            let expired = points.partition_point(|point| point.timestamp_ms < energy_cutoff);
+            changed |= expired > 0 || points.is_empty();
+            points.drain(..expired);
             !points.is_empty()
         });
+        if changed {
+            self.generation += 1;
+        }
     }
 }
 
@@ -525,18 +554,23 @@ pub fn now_milliseconds() -> u64 {
 }
 
 pub fn persist_snapshot(snapshot: HistorySnapshot) -> std::io::Result<()> {
-    let Some(path) = snapshot.path else {
-        return Ok(());
-    };
-    write_json_atomic(
-        &path,
-        &snapshot.file,
-        AtomicWritePolicy {
-            pretty: false,
-            ..AtomicWritePolicy::PRIVATE
-        },
-    )
-    .map_err(std::io::Error::other)
+    if let Some(path) = snapshot.path {
+        write_json_atomic(
+            &path,
+            &snapshot.file,
+            AtomicWritePolicy {
+                pretty: false,
+                ..AtomicWritePolicy::PRIVATE
+            },
+        )
+        .map_err(std::io::Error::other)?;
+    }
+    // Writers are serialized by the service. A cancelled await must still mark
+    // this exact generation saved, never changes recorded during the write.
+    snapshot
+        .saved_generation
+        .fetch_max(snapshot.generation, Ordering::Release);
+    Ok(())
 }
 
 #[cfg(test)]
