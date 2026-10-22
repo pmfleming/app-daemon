@@ -4,6 +4,7 @@ use super::{
     catalog_watch::{self, CatalogEvent},
 };
 use crate::hyprland;
+use shelllist_daemon_core::watch::WatchBackoff;
 use std::time::{Duration, Instant};
 use tokio::{sync::mpsc, time};
 
@@ -13,32 +14,28 @@ const HEALTHY_WINDOW_INTERVAL: Duration = Duration::from_secs(30);
 const HEALTHY_CATALOG_INTERVAL: Duration = Duration::from_secs(300);
 const EVENT_DEBOUNCE: Duration = Duration::from_millis(75);
 
-const MIN_RETRY: Duration = Duration::from_secs(1);
-const MAX_RETRY: Duration = Duration::from_secs(30);
-
 struct WatchRecovery<W> {
     watcher: Option<W>,
-    retry_at: Instant,
-    retry_delay: Duration,
+    recovery: WatchBackoff,
 }
 
 impl<W> WatchRecovery<W> {
     fn new(now: Instant) -> Self {
         Self {
             watcher: None,
-            retry_at: now,
-            retry_delay: MIN_RETRY,
+            recovery: WatchBackoff::new(now),
         }
     }
 
     fn rebuild(&mut self, now: Instant) {
-        *self = Self::new(now);
+        // Rewatch/rescan storms cannot reset or postpone an existing deadline.
+        if self.watcher.take().is_some() {
+            self.recovery.failed(now);
+        }
     }
 
     fn failed(&mut self, now: Instant) {
-        self.watcher = None;
-        self.retry_at = now + self.retry_delay;
-        self.retry_delay = (self.retry_delay * 2).min(MAX_RETRY);
+        self.rebuild(now);
     }
 
     fn attempt<E: std::fmt::Display>(
@@ -46,19 +43,19 @@ impl<W> WatchRecovery<W> {
         now: Instant,
         create: impl FnOnce() -> Result<W, E>,
     ) -> Result<(), E> {
-        if self.watcher.is_some() || now < self.retry_at {
+        if self.watcher.is_some() || !self.recovery.ready(now) {
             return Ok(());
         }
         self.watcher = Some(create().inspect_err(|error| {
-            self.failed(now);
+            self.recovery.failed(now);
             tracing::warn!(%error, "catalog watcher unavailable; polling continues, retry scheduled");
         })?);
-        self.retry_delay = MIN_RETRY;
+        self.recovery.started(now);
         Ok(())
     }
 
     fn retry_deadline(&self) -> Option<Instant> {
-        self.watcher.is_none().then_some(self.retry_at)
+        self.watcher.is_none().then_some(self.recovery.deadline())
     }
 }
 

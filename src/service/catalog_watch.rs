@@ -1,4 +1,5 @@
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
+use shelllist_daemon_core::watch::{DEFAULT_WATCH_LIMIT, bounded_watch_paths};
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
@@ -16,11 +17,14 @@ pub(super) enum CatalogEvent {
 pub(super) fn create(sender: mpsc::Sender<CatalogEvent>) -> notify::Result<RecommendedWatcher> {
     let roots = crate::catalog::default_catalog_paths();
     let plan = watch_plan(&roots);
-    let watcher = notify::recommended_watcher(move |event| {
-        if let Some(event) = classify_event(event, &roots) {
-            let _ = sender.try_send(event);
-        }
-    })?;
+    let watcher = RecommendedWatcher::new(
+        move |event| {
+            if let Some(event) = classify_event(event, &roots) {
+                let _ = sender.try_send(event);
+            }
+        },
+        notify::Config::default().with_follow_symlinks(false),
+    )?;
     install(watcher, plan)
 }
 
@@ -28,10 +32,18 @@ fn install<W: Watcher>(
     mut watcher: W,
     plan: impl IntoIterator<Item = (PathBuf, RecursiveMode)>,
 ) -> notify::Result<W> {
-    for (path, mode) in plan {
+    let paths = bounded_watch_paths(
+        plan.into_iter()
+            .map(|(path, mode)| (path, mode == RecursiveMode::Recursive)),
+        DEFAULT_WATCH_LIMIT,
+    )
+    .map_err(notify::Error::io)?;
+    for path in &paths {
+        // Explicit nonrecursive registrations cannot grow behind the budget.
         // Partial coverage is not healthy: drop the watcher and retry while polling.
-        watcher.watch(&path, mode)?;
+        watcher.watch(path, RecursiveMode::NonRecursive)?;
     }
+    tracing::debug!(watch_count = paths.len(), "catalog watcher installed");
     Ok(watcher)
 }
 
@@ -43,14 +55,26 @@ fn classify_event(event: notify::Result<notify::Event>, roots: &[PathBuf]) -> Op
             return Some(CatalogEvent::Failed);
         }
     };
+    if event.need_rescan() {
+        return Some(CatalogEvent::Failed);
+    }
     if event.kind.is_access() || !event.paths.iter().any(|path| relevant(path, roots)) {
         return None;
     }
     Some(
-        if event
-            .paths
-            .iter()
-            .any(|path| roots.iter().any(|root| root.starts_with(path)))
+        if matches!(
+            event.kind,
+            notify::EventKind::Create(notify::event::CreateKind::Folder)
+                | notify::EventKind::Remove(notify::event::RemoveKind::Folder)
+                | notify::EventKind::Any
+        ) || (matches!(
+            event.kind,
+            notify::EventKind::Modify(notify::event::ModifyKind::Name(_))
+        ) && event.paths.iter().any(|path| path.is_dir()))
+            || event
+                .paths
+                .iter()
+                .any(|path| roots.iter().any(|root| root.starts_with(path)))
         {
             CatalogEvent::Rewatch
         } else {
@@ -96,6 +120,23 @@ fn replacement_parents(root: &Path) -> impl Iterator<Item = &Path> {
 #[cfg(test)]
 mod tests {
     use super::{RecursiveMode, install, relevant, watch_plan};
+
+    #[test]
+    fn pathless_rescan_recovers_and_nested_directory_changes_replan() {
+        use super::{CatalogEvent, classify_event};
+        use notify::{
+            Event, EventKind,
+            event::{CreateKind, Flag},
+        };
+        let event = Event::new(EventKind::Other).set_flag(Flag::Rescan);
+        assert_eq!(classify_event(Ok(event), &[]), Some(CatalogEvent::Failed));
+        let root = std::path::PathBuf::from("/fixture/apps");
+        let event = Event::new(EventKind::Create(CreateKind::Folder)).add_path(root.join("nested"));
+        assert_eq!(
+            classify_event(Ok(event), &[root]),
+            Some(CatalogEvent::Rewatch)
+        );
+    }
 
     #[test]
     fn watch_coverage_handles_profile_replacement_and_rejects_partial_installation()
