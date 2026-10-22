@@ -65,6 +65,36 @@ fn compact_storage_ignores_legacy_maps_and_projects_only_responses() -> anyhow::
 }
 
 #[test]
+fn snapshots_share_finished_buckets_but_mutations_do_not_change_the_snapshot() {
+    let mut store = fixture();
+    let snapshot = store.snapshot(false).unwrap();
+    let old = snapshot.file.applications["fixture-0"][0].clone();
+    assert!(Arc::ptr_eq(&old, &store.points["fixture-0"][0]));
+    let mut replacement = (*old).clone();
+    replacement.resources.compute.cpu_percent = 90.0;
+    store.insert_points("fixture-0".into(), [replacement]);
+    assert!(!Arc::ptr_eq(&old, &store.points["fixture-0"][0]));
+    assert_eq!(old.resources.compute.cpu_percent, 0.0);
+    assert!(Arc::ptr_eq(
+        &snapshot.file.applications["fixture-0"][1],
+        &store.points["fixture-0"][1]
+    ));
+    store.insert_energy_points(
+        "app".into(),
+        [EnergyHistoryPoint {
+            timestamp_ms: now_milliseconds(),
+            energy_mwh: 1.0,
+            ..Default::default()
+        }],
+    );
+    let snapshot = store.snapshot(false).unwrap();
+    let old = snapshot.file.energy_applications["app"][0].clone();
+    store.insert_energy_points("app".into(), [(*old).clone()]);
+    assert_eq!(old.energy_mwh, 1.0);
+    assert_eq!(store.energy_points["app"][0].energy_mwh, 2.0);
+}
+
+#[test]
 fn saves_track_successful_generations_and_flush_pending_on_shutdown() -> anyhow::Result<()> {
     let dir = tempfile::tempdir()?;
     let path = dir.path().join("state");

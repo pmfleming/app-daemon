@@ -46,3 +46,21 @@ shutdown ordering, and byte-identical public protocol schemas.
 
 All release app-daemon ordinary tests passed (30 library, 15 session; explicit
 opt-in probes and systemd fixtures excluded).
+
+## Shared immutable buckets
+
+Snapshots now copy `Arc` handles rather than every bucket and its strings. Both
+resource and energy buckets are shared; a merge replaces/copies only the affected
+bucket. Holding a snapshot does not cause a subsequent append to copy the whole
+history. Tests retain an old snapshot while rewriting resource and energy data.
+
+Three release runs after sharing: snapshot **0.281, 0.291, 0.297 ms**; encode
+**44.375, 43.550, 41.819 ms**; JSON remains 43,638,753 bytes. Three streamed-save
+runs: **92.365, 96.171, 93.649 ms**, VmHWM **19868, 19760, 19884 KiB**.
+The ordinary full release suite passes, including unchanged public fixtures.
+
+Append-only segmentation is not introduced in this change. The isolated streamed
+save is now about 0.1 seconds, but an actively growing history still rewrites the
+file once per save. Measure real deployment I/O before paying the additional
+migration/compaction/recovery complexity; dirty tracking only eliminates truly
+unchanged saves. No claim is made that steady-state disk-write rate is solved.

@@ -35,8 +35,8 @@ const ENERGY_RETENTION_MILLISECONDS: u64 = 7 * 24 * 60 * 60 * 1000;
 #[serde(default)]
 struct HistoryFile {
     version: u8,
-    applications: HashMap<String, VecDeque<ResourceHistoryPoint>>,
-    energy_applications: HashMap<String, VecDeque<EnergyHistoryPoint>>,
+    applications: HashMap<String, VecDeque<Arc<ResourceHistoryPoint>>>,
+    energy_applications: HashMap<String, VecDeque<Arc<EnergyHistoryPoint>>>,
     /// Rewrites/backfills invalidate timestamp cursors rather than silently hiding data.
     cursor_epochs: HashMap<String, String>,
 }
@@ -94,9 +94,9 @@ pub struct HistoryStore {
     path: Option<PathBuf>,
     generation: u64,
     saved_generation: Arc<AtomicU64>,
-    points: HashMap<String, VecDeque<ResourceHistoryPoint>>,
+    points: HashMap<String, VecDeque<Arc<ResourceHistoryPoint>>>,
     pending: HashMap<String, PendingPoint>,
-    energy_points: HashMap<String, VecDeque<EnergyHistoryPoint>>,
+    energy_points: HashMap<String, VecDeque<Arc<EnergyHistoryPoint>>>,
     pending_energy: HashMap<String, PendingEnergy>,
     cursor_epochs: HashMap<String, String>,
 }
@@ -129,10 +129,10 @@ impl HistoryStore {
         };
         // Repair old files with duplicate or out-of-order buckets too.
         for (id, points) in file.applications {
-            store.insert_points(id, points);
+            store.insert_points(id, points.into_iter().map(Arc::unwrap_or_clone));
         }
         for (id, points) in file.energy_applications {
-            store.insert_energy_points(id, points);
+            store.insert_energy_points(id, points.into_iter().map(Arc::unwrap_or_clone));
         }
         store.prune(now_milliseconds());
         store
@@ -383,12 +383,12 @@ impl HistoryStore {
             self.generation += 1;
             match points.binary_search_by_key(&point.timestamp_ms, |point| point.timestamp_ms) {
                 Ok(index) => {
-                    let previous = &mut points[index];
+                    let previous = Arc::make_mut(&mut points[index]);
                     previous.energy_mwh += point.energy_mwh;
                     merge_label(&mut previous.energy_source, &point.energy_source);
                     merge_label(&mut previous.energy_confidence, &point.energy_confidence);
                 }
-                Err(index) => points.insert(index, point),
+                Err(index) => points.insert(index, Arc::new(point)),
             }
         }
     }
@@ -431,8 +431,10 @@ impl HistoryStore {
                 *epoch = new_cursor_epoch();
             }
             match points.binary_search_by_key(&point.timestamp_ms, |point| point.timestamp_ms) {
-                Ok(index) => points[index] = PendingPoint::merge_finished(&points[index], &point),
-                Err(index) => points.insert(index, point),
+                Ok(index) => {
+                    points[index] = Arc::new(PendingPoint::merge_finished(&points[index], &point))
+                }
+                Err(index) => points.insert(index, Arc::new(point)),
             }
         }
     }
@@ -484,13 +486,14 @@ impl PendingEnergy {
 }
 
 fn window_points(
-    points: Option<&VecDeque<ResourceHistoryPoint>>,
+    points: Option<&VecDeque<Arc<ResourceHistoryPoint>>>,
     since: Option<u64>,
     until: Option<u64>,
 ) -> impl DoubleEndedIterator<Item = &ResourceHistoryPoint> {
     points
         .into_iter()
         .flatten()
+        .map(Arc::as_ref)
         .filter(move |point| since.is_none_or(|since| point.timestamp_ms >= since))
         // Include summary-only overlaps; pagination separately checks endpoints.
         .filter(move |point| {

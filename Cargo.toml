@@ -19,7 +19,7 @@ freedesktop-desktop-entry = { version = "0.8.1", default-features = false }
 futures = "0.3"
 notify = "8"
 rustix = { version = "1", features = ["net"] }
-serde = { version = "1", features = ["derive"] }
+serde = { version = "1", features = ["derive", "rc"] }
 serde_json = "1"
 schemars = "1.2.3"
 # Co-development invariant: use the same live sibling framework as every daemon.
