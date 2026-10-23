@@ -6,7 +6,10 @@ use super::{
 use crate::hyprland;
 use shelllist_daemon_core::watch::WatchBackoff;
 use std::time::{Duration, Instant};
-use tokio::{sync::mpsc, time};
+use tokio::{
+    sync::{mpsc, watch},
+    time,
+};
 
 const WINDOW_RECOVERY_INTERVAL: Duration = Duration::from_secs(5);
 const CATALOG_RECOVERY_INTERVAL: Duration = Duration::from_secs(30);
@@ -34,6 +37,12 @@ impl<W> WatchRecovery<W> {
         }
     }
 
+    fn invalidate(&mut self, event: CatalogEvent, now: Instant) {
+        if event != CatalogEvent::Changed {
+            self.rebuild(now);
+        }
+    }
+
     fn attempt<E: std::fmt::Display>(
         &mut self,
         now: Instant,
@@ -50,85 +59,217 @@ impl<W> WatchRecovery<W> {
         Ok(())
     }
 
+    fn repair<E: std::fmt::Display>(
+        &mut self,
+        now: Instant,
+        create: impl FnOnce() -> Result<W, E>,
+    ) {
+        // Repair before the periodic snapshot, without postponing pending retries.
+        if self.watcher.is_some() {
+            self.rebuild(now);
+            let _ = self.attempt(now, create);
+        }
+    }
+
     fn retry_deadline(&self) -> Option<Instant> {
         self.watcher.is_none().then_some(self.recovery.deadline())
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Refresh {
     Windows,
     Catalog,
     Both,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Connection {
+    Disconnected,
+    Connected,
+    Closed,
+}
+
+struct WindowState {
+    connection: Connection,
+    available: bool,
+    refreshed: Instant,
+}
+
+impl WindowState {
+    fn observe(&mut self, event: Option<shelllist_hyprland::Event>) -> bool {
+        use shelllist_hyprland::Event;
+        match event {
+            None => {
+                self.connection = Connection::Closed;
+                tracing::warn!("window event stream ended; continuing reconciliation");
+                false
+            }
+            Some(Event::Connected) => {
+                self.connection = Connection::Connected;
+                true
+            }
+            Some(Event::Disconnected(cause)) => {
+                self.connection = Connection::Disconnected;
+                if let Some(cause) = cause {
+                    tracing::warn!(%cause, "window event stream failed; continuing reconciliation");
+                }
+                true
+            }
+            Some(Event::ConnectFailed(cause)) => {
+                self.connection = Connection::Disconnected;
+                tracing::warn!(%cause, "window event connection failed; continuing reconciliation");
+                true
+            }
+            Some(Event::Message(line)) => hyprland::window_event_relevant(&line),
+        }
+    }
+
+    fn deadline(&self) -> Instant {
+        self.refreshed
+            + if self.connection == Connection::Connected && self.available {
+                HEALTHY_WINDOW_INTERVAL
+            } else {
+                WINDOW_RECOVERY_INTERVAL
+            }
+    }
+
+    async fn batch(
+        &mut self,
+        event: Option<shelllist_hyprland::Event>,
+        events: &mut mpsc::Receiver<shelllist_hyprland::Event>,
+    ) -> Option<Refresh> {
+        if !self.observe(event) {
+            return None;
+        }
+        drain_events(events, |event| {
+            self.observe(Some(event));
+        })
+        .await;
+        Some(Refresh::Windows)
+    }
+}
+
+struct WatchState {
+    windows: WindowState,
+    catalog: WatchRecovery<notify::RecommendedWatcher>,
+    catalog_refreshed: Instant,
+}
+
+impl WatchState {
+    fn catalog_deadline(&self) -> Instant {
+        self.catalog_refreshed
+            + if self.catalog.retry_deadline().is_none() {
+                HEALTHY_CATALOG_INTERVAL
+            } else {
+                CATALOG_RECOVERY_INTERVAL
+            }
+    }
+
+    async fn react(&mut self, signal: Signal, sources: &mut EventSources) -> Option<Refresh> {
+        let create = || catalog_watch::create(sources.catalog_sender.clone());
+        match signal {
+            Signal::Resume => {
+                self.catalog.rebuild(Instant::now());
+                Some(Refresh::Both)
+            }
+            Signal::Retry => {
+                // Close the gap between the last snapshot and installing a watch.
+                self.catalog
+                    .attempt(Instant::now(), create)
+                    .ok()
+                    .map(|()| Refresh::Catalog)
+            }
+            Signal::Window(event) => self.windows.batch(event, &mut sources.windows).await,
+            Signal::Catalog(mut event) => {
+                drain_events(&mut sources.catalog, |next| event = event.max(next)).await;
+                self.catalog.invalidate(event, Instant::now());
+                Some(Refresh::Catalog)
+            }
+            Signal::WindowPoll => Some(Refresh::Windows),
+            Signal::CatalogPoll => {
+                self.catalog.repair(Instant::now(), create);
+                Some(Refresh::Catalog)
+            }
+        }
+    }
+}
+
+enum Signal {
+    Resume,
+    Retry,
+    Window(Option<shelllist_hyprland::Event>),
+    Catalog(CatalogEvent),
+    WindowPoll,
+    CatalogPoll,
+}
+
+struct EventSources {
+    windows: mpsc::Receiver<shelllist_hyprland::Event>,
+    catalog: mpsc::Receiver<CatalogEvent>,
+    catalog_sender: mpsc::Sender<CatalogEvent>,
+    resumes: watch::Receiver<u64>,
+}
+
+impl EventSources {
+    // Only cancellation-safe waits belong in this select. Once an event wins,
+    // its debounce/reduction completes before timers or other streams compete.
+    async fn next(&mut self, state: &WatchState) -> Signal {
+        tokio::select! {
+            _ = self.resumes.changed(), if self.resumes.has_changed().is_ok() => Signal::Resume,
+            _ = wait_for_watcher_retry(state.catalog.retry_deadline()) => Signal::Retry,
+            event = self.windows.recv(), if state.windows.connection != Connection::Closed => Signal::Window(event),
+            Some(event) = self.catalog.recv() => Signal::Catalog(event),
+            _ = time::sleep_until(state.windows.deadline().into()) => Signal::WindowPoll,
+            _ = time::sleep_until(state.catalog_deadline().into()) => Signal::CatalogPoll,
+        }
+    }
+}
+
 pub(super) async fn track_state(service: std::sync::Weak<ApplicationService>) {
-    let (window_sender, mut window_events) = mpsc::channel(64);
+    let (window_sender, windows) = mpsc::channel(64);
     let events_task = tokio::spawn(shelllist_hyprland::watch_events_detailed(window_sender));
     let _events = shelllist_daemon_tokio::AbortOnDrop(events_task.abort_handle());
-    let (catalog_sender, mut catalog_events) = mpsc::channel(64);
-    let mut catalog_watch = WatchRecovery::new(Instant::now());
-    let mut window_events_open = true;
-    let mut window_connected = false;
+    let (catalog_sender, catalog) = mpsc::channel(64);
     let Some(initial) = service.upgrade() else {
         return;
     };
-    let mut resumes = initial.resume_events.clone();
-    let (_, mut window_available) =
-        tokio::join!(initial.refresh_catalog(), initial.refresh_windows());
+    let mut sources = EventSources {
+        windows,
+        catalog,
+        catalog_sender,
+        resumes: initial.resume_events.clone(),
+    };
+    let mut state = WatchState {
+        catalog: WatchRecovery::new(Instant::now()),
+        windows: WindowState {
+            connection: Connection::Disconnected,
+            available: false,
+            refreshed: Instant::now(),
+        },
+        catalog_refreshed: Instant::now(),
+    };
+    state.windows.available = Refresh::Both
+        .apply(
+            &initial,
+            &mut state.catalog_refreshed,
+            &mut state.windows.refreshed,
+        )
+        .await
+        .unwrap_or(false);
     drop(initial);
-    let mut window_refreshed = Instant::now();
-    let mut catalog_refreshed = Instant::now();
-
-    loop {
-        let Some(service) = service.upgrade() else {
-            return;
-        };
-        let (window_interval, catalog_interval) = reconciliation_intervals(
-            window_connected && window_available,
-            catalog_watch.retry_deadline().is_none(),
-        );
-        let refresh = tokio::select! {
-            _ = resumes.changed(), if resumes.has_changed().is_ok() => {
-                catalog_watch.rebuild(Instant::now());
-                Refresh::Both
-            }
-            _ = wait_for_watcher_retry(catalog_watch.retry_deadline()) => {
-                if catalog_watch.attempt(Instant::now(), || catalog_watch::create(catalog_sender.clone())).is_err() {
-                    continue;
-                }
-                // Close the gap between the last snapshot and installing a watch.
-                Refresh::Catalog
-            }
-            event = window_events.recv(), if window_events_open => {
-                if !observe_window_event(event, &mut window_connected, &mut window_events_open) { continue; }
-                drain_events(&mut window_events, |event| {
-                    observe_window_event(Some(event), &mut window_connected, &mut window_events_open);
-                }).await;
-                Refresh::Windows
-            }
-            Some(mut event) = catalog_events.recv() => {
-                drain_events(&mut catalog_events, |next| event = event.max(next)).await;
-                match event {
-                    CatalogEvent::Failed | CatalogEvent::Rewatch => catalog_watch.rebuild(Instant::now()),
-                    CatalogEvent::Changed => {},
-                }
-                Refresh::Catalog
-            }
-            _ = time::sleep_until(time::Instant::from_std(window_refreshed + window_interval)) => Refresh::Windows,
-            _ = time::sleep_until(time::Instant::from_std(catalog_refreshed + catalog_interval)) => {
-                // Repair before taking the snapshot, avoiding a second healthy-timer scan.
-                if catalog_watch.retry_deadline().is_none() {
-                    catalog_watch.rebuild(Instant::now());
-                    let _ = catalog_watch.attempt(Instant::now(), || catalog_watch::create(catalog_sender.clone()));
-                }
-                Refresh::Catalog
-            }
-        };
-        window_available = refresh
-            .apply(&service, &mut catalog_refreshed, &mut window_refreshed)
-            .await
-            .unwrap_or(window_available);
+    while let Some(service) = service.upgrade() {
+        let signal = sources.next(&state).await;
+        if let Some(refresh) = state.react(signal, &mut sources).await {
+            state.windows.available = refresh
+                .apply(
+                    &service,
+                    &mut state.catalog_refreshed,
+                    &mut state.windows.refreshed,
+                )
+                .await
+                .unwrap_or(state.windows.available);
+        }
     }
 }
 
@@ -168,56 +309,9 @@ async fn drain_events<T>(events: &mut mpsc::Receiver<T>, mut observe: impl FnMut
     }
 }
 
-fn reconciliation_intervals(windows_healthy: bool, catalog_healthy: bool) -> (Duration, Duration) {
-    (
-        if windows_healthy {
-            HEALTHY_WINDOW_INTERVAL
-        } else {
-            WINDOW_RECOVERY_INTERVAL
-        },
-        if catalog_healthy {
-            HEALTHY_CATALOG_INTERVAL
-        } else {
-            CATALOG_RECOVERY_INTERVAL
-        },
-    )
-}
-
-fn observe_window_event(
-    event: Option<shelllist_hyprland::Event>,
-    connected: &mut bool,
-    open: &mut bool,
-) -> bool {
-    match event {
-        None => {
-            *open = false;
-            *connected = false;
-            tracing::warn!("window event stream ended; continuing reconciliation");
-            false
-        }
-        Some(shelllist_hyprland::Event::Connected) => {
-            *connected = true;
-            true
-        }
-        Some(shelllist_hyprland::Event::Disconnected(cause)) => {
-            *connected = false;
-            if let Some(cause) = cause {
-                tracing::warn!(%cause, "window event stream failed; continuing reconciliation");
-            }
-            true
-        }
-        Some(shelllist_hyprland::Event::ConnectFailed(cause)) => {
-            *connected = false;
-            tracing::warn!(%cause, "window event connection failed; continuing reconciliation");
-            true
-        }
-        Some(shelllist_hyprland::Event::Message(line)) => hyprland::window_event_relevant(&line),
-    }
-}
-
 async fn wait_for_watcher_retry(deadline: Option<Instant>) {
     match deadline {
-        Some(deadline) => time::sleep_until(time::Instant::from_std(deadline)).await,
+        Some(deadline) => time::sleep_until(deadline.into()).await,
         None => std::future::pending().await,
     }
 }

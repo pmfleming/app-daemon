@@ -64,3 +64,32 @@ not hiding complexity through test removal.
 
 Validation: 33 library and 15 session tests, strict all-target/all-feature Clippy,
 formatting and diff checks pass. Paired snapshots: `step1.json` → `step2.json`.
+
+## 3. Separate watcher waits, transitions and effects
+
+`EventSources::next` only selects cancellation-safe waits and returns a signal.
+`WatchState::react` then performs the selected debounce/recovery effect, outside
+that select. `WindowState` owns explicit connected/disconnected/closed states,
+snapshot availability and the completed-read timestamp. Catalog invalidation and
+periodic repair use the existing backoff owner; repeated events cannot postpone an
+already scheduled retry. Initial refresh now also uses the common refresh path,
+timestamping each completed read rather than both timestamps after the join.
+
+New tests cover relevant/irrelevant events, connected-but-unavailable snapshots,
+disconnection/reconnection/closure, catalog batch priority, resume during recovery,
+and pending debounce with another stream/resume already ready. Closed window and
+resume streams cannot busy-loop. Existing retry-storm and private-compositor
+reconnection tests remain intact.
+
+Watcher orchestration effort falls 110,504 → 32,619; the new transition handler is
+25,662, and combined production effort falls 4,392,396 → 4,362,592. Maximum production
+effort is now 91,254 (history accumulation). Tradeoffs: production cognitive sum
+549 → 555, cyclomatic 1,248 → 1,264, production-file lines +94, total Rust lines +204.
+This is explicit, testable state rather than moving one giant function unchanged;
+its additional enum dispatch and helpers are not free in static complexity/size.
+Mean locality is unchanged; observed leverage 25.5882 → 25.7353 partly reflects new
+explicit test dependency visibility. Clone sites fall 83 → 82; duplication and
+escape hatches are unchanged. No runtime speedup is claimed for watcher orchestration.
+
+Validation: 35 library and 15 session tests pass, strict all-target/all-feature
+Clippy, formatting and diff checks pass. Snapshots: `step2.json` → `step3.json`.
