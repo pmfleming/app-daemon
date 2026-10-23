@@ -26,6 +26,16 @@ Window identity first uses verified live PID/start-time ownership captured at la
 
 Application queries rank exact names, desktop IDs, prefixes, substrings, metadata, and short acronyms in descending tiers, and can filter the five Shelllist categories: Shell, Browser, Code, Media, and Text. Results expose `match_score`, `match_kind`, `runtime_score`, and the compatible combined `score`, so launchers can explain or customize their ordering.
 
+Query ownership fallback (including procfs reads), ranking and resource projection
+run off the async executor against immutable `Arc` snapshots. Settings/resources
+publication locks are released before worker execution. At most two projection
+jobs may be queued/running, including jobs whose callers have stopped waiting;
+framework admission bounds the asynchronous waiters. Snapshot publication cannot
+mutate an in-flight query, and stale action revisions still reject before effects.
+The service tests gate the worker pool to verify read responsiveness, lock release,
+snapshot isolation and permit retention after caller cancellation. This does not
+change ranking, demand cadence, history persistence or the wire schema.
+
 Per-application category preferences are persisted in `$XDG_CONFIG_HOME/app-daemon/application-settings-v1.json` (or `~/.config/...`) through `applications.settings.update`. Categories map directly to default workspaces: Shell→1, Browser→2, Code→3, Media→4, and Text→5. The selected workspace overrides launch context. Same-application operations are serialized and use a fresh pre-launch snapshot. Launch, non-running activation, and desktop actions share the same workspace policy. The daemon moves/focuses only an unambiguous new window with verified application identity and process provenance, leaving existing instances in place. Provenance includes the launch unit's MainPID and members, stable D-Bus owner, and established singleton processes captured before handoff; observed PID/start-time identities and descendants survive cgroup migration without accepting recycled PIDs. UWSM remains the preferred launcher, not the workspace-policy owner. A move is successful only after a compositor snapshot confirms the requested workspace.
 
 Launch operations with workspace context expose an optional `placement` object: `workspace_id`, `status` (`pending`, `placed`, `unavailable`, or `failed`), and an optional `reason`. It is retained in owner-scoped operation-status reads. `completed` with `placement.status` of `unavailable` or `failed` means the application **did start** but placement did not succeed; consumers must show the warning without replaying the launch. Ambiguous multi-window launches, singleton handoffs without a new window, unavailable baselines and unprovable ownership leave windows untouched. Launch-only shortcuts do not claim placement. Launch failure remains an ordinary failed operation without a launch receipt. See [placement safety and validation](docs/workspace-placement.md).

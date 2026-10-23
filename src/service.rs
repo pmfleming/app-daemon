@@ -10,7 +10,7 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 use tokio::{
-    sync::{Mutex, Notify, RwLock, broadcast, watch},
+    sync::{Mutex, Notify, RwLock, Semaphore, broadcast, watch},
     time,
 };
 
@@ -63,13 +63,16 @@ pub struct StateRevision {
 pub struct ApplicationService {
     catalog: RwLock<Arc<Catalog>>,
     windows: RwLock<Arc<Snapshot>>,
-    resources: RwLock<ResourceSnapshot>,
+    resources: RwLock<Arc<ResourceSnapshot>>,
+    // Bound non-cancellable query projection jobs, including abandoned callers.
+    // The framework's request admission separately bounds asynchronous waiters.
+    query_slots: Arc<Semaphore>,
     ownership: Arc<StdMutex<crate::ownership::Ownership>>,
     ownership_refresh: Arc<Mutex<()>>,
     history: Mutex<HistoryStore>,
     // When both are needed, acquire settings before resources. Tokio's fair
     // RwLocks can deadlock even readers when writers queue between acquisitions.
-    settings: RwLock<SettingsStore>,
+    settings: RwLock<Arc<SettingsStore>>,
     settings_updates: Mutex<()>,
     state_changes: broadcast::Sender<StateRevision>,
     operation_changes: broadcast::Sender<OperationResult>,
@@ -99,11 +102,12 @@ impl ApplicationService {
         let service = Arc::new(Self {
             catalog: RwLock::new(Arc::new(Catalog::default())),
             windows: RwLock::new(Arc::new(Snapshot::default())),
-            resources: RwLock::new(ResourceSnapshot::default()),
+            resources: RwLock::new(Arc::new(ResourceSnapshot::default())),
+            query_slots: Arc::new(Semaphore::new(2)),
             ownership: Arc::default(),
             ownership_refresh: Arc::default(),
             history: Mutex::new(HistoryStore::load_default()),
-            settings: RwLock::new(SettingsStore::load_default()),
+            settings: RwLock::new(Arc::new(SettingsStore::load_default())),
             settings_updates: Mutex::new(()),
             state_changes,
             operation_changes,
@@ -278,23 +282,30 @@ impl ApplicationService {
         }
     }
 
-    pub async fn query(&self, params: QueryParams) -> ApplicationPage {
+    pub async fn query(&self, params: QueryParams) -> anyhow::Result<ApplicationPage> {
         self.mark_resource_demand();
+        let slot = Arc::clone(&self.query_slots).acquire_owned().await?;
         let windows = Arc::clone(&*self.windows.read().await);
         let catalog = Arc::clone(&*self.catalog.read().await);
         let ownership = self.ownership_snapshot();
-        let grouped = group_windows(&catalog, &windows, &ownership);
-        let settings = self.settings.read().await;
-        let resources = self.resources.read().await;
-        page(
-            &catalog,
-            &windows,
-            &resources,
-            &settings,
-            &params,
-            grouped,
-            ownership.revision(),
-        )
+        let settings = Arc::clone(&*self.settings.read().await);
+        let resources = Arc::clone(&*self.resources.read().await);
+        // Procfs ownership fallback, ranking and resource projection can be costly.
+        // Immutable snapshots release all state locks before entering the worker.
+        Ok(tokio::task::spawn_blocking(move || {
+            let _slot = slot;
+            let grouped = group_windows(&catalog, &windows, &ownership);
+            page(
+                &catalog,
+                &windows,
+                &resources,
+                &settings,
+                &params,
+                grouped,
+                ownership.revision(),
+            )
+        })
+        .await?)
     }
 
     pub async fn update_settings(
@@ -316,7 +327,7 @@ impl ApplicationService {
             Ok::<_, std::io::Error>(next)
         })
         .await??;
-        *self.settings.write().await = next;
+        *self.settings.write().await = Arc::new(next);
         self.publish_state().await;
         Ok(settings)
     }
@@ -633,7 +644,7 @@ async fn sample_resources(service: &ApplicationService, sampler: &mut ResourceSa
     drop(history);
     let mut resources = service.resources.write().await;
     let changed = resources.runtime_revision() != snapshot.runtime_revision();
-    *resources = snapshot;
+    *resources = Arc::new(snapshot);
     drop(resources);
     if changed {
         service.publish_state().await;

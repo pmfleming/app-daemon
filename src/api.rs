@@ -61,7 +61,10 @@ impl ApiService {
         params: QueryParams,
         _owner: Option<String>,
     ) -> Result<ApplicationPage, ApiError> {
-        Ok(self.applications.query(params).await)
+        self.applications
+            .query(params)
+            .await
+            .map_err(|error| (ErrorCode::DaemonUnavailable, error.to_string()))
     }
 
     pub(crate) async fn revision(
@@ -94,10 +97,10 @@ impl ApiService {
     pub(crate) async fn refresh(
         &self,
         params: QueryParams,
-        _owner: Option<String>,
+        owner: Option<String>,
     ) -> Result<ApplicationPage, ApiError> {
         self.applications.refresh().await;
-        Ok(self.applications.query(params).await)
+        self.query(params, owner).await
     }
 
     pub(crate) async fn update_settings(

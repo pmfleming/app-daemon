@@ -21,7 +21,99 @@ async fn query_waiting_for_settings_does_not_block_resource_publication() {
     drop(settings_update);
     tokio::time::timeout(std::time::Duration::from_secs(1), query)
         .await
-        .expect("query should finish after the settings update");
+        .expect("query should finish after the settings update")
+        .expect("query projection should succeed");
+}
+
+async fn gated_blocking_worker() -> (std::sync::mpsc::Sender<()>, tokio::task::JoinHandle<()>) {
+    let (entered, started) = tokio::sync::oneshot::channel();
+    let (release, wait) = std::sync::mpsc::channel();
+    let job = tokio::task::spawn_blocking(move || {
+        let _ = entered.send(());
+        let _ = wait.recv_timeout(std::time::Duration::from_secs(3));
+    });
+    started.await.unwrap();
+    (release, job)
+}
+
+#[test]
+fn query_uses_immutable_snapshots_without_blocking_state_publication() {
+    use futures::poll;
+    use std::sync::Arc;
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .max_blocking_threads(1)
+        .build()
+        .unwrap()
+        .block_on(async {
+            let service = ApplicationService::build(false);
+            let (release, gate) = gated_blocking_worker().await;
+            let mut query = Box::pin(service.query(serde_json::from_str("{}").unwrap()));
+            assert!(
+                poll!(query.as_mut()).is_pending(),
+                "projection must yield to the blocking worker"
+            );
+            assert!(
+                service.resources.try_write().is_ok(),
+                "queued projection holds no resources lock"
+            );
+            assert!(
+                service.settings.try_write().is_ok(),
+                "queued projection holds no settings lock"
+            );
+            *service.windows.write().await = Arc::new(crate::hyprland::Snapshot {
+                available: true,
+                ..Default::default()
+            });
+            // A control/read operation can still observe state while the worker is held.
+            service.revision().await;
+            release.send(()).unwrap();
+            gate.await.unwrap();
+            let page = query.await.unwrap();
+            assert!(
+                !page.hyprland_available,
+                "publication cannot mutate the query's captured snapshot"
+            );
+            assert!(
+                service
+                    .query(serde_json::from_str("{}").unwrap())
+                    .await
+                    .unwrap()
+                    .hyprland_available
+            );
+        });
+}
+
+#[test]
+fn abandoned_queries_keep_blocking_admission_until_the_jobs_finish() {
+    use futures::poll;
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .max_blocking_threads(1)
+        .build()
+        .unwrap()
+        .block_on(async {
+            let service = ApplicationService::build(false);
+            let (release, gate) = gated_blocking_worker().await;
+            let mut first = Box::pin(service.query(serde_json::from_str("{}").unwrap()));
+            let mut second = Box::pin(service.query(serde_json::from_str("{}").unwrap()));
+            assert!(poll!(first.as_mut()).is_pending());
+            assert!(poll!(second.as_mut()).is_pending());
+            drop(first);
+            drop(second);
+            assert_eq!(
+                service.query_slots.available_permits(),
+                0,
+                "dropping read waiters must not admit unbounded detached blocking work"
+            );
+            let mut next = Box::pin(service.query(serde_json::from_str("{}").unwrap()));
+            assert!(poll!(next.as_mut()).is_pending());
+            assert!(service.resources.try_write().is_ok());
+            release.send(()).unwrap();
+            gate.await.unwrap();
+            next.await.unwrap();
+            assert_eq!(service.query_slots.available_permits(), 2);
+        });
 }
 
 #[test]
