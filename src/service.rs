@@ -10,10 +10,9 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 use tokio::{
-    sync::{Mutex, Notify, RwLock, broadcast, oneshot, watch},
+    sync::{Mutex, Notify, RwLock, broadcast, watch},
     time,
 };
-use uuid::Uuid;
 
 use crate::{
     catalog::Catalog,
@@ -37,7 +36,6 @@ pub(crate) mod query;
 mod watcher;
 use operations::OperationRegistry;
 
-use action::operation_result;
 pub use action::{ApplicationAction, ExecuteParams};
 use identity::{group_windows, resolve_target};
 pub use query::QueryParams;
@@ -434,6 +432,59 @@ impl ApplicationService {
         }
     }
 
+    // Snapshot acquisition stays with the service's locks, not in action code.
+    async fn prepare_action(
+        &self,
+        params: ExecuteParams,
+    ) -> anyhow::Result<action::PreparedAction> {
+        let windows = Arc::clone(&*self.windows.read().await);
+        let catalog = Arc::clone(&*self.catalog.read().await);
+        // Preserve settings-before-resources lock order during revision validation.
+        let settings = self.settings.read().await;
+        self.validate_action_revision(&params, &catalog, &windows, &settings)
+            .await?;
+        let preferred_workspace = settings
+            .for_application(&params.target_id)
+            .and_then(|value| value.workspace_id.as_deref());
+        Ok(action::PreparedAction::new(
+            catalog,
+            params,
+            preferred_workspace,
+        ))
+    }
+
+    async fn validate_action_revision(
+        &self,
+        params: &ExecuteParams,
+        catalog: &Catalog,
+        windows: &Snapshot,
+        settings: &SettingsStore,
+    ) -> anyhow::Result<()> {
+        let Some(expected) = params.expected_revision else {
+            return Ok(());
+        };
+        let ownership = self.ownership_snapshot();
+        let grouped = group_windows(catalog, windows, &ownership);
+        let target = target_revision(
+            &params.target_id,
+            catalog.by_id(&params.target_id),
+            grouped.get(&params.target_id).map_or(&[], Vec::as_slice),
+            settings.for_application(&params.target_id),
+            windows.available,
+        );
+        // Legacy page-wide tokens remain valid; row tokens ignore unrelated activity.
+        let global = combined_revision(
+            catalog,
+            windows,
+            settings.revision,
+            self.resources.read().await.runtime_revision() ^ ownership.revision(),
+        );
+        if expected != target && expected != global {
+            return Err(StaleState.into());
+        }
+        Ok(())
+    }
+
     fn launch_lock(&self, target_id: &str) -> Arc<Mutex<()>> {
         let mut locks = self
             .launch_locks
@@ -446,109 +497,6 @@ impl ApplicationService {
         let lock = Arc::new(Mutex::new(()));
         locks.insert(target_id.to_owned(), Arc::downgrade(&lock));
         lock
-    }
-
-    pub async fn execute_owned(
-        self: &Arc<Self>,
-        params: ExecuteParams,
-        owner: Option<String>,
-    ) -> anyhow::Result<OperationResult> {
-        let windows = Arc::clone(&*self.windows.read().await);
-        let catalog = Arc::clone(&*self.catalog.read().await);
-        let settings = self.settings.read().await;
-        if let Some(expected) = params.expected_revision {
-            let ownership = self.ownership_snapshot();
-            let grouped = group_windows(&catalog, &windows, &ownership);
-            let target = target_revision(
-                &params.target_id,
-                catalog.by_id(&params.target_id),
-                grouped.get(&params.target_id).map_or(&[], Vec::as_slice),
-                settings.for_application(&params.target_id),
-                windows.available,
-            );
-            // Page-wide tokens remain supported for existing API consumers;
-            // launcher rows use target tokens so unrelated activity cannot veto an action.
-            let global = combined_revision(
-                &catalog,
-                &windows,
-                settings.revision,
-                self.resources.read().await.runtime_revision() ^ ownership.revision(),
-            );
-            if expected != target && expected != global {
-                return Err(StaleState.into());
-            }
-        }
-
-        let mut params = params;
-        if matches!(
-            params.action,
-            ApplicationAction::Activate
-                | ApplicationAction::Launch
-                | ApplicationAction::DesktopAction
-        ) && let Some(workspace) = settings
-            .for_application(&params.target_id)
-            .and_then(|value| value.workspace_id.clone())
-        {
-            params.workspace_id = Some(workspace);
-        }
-        drop(settings);
-
-        let accepted = operation_result(
-            format!("operation-{}", Uuid::new_v4()),
-            &params,
-            "accepted",
-            "Operation accepted".into(),
-            None,
-        );
-        let service = Arc::clone(self);
-        let (start_sender, start_receiver) = oneshot::channel();
-        let mut operations = self.operations.lock().await;
-        anyhow::ensure!(
-            !self.stopping.load(Ordering::Acquire),
-            "application service is shutting down"
-        );
-        operations.admit(owner.as_deref())?;
-        let running = accepted.clone();
-        let task = tokio::spawn(async move {
-            let _ = start_receiver.await;
-            service.run_operation(&catalog, &params, running).await;
-        });
-        operations.insert(owner, task.abort_handle(), accepted.clone())?;
-        let _ = start_sender.send(());
-        Ok(accepted)
-    }
-
-    async fn publish_running(&self, result: OperationResult) -> bool {
-        let mut operations = self.operations.lock().await;
-        if !operations.running(result.clone()) {
-            return false;
-        }
-        let _ = self.operation_changes.send(result);
-        true
-    }
-
-    pub async fn cancel_operation_owned(
-        &self,
-        operation_id: &str,
-        owner: Option<&str>,
-    ) -> Option<OperationResult> {
-        let cancelled = self.operations.lock().await.cancel(operation_id, owner)?;
-        let _ = self.operation_changes.send(cancelled.clone());
-        Some(cancelled)
-    }
-
-    pub async fn operation_status_owned(
-        &self,
-        operation_id: &str,
-        owner: Option<&str>,
-    ) -> Option<OperationResult> {
-        self.operations.lock().await.status(operation_id, owner)
-    }
-
-    pub async fn cancel_all_operations(&self) {
-        for cancelled in self.operations.lock().await.cancel_all() {
-            let _ = self.operation_changes.send(cancelled);
-        }
     }
 }
 

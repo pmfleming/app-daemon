@@ -1,4 +1,7 @@
-use std::time::{Duration, Instant};
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use anyhow::Context;
 
@@ -44,6 +47,54 @@ pub struct ExecuteParams {
     pub workspace_id: Option<String>,
 }
 
+// Preparation borrows a consistent settings view before admission. No launcher
+// or compositor effects run until this value has been registered as an operation.
+pub(super) struct PreparedAction {
+    catalog: Arc<Catalog>,
+    params: ExecuteParams,
+}
+
+impl PreparedAction {
+    pub(super) fn new(
+        catalog: Arc<Catalog>,
+        mut params: ExecuteParams,
+        preferred_workspace: Option<&str>,
+    ) -> Self {
+        if matches!(
+            params.action,
+            ApplicationAction::Activate
+                | ApplicationAction::Launch
+                | ApplicationAction::DesktopAction
+        ) && let Some(workspace) = preferred_workspace
+        {
+            params.workspace_id = Some(workspace.into());
+        }
+        Self { catalog, params }
+    }
+
+    pub(super) fn target_id(&self) -> &str {
+        &self.params.target_id
+    }
+
+    pub(super) fn accepted(&self) -> OperationResult {
+        operation_result(
+            format!("operation-{}", uuid::Uuid::new_v4()),
+            &self.params,
+            "accepted",
+            "Operation accepted".into(),
+            None,
+        )
+    }
+
+    pub(super) async fn execute(
+        &self,
+        service: &super::ApplicationService,
+        id: &str,
+    ) -> anyhow::Result<ActionOutcome> {
+        execute_action(&self.catalog, &self.params, service, id).await
+    }
+}
+
 impl ApplicationAction {
     const fn as_str(self) -> &'static str {
         match self {
@@ -59,10 +110,10 @@ impl ApplicationAction {
 }
 
 pub(super) struct ActionOutcome {
-    pub(super) message: String,
-    pub(super) launch: Option<LaunchReceipt>,
-    pub(super) close: Option<crate::model::CloseObservation>,
-    pub(super) status: &'static str,
+    message: String,
+    launch: Option<LaunchReceipt>,
+    close: Option<crate::model::CloseObservation>,
+    status: &'static str,
 }
 
 pub(super) fn operation_result(
@@ -95,6 +146,17 @@ pub(super) fn operation_result(
 }
 
 impl ActionOutcome {
+    pub(super) fn apply(self, result: &mut OperationResult) {
+        result.status = self.status.into();
+        result.message = self.message;
+        result.close = self.close;
+        if let Some(receipt) = self.launch {
+            result.launch_backend = Some(receipt.backend);
+            result.launch_scope = Some(receipt.scope);
+            result.placement = receipt.placement;
+        }
+    }
+
     fn new(catalog: &Catalog, target_id: &str, verb: &str) -> Self {
         Self {
             message: format!("{verb} {}", display_name(catalog, target_id)),
@@ -137,40 +199,6 @@ impl super::ApplicationService {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .remember(target, receipt.ownership_roots());
         self.update_ownership(false, refresh).await;
-    }
-
-    pub(super) async fn run_operation(
-        &self,
-        catalog: &Catalog,
-        params: &ExecuteParams,
-        mut result: OperationResult,
-    ) {
-        result.status = "running".into();
-        result.message = "Operation running".into();
-        if !self.publish_running(result.clone()).await {
-            return;
-        }
-        let lock = self.launch_lock(&params.target_id);
-        let _launch = lock.lock().await;
-        match execute_action(catalog, params, self, &result.id).await {
-            Ok(outcome) => {
-                result.status = outcome.status.into();
-                result.message = outcome.message;
-                result.close = outcome.close;
-                if let Some(receipt) = outcome.launch {
-                    result.launch_backend = Some(receipt.backend);
-                    result.launch_scope = Some(receipt.scope);
-                    result.placement = receipt.placement;
-                }
-            }
-            Err(error) => {
-                result.status = "failed".into();
-                result.message = error.to_string();
-            }
-        }
-        if self.operations.lock().await.finish(result.clone()) {
-            let _ = self.operation_changes.send(result);
-        }
     }
 }
 

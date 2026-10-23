@@ -120,3 +120,95 @@ No allocation or latency improvement is claimed for this step.
 
 Validation: 36 library and 15 session tests pass, strict all-target/all-feature
 Clippy, formatting and diff checks pass. Snapshots: `step3.json` → `step4.json`.
+
+## 5. Separate prepared actions from registered execution
+
+The service keeps snapshot acquisition and revision validation beside its locks,
+preserving settings-before-resources ordering. `PreparedAction` owns the retained
+catalog and effective parameters; launch-only workspace preference policy and
+outcome projection stay in `action.rs`. `operations.rs` owns public admission,
+execution status publication, completion and owned cancellation.
+
+Admission uses the live framework's `OwnedOperations::insert_with`: duplicate IDs
+and quotas are checked before a task is created, under the existing mutex. The
+oneshot start gate opens only after insertion, and a failed gate cannot execute
+work. This removes duplicate admission/insert wrappers and the abort-handle clone
+previously needed to clean up failed insertion. The stopping check remains inside
+the operation lock; per-application launch serialization still spans execution
+and terminal publication. Late running/completion updates cannot revive a claimed
+cancelled operation. Progress and cancellation receipt semantics are unchanged.
+
+New regressions cover duplicate rejection before callback start, cancellation of
+queued work, owner visibility, and shutdown while a prepared request waits for
+admission and still owns its request permit. Existing quota, placement, stale-token,
+private-bus ownership and cancellation tests remain intact.
+
+Admission orchestration effort falls 80,318 → 10,747, with preparation, validation,
+registry creation and execution measured separately. Total production effort falls
+4,324,098 → 4,299,152; cognitive sum 555 → 554; clone sites 82 → 80 (one is the
+workspace copy expressed as `&str` conversion, not an eliminated response allocation).
+Tradeoffs: cyclomatic sum 1,266 → 1,273; production-file lines +114 (this scope includes
+inline registry tests), total Rust lines +150. Locality is unchanged from step 4;
+keeping snapshot acquisition in the service avoids adding query/settings dependencies
+to the action module. Observed leverage 25.8824 → 26.1765 includes explicit dependency
+visibility, not a claim of equivalent runtime reuse. Duplicate and escape-hatch counts
+are unchanged.
+
+Validation: 38 library and 15 session tests pass, five ignored registrations unchanged;
+strict all-target/all-feature Clippy, formatting, rustdoc, three quality-gate Python
+tests and diff checks pass. RQLens `verify` successfully publishes the same fingerprint
+as the six final producers: nine checks pass, zero error failures, five existing
+project-practice warnings and 14 skipped checks. Its all-target test invocation also
+runs the synthetic workload harness (`APP_DAEMON_BENCH_ITERS=20`); the release allocation
+comparison below is a separate 100-iteration run. No new coverage, mutation test or
+real user-systemd lifetime run is claimed.
+
+## Overall result and remaining gates
+
+| Metric | Start | After five steps |
+| --- | ---: | ---: |
+| Production cognitive sum / max | 549 / 8 | 554 / 8 |
+| Production cyclomatic sum / max | 1,242 / 15 | 1,273 / 15 |
+| Production function effort sum | 4,409,904 | 4,299,152 |
+| Maximum production function effort | 110,504 | 72,594 |
+| Mean locality / observed leverage | 98.4669 / 25.5882 | 98.4559 / 26.1765 |
+| Production-file clone sites | 91 | 80 |
+| Production-file `to_owned` sites | 23 | 22 |
+| Duplicated lines | 638 | 652 |
+| Escape-hatch records | 0 | 0 |
+| Production reliability findings (includes benchmark advisories) | 8 | 8 |
+| Production-file physical lines | 10,147 | 10,445 |
+| All physical Rust lines | 14,596 | 15,181 |
+| All-function effort sum | 8,859,060 | 9,142,720 |
+
+The priorities deliver substantial allocation reductions and smaller effort hotspots,
+not universal static-metric improvements. Added state types, borrowed views and
+regressions increase size and decision totals; no tests or safety checks were deleted
+to offset that growth. The strict no-regression gate still fails; the tracked baseline
+and policy remain untouched. The only per-module locality decline across the five
+steps is model 92.5 → 91.75 from explicit test dependency visibility in step 1.
+
+Final release allocation counts reproduce step 2: empty query 54,704 (−46.4% versus
+start), search 8,110 (−58.4%), warm sampling 5,317 (−41.5%) and blocked-worker sampling
+5,252. Identity and procfs-parser workloads remain allocation-free. Counts are
+fixture-specific; no statistical latency improvement is asserted.
+
+Snapshot fingerprints, in order: `0f14581fcb338211`, `79934881af63c361`,
+`7a20807c22ed5e88`, `16ba808c6da3b0a7`, `1a083892d8f69bee`, `2df4231bb64da370`.
+Each snapshot is internally consistent; commits change the Git fingerprint, so these
+are evidence for the measured pre-commit source snapshots, not freshness claims for
+subsequent HEADs. Producer artifacts for each completed step are saved in
+`target/quality-five/stepN/`; compact snapshots and logs are adjacent.
+
+```sh
+cargo fmt --all -- --check
+cargo clippy --locked --all-targets --all-features -- -D warnings
+cargo test --locked --all-features
+cargo doc --locked --all-features --no-deps
+python3 -m unittest discover -s scripts -p test_quality_regression.py
+# Review artifact only; never silently accept the tracked regression baseline.
+python3 scripts/quality_regression.py --baseline target/quality-five/reproduced.json \
+  --accept-reason 'Review snapshot only; tracked baseline unchanged'
+APP_DAEMON_BENCH_ITERS=20 ../rust-quality-lens/target/debug/rqlens verify --config quality/regression.toml
+APP_DAEMON_BENCH_ITERS=100 cargo bench --locked --features benchmarks --bench workloads
+```

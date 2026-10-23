@@ -1,8 +1,9 @@
 use super::{
-    ApplicationService, Arc, Duration, HistoryStore, Ordering, now_milliseconds, oneshot,
-    persist_snapshot, time,
+    ApplicationService, Arc, Duration, HistoryStore, Ordering, now_milliseconds, persist_snapshot,
+    time,
 };
 use crate::model::ResourceUsage;
+use tokio::sync::oneshot;
 
 #[tokio::test]
 async fn shutdown_drains_sampling_and_serializes_final_save_after_older_writers()
@@ -70,4 +71,39 @@ async fn shutdown_drains_sampling_and_serializes_final_save_after_older_writers(
         "daemon-unavailable"
     );
     Ok(())
+}
+
+#[tokio::test]
+async fn shutdown_rejects_prepared_actions_waiting_for_admission() {
+    use futures::{pin_mut, poll};
+    let service = ApplicationService::build(false);
+    *service.history.lock().await = HistoryStore::load(None);
+    let request = service.request_permit().await.unwrap();
+    let mut events = service.subscribe_operations();
+    let registry = service.operations.lock().await;
+    let execute = service.execute_owned(super::tests::close_missing(None), None);
+    let shutdown = service.shutdown();
+    pin_mut!(execute, shutdown);
+    assert!(poll!(&mut execute).is_pending());
+    assert!(poll!(&mut shutdown).is_pending());
+    assert!(service.stopping.load(Ordering::Acquire));
+    drop(registry);
+    assert!(
+        execute
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("shutting down")
+    );
+    assert!(
+        poll!(&mut shutdown).is_pending(),
+        "an admitted request still owns its permit"
+    );
+    drop(request);
+    shutdown.await;
+    assert!(service.operations.lock().await.cancel_all().is_empty());
+    assert!(matches!(
+        events.try_recv(),
+        Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+    ));
 }
