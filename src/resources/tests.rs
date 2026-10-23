@@ -10,6 +10,36 @@ use std::{
 };
 
 #[test]
+fn acquisition_defers_projection_without_changing_public_defaults() {
+    let aggregate = super::ProcessAggregation::default();
+    assert!(aggregate.usage.metric_availability.is_empty());
+    let default = crate::model::ResourceUsage::default();
+    assert_eq!(default.metric_availability.0.len(), 48);
+    assert!(default.metric_availability.0.values().all(|value| !value));
+    assert_eq!(aggregate.usage.with_availability(), default);
+    let mut json = serde_json::to_value(&default).unwrap();
+    json.as_object_mut().unwrap().remove("metric_availability");
+    assert_eq!(
+        serde_json::from_value::<crate::model::ResourceUsage>(json).unwrap(),
+        default
+    );
+    assert_eq!(
+        ResourceSnapshot::default()
+            .usage_for_target("missing", [])
+            .metric_availability,
+        default.metric_availability
+    );
+    #[cfg(feature = "benchmarks")]
+    assert_eq!(
+        allocation_counter::measure(|| {
+            std::hint::black_box(super::ProcessAggregation::default());
+        })
+        .count_total,
+        0
+    );
+}
+
+#[test]
 fn totals_resources_without_double_counting_roots_in_either_attribution_mode() {
     let file = |inode, bytes| {
         (

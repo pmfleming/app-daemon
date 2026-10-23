@@ -1,5 +1,8 @@
 # RustQualityLens baseline
 
+The [five-priority implementation](five-priority-implementation.md) records the
+next five independently committed improvements, verification and metric tradeoffs.
+
 The [discovery/query/retention review](discovery-query-retention-review.md) records
 fresh paired metrics, allocation evidence, retained tests and module-level tradeoffs.
 

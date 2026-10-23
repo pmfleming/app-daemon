@@ -153,6 +153,19 @@ pub struct ResourceUsage {
 }
 
 impl ResourceUsage {
+    /// Acquisition starts without a response projection. Unlike public Default,
+    /// this constructor does not allocate the unavailable-metric map.
+    pub(crate) fn unprojected() -> Self {
+        Self {
+            metric_availability: crate::projection::MetricAvailability::empty(),
+            compute: ComputeUsage::default(),
+            storage: StorageUsage::default(),
+            network: NetworkUsage::default(),
+            energy: EnergyUsage::default(),
+            measurement: ResourceMeasurement::default(),
+        }
+    }
+
     /// Project only after acquisition metadata and target-specific storage are final.
     pub(crate) fn with_availability(mut self) -> Self {
         self.metric_availability = ResourceAvailability::for_usage(&self).project();

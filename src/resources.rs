@@ -89,7 +89,6 @@ struct ResourceAttribution<'a> {
     cgroups_cover_process_trees: bool,
 }
 
-#[derive(Default)]
 struct ProcessAggregation {
     usage: ResourceUsage,
     open_files: HashMap<DiskFileId, DiskFile>,
@@ -102,6 +101,24 @@ struct ProcessAggregation {
     network_processes: u64,
     storage_processes: u64,
     file_processes: u64,
+}
+
+impl Default for ProcessAggregation {
+    fn default() -> Self {
+        Self {
+            usage: ResourceUsage::unprojected(),
+            open_files: HashMap::new(),
+            referenced_files: HashMap::new(),
+            network_sockets: HashSet::new(),
+            covered_processes: 0,
+            memory_processes: 0,
+            pss_processes: 0,
+            gpu_processes: 0,
+            network_processes: 0,
+            storage_processes: 0,
+            file_processes: 0,
+        }
+    }
 }
 
 impl ResourceSnapshot {
