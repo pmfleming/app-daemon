@@ -167,7 +167,7 @@ fn instances(
 // Ranking needs metadata and focus order, not process aggregation or window payloads.
 struct Candidate<'a> {
     identity: ApplicationIdentity,
-    desktop_actions: Vec<crate::model::DesktopActionSummary>,
+    desktop_actions: &'a [crate::model::DesktopActionSummary],
     revision: u64,
     clients: Vec<&'a Client>,
     focused: bool,
@@ -186,7 +186,7 @@ impl Candidate<'_> {
         let instances = instances(&self.identity.id, &self.clients, resources);
         ApplicationSummary {
             identity: self.identity,
-            desktop_actions: self.desktop_actions,
+            desktop_actions: self.desktop_actions.to_vec(),
             revision: self.revision,
             runtime: ApplicationRuntime {
                 running: !instances.is_empty() || usage.compute.process_count > 0,
@@ -203,12 +203,12 @@ impl Candidate<'_> {
     }
 }
 
-fn summary(
+fn summary<'a>(
     identity: ApplicationIdentity,
-    desktop_actions: Vec<crate::model::DesktopActionSummary>,
-    clients: Vec<&Client>,
+    desktop_actions: &'a [crate::model::DesktopActionSummary],
+    clients: Vec<&'a Client>,
     revision: u64,
-) -> Candidate<'_> {
+) -> Candidate<'a> {
     let focused = clients.iter().any(|window| window.focus_rank == 0);
     let best_rank = clients
         .iter()
@@ -230,7 +230,7 @@ fn summary(
 }
 
 fn summary_for_entry<'a>(
-    entry: &CatalogEntry,
+    entry: &'a CatalogEntry,
     clients: Vec<&'a Client>,
     settings: &SettingsStore,
     available: bool,
@@ -253,7 +253,7 @@ fn summary_for_entry<'a>(
         default_workspace_id: preferences.and_then(|value| value.workspace_id.clone()),
         startup_class: entry.startup_class.clone(),
     };
-    summary(identity, entry.actions.clone(), clients, revision)
+    summary(identity, &entry.actions, clients, revision)
 }
 
 fn summary_for_unmatched<'a>(
@@ -294,7 +294,7 @@ fn summary_for_unmatched<'a>(
         default_workspace_id: None,
         startup_class: String::new(),
     };
-    summary(identity, Vec::new(), clients, revision)
+    summary(identity, &[], clients, revision)
 }
 
 pub(super) fn running_score(focused: bool, focus_rank: i64) -> i64 {
@@ -350,9 +350,7 @@ fn search_match(application: &Candidate<'_>, query: &str) -> Option<SearchMatch>
     {
         return Some(matched);
     }
-    let values = search_values(application);
-    let searchable = values.join(" ").to_lowercase();
-    let acronym = search_acronym(&values);
+    let (searchable, acronym) = search_corpus(application);
     let tokens = query.split_whitespace();
     if !tokens
         .clone()
@@ -407,32 +405,35 @@ fn direct_match(name: &str, id: &str, id_stem: &str, query: &str) -> Option<Sear
     })
 }
 
-fn search_values<'a>(application: &'a Candidate<'_>) -> Vec<&'a str> {
-    [
-        application.identity.name.as_str(),
-        application.identity.generic_name.as_str(),
-        application.identity.comment.as_str(),
-        application.identity.id.as_str(),
-        application.identity.startup_class.as_str(),
-    ]
-    .into_iter()
-    .chain(application.identity.keywords.iter().map(String::as_str))
-    .chain(application.identity.categories.iter().map(String::as_str))
-    .chain(
-        application
-            .clients
-            .iter()
-            .flat_map(|window| [window.title.as_str(), window.class.as_str()]),
-    )
-    .collect()
-}
-
-fn search_acronym(values: &[&str]) -> String {
+fn search_corpus(application: &Candidate<'_>) -> (String, String) {
+    let values = || {
+        [
+            application.identity.name.as_str(),
+            application.identity.generic_name.as_str(),
+            application.identity.comment.as_str(),
+            application.identity.id.as_str(),
+            application.identity.startup_class.as_str(),
+        ]
+        .into_iter()
+        .chain(application.identity.keywords.iter().map(String::as_str))
+        .chain(application.identity.categories.iter().map(String::as_str))
+        .chain(
+            application
+                .clients
+                .iter()
+                .flat_map(|window| [window.title.as_str(), window.class.as_str()]),
+        )
+    };
+    let mut searchable = String::with_capacity(values().map(|value| value.len() + 1).sum());
     let mut acronym = String::new();
-    for value in values {
+    for value in values() {
+        // A trailing separator cannot match the caller's trimmed query; keeping
+        // it avoids a separate first-field branch and preserves match offsets.
+        searchable.push_str(value);
+        searchable.push(' ');
         append_initials(&mut acronym, value);
     }
-    acronym
+    (searchable.to_lowercase(), acronym)
 }
 
 fn append_initials(acronym: &mut String, value: &str) {

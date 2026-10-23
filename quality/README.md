@@ -1,5 +1,8 @@
 # RustQualityLens baseline
 
+The [discovery/query/retention review](discovery-query-retention-review.md) records
+fresh paired metrics, allocation evidence, retained tests and module-level tradeoffs.
+
 The [five follow-up improvements](five-followups.md) record the next independently
 validated commits, allocation evidence, and explicit static-metric tradeoffs.
 

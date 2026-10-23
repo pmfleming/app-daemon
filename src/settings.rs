@@ -1,6 +1,5 @@
 use std::{
-    collections::{BTreeMap, hash_map::DefaultHasher},
-    hash::{Hash, Hasher},
+    collections::BTreeMap,
     path::{Path, PathBuf},
 };
 
@@ -64,7 +63,7 @@ impl SettingsStore {
             settings.workspace_id = workspace_for_category(&settings.category).map(str::to_owned);
             settings.workspace_id.is_some()
         });
-        let revision = settings_revision(&applications);
+        let revision = crate::metrics::revision(&applications);
         Self {
             path,
             applications,
@@ -90,7 +89,7 @@ impl SettingsStore {
         };
         let mut next = self.clone();
         next.applications.insert(target_id, settings.clone());
-        next.revision = settings_revision(&next.applications);
+        next.revision = crate::metrics::revision(&next.applications);
         Ok((next, settings))
     }
 
@@ -130,14 +129,4 @@ pub fn inferred_category(categories: &[String]) -> &'static str {
             })
         })
         .map_or("shell", |(category, _)| category)
-}
-
-fn settings_revision(applications: &BTreeMap<String, ApplicationSettings>) -> u64 {
-    let mut hasher = DefaultHasher::new();
-    for (id, settings) in applications {
-        id.hash(&mut hasher);
-        settings.category.hash(&mut hasher);
-        settings.workspace_id.hash(&mut hasher);
-    }
-    hasher.finish()
 }

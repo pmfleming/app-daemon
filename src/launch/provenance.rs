@@ -23,7 +23,7 @@ impl Provenance {
         window_pids: impl IntoIterator<Item = u32>,
     ) -> Self {
         let processes = read_processes(parse_process);
-        let mut roots = window_pids.into_iter().collect::<Vec<_>>();
+        let mut roots = window_pids.into_iter().collect::<HashSet<_>>();
         roots.extend(processes.keys().copied().filter(|pid| {
             process_cgroup(*pid)
                 .is_some_and(|path| catalog.target_for_cgroup(&path) == Some(target))
@@ -74,11 +74,11 @@ impl Provenance {
                         .is_some_and(|path| path.split('/').any(|part| part == unit))
                 })
             })
-            .collect::<Vec<_>>();
+            .collect();
         self.observe_processes(&processes, &roots);
     }
 
-    fn observe_processes(&mut self, processes: &HashMap<u32, Process>, roots: &[u32]) {
+    fn observe_processes(&mut self, processes: &HashMap<u32, Process>, roots: &HashSet<u32>) {
         self.identities.retain(|pid, start| {
             processes
                 .get(pid)
@@ -86,12 +86,11 @@ impl Provenance {
         });
         self.anchors
             .retain(|pid, start| self.identities.get(pid) == Some(start));
-        let root_set = roots.iter().copied().collect::<HashSet<_>>();
         for &pid in roots {
             if let Some(process) = processes.get(&pid)
                 && !self.identities.contains_key(&pid)
                 && !self.identities.contains_key(&process.parent)
-                && !root_set.contains(&process.parent)
+                && !roots.contains(&process.parent)
             {
                 self.anchors.insert(pid, process.start);
             }

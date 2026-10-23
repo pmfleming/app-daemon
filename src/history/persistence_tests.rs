@@ -1,4 +1,9 @@
-use super::*;
+use super::{
+    BUCKET_MILLISECONDS, ENERGY_RETENTION_MILLISECONDS, EnergyHistoryPoint, HistoryFile,
+    HistoryStore, RETENTION_MILLISECONDS, now_milliseconds, persist_snapshot, summary,
+};
+use crate::model::{ResourceHistoryPoint, ResourceUsage};
+use std::sync::Arc;
 
 // Deterministic shape; wall time only keeps all 24,000 buckets inside retention.
 fn fixture() -> HistoryStore {
@@ -109,7 +114,7 @@ fn saves_track_successful_generations_and_flush_pending_on_shutdown() -> anyhow:
     );
     let final_save = store.snapshot(true).unwrap();
     store.record("other", t + 15_000, 1.0, &ResourceUsage::default());
-    store.flush_pending();
+    store.flush_expired(u64::MAX);
     persist_snapshot(final_save)?;
     assert!(
         store.snapshot(false).is_some(),

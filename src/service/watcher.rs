@@ -34,10 +34,6 @@ impl<W> WatchRecovery<W> {
         }
     }
 
-    fn failed(&mut self, now: Instant) {
-        self.rebuild(now);
-    }
-
     fn attempt<E: std::fmt::Display>(
         &mut self,
         now: Instant,
@@ -105,23 +101,16 @@ pub(super) async fn track_state(service: std::sync::Weak<ApplicationService>) {
                 Refresh::Catalog
             }
             event = window_events.recv(), if window_events_open => {
-                let Some(event) = event else {
-                    window_events_open = false;
-                    window_connected = false;
-                    tracing::warn!("window event stream ended; continuing reconciliation");
-                    continue;
-                };
-                if !observe_window_event(event, &mut window_connected) { continue; }
+                if !observe_window_event(event, &mut window_connected, &mut window_events_open) { continue; }
                 drain_events(&mut window_events, |event| {
-                    observe_window_event(event, &mut window_connected);
+                    observe_window_event(Some(event), &mut window_connected, &mut window_events_open);
                 }).await;
                 Refresh::Windows
             }
             Some(mut event) = catalog_events.recv() => {
                 drain_events(&mut catalog_events, |next| event = event.max(next)).await;
                 match event {
-                    CatalogEvent::Failed => catalog_watch.failed(Instant::now()),
-                    CatalogEvent::Rewatch => catalog_watch.rebuild(Instant::now()),
+                    CatalogEvent::Failed | CatalogEvent::Rewatch => catalog_watch.rebuild(Instant::now()),
                     CatalogEvent::Changed => {},
                 }
                 Refresh::Catalog
@@ -194,25 +183,35 @@ fn reconciliation_intervals(windows_healthy: bool, catalog_healthy: bool) -> (Du
     )
 }
 
-fn observe_window_event(event: shelllist_hyprland::Event, connected: &mut bool) -> bool {
+fn observe_window_event(
+    event: Option<shelllist_hyprland::Event>,
+    connected: &mut bool,
+    open: &mut bool,
+) -> bool {
     match event {
-        shelllist_hyprland::Event::Connected => {
+        None => {
+            *open = false;
+            *connected = false;
+            tracing::warn!("window event stream ended; continuing reconciliation");
+            false
+        }
+        Some(shelllist_hyprland::Event::Connected) => {
             *connected = true;
             true
         }
-        shelllist_hyprland::Event::Disconnected(cause) => {
+        Some(shelllist_hyprland::Event::Disconnected(cause)) => {
             *connected = false;
             if let Some(cause) = cause {
                 tracing::warn!(%cause, "window event stream failed; continuing reconciliation");
             }
             true
         }
-        shelllist_hyprland::Event::ConnectFailed(cause) => {
+        Some(shelllist_hyprland::Event::ConnectFailed(cause)) => {
             *connected = false;
             tracing::warn!(%cause, "window event connection failed; continuing reconciliation");
             true
         }
-        shelllist_hyprland::Event::Message(line) => hyprland::window_event_relevant(&line),
+        Some(shelllist_hyprland::Event::Message(line)) => hyprland::window_event_relevant(&line),
     }
 }
 

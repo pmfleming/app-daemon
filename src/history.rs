@@ -299,11 +299,13 @@ impl HistoryStore {
     }
 
     pub fn snapshot(&mut self, final_save: bool) -> Option<HistorySnapshot> {
-        if final_save {
-            self.flush_pending();
+        // Every bucket expires at MAX, including saturated endpoints. Final
+        // saves use the same insertion/repair path without pruning future data.
+        self.flush_expired(if final_save {
+            u64::MAX
         } else {
-            self.flush_expired(now_milliseconds());
-        }
+            now_milliseconds()
+        });
         self.prune(now_milliseconds());
         if self.generation == self.saved_generation.load(Ordering::Acquire) {
             return None;
@@ -319,15 +321,6 @@ impl HistoryStore {
                 cursor_epochs: self.cursor_epochs.clone(),
             },
         })
-    }
-
-    fn flush_pending(&mut self) {
-        for (id, pending) in std::mem::take(&mut self.pending) {
-            self.finish_pending(id, pending);
-        }
-        for (id, pending) in std::mem::take(&mut self.pending_energy) {
-            self.insert_energy_points(id, [pending.finish()]);
-        }
     }
 
     fn flush_expired(&mut self, timestamp_ms: u64) {
@@ -440,30 +433,40 @@ impl HistoryStore {
     }
 
     fn prune(&mut self, timestamp_ms: u64) {
-        let mut changed = false;
-        let cutoff = timestamp_ms.saturating_sub(RETENTION_MILLISECONDS);
-        self.points.retain(|_, points| {
-            let expired = points.partition_point(|point| point.timestamp_ms < cutoff);
-            changed |= expired > 0 || points.is_empty();
-            points.drain(..expired);
-            !points.is_empty()
-        });
-        let energy_cutoff = timestamp_ms.saturating_sub(ENERGY_RETENTION_MILLISECONDS);
+        let mut changed = prune_points(
+            &mut self.points,
+            timestamp_ms.saturating_sub(RETENTION_MILLISECONDS),
+            |point| point.timestamp_ms,
+        );
         self.cursor_epochs.retain(|id, _| {
             let keep = self.points.contains_key(id) || self.pending.contains_key(id);
             changed |= !keep;
             keep
         });
-        self.energy_points.retain(|_, points| {
-            let expired = points.partition_point(|point| point.timestamp_ms < energy_cutoff);
-            changed |= expired > 0 || points.is_empty();
-            points.drain(..expired);
-            !points.is_empty()
-        });
-        if changed {
-            self.generation += 1;
-        }
+        changed |= prune_points(
+            &mut self.energy_points,
+            timestamp_ms.saturating_sub(ENERGY_RETENTION_MILLISECONDS),
+            |point| point.timestamp_ms,
+        );
+        self.generation += u64::from(changed);
     }
+}
+
+// Both retained histories are endpoint-sorted and must mark even empty-key
+// removal dirty, so persistence cannot resurrect an expired application.
+fn prune_points<T>(
+    history: &mut HashMap<String, VecDeque<Arc<T>>>,
+    cutoff: u64,
+    timestamp: impl Fn(&T) -> u64,
+) -> bool {
+    let mut changed = false;
+    history.retain(|_, points| {
+        let expired = points.partition_point(|point| timestamp(point) < cutoff);
+        changed |= expired > 0 || points.is_empty();
+        points.drain(..expired);
+        !points.is_empty()
+    });
+    changed
 }
 
 impl PendingEnergy {

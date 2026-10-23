@@ -35,15 +35,16 @@ impl EnergySampler {
 
     fn rapl_energy_mwh<P: EnergyProvider + ?Sized>(&mut self, provider: &P) -> Option<f64> {
         let current = provider.rapl_zones();
-        let deltas = current
+        let energy = current
             .iter()
             .filter_map(|(path, &(value, maximum))| {
                 let &(previous, _) = self.previous_rapl.get(path)?;
                 Some(counter_delta(previous, value, maximum))
             })
-            .collect::<Vec<_>>();
+            .reduce(|total, delta| total + delta)
+            .map(|total| total as f64 / 3_600_000.0);
         self.previous_rapl = current;
-        (!deltas.is_empty()).then(|| deltas.into_iter().sum::<u64>() as f64 / 3_600_000.0)
+        energy
     }
 }
 
@@ -105,27 +106,25 @@ pub(super) fn read_batteries() -> BatterySample {
     };
     let mut result = BatterySample::default();
     for path in entries.filter_map(Result::ok).map(|entry| entry.path()) {
-        if read_trimmed(&path.join("type")).as_deref() != Some("Battery") {
+        if !file_equals(&path.join("type"), "Battery") {
             continue;
         }
         let voltage_uv = read_u64(&path.join("voltage_now")).unwrap_or(0) as f64;
-        let full_mwh = battery_metric(
+        result.full_mwh += battery_metric(
             &path,
             ("energy_full", 1_000.0),
             ("charge_full", 1_000_000_000.0),
             voltage_uv,
         );
-        result.full_mwh += full_mwh;
-        if read_trimmed(&path.join("status")).as_deref() != Some("Discharging") {
+        if !file_equals(&path.join("status"), "Discharging") {
             continue;
         }
-        let watts = battery_metric(
+        result.discharge_watts += battery_metric(
             &path,
             ("power_now", 1_000_000.0),
             ("current_now", 1_000_000_000_000.0),
             voltage_uv,
         );
-        result.discharge_watts += watts;
     }
     result
 }
@@ -146,11 +145,9 @@ fn battery_metric(
 }
 
 fn read_u64(path: &Path) -> Option<u64> {
-    read_trimmed(path)?.parse().ok()
+    fs::read_to_string(path).ok()?.trim().parse().ok()
 }
 
-fn read_trimmed(path: &Path) -> Option<String> {
-    fs::read_to_string(path)
-        .ok()
-        .map(|value| value.trim().to_owned())
+fn file_equals(path: &Path, expected: &str) -> bool {
+    fs::read_to_string(path).is_ok_and(|value| value.trim() == expected)
 }

@@ -248,36 +248,6 @@ fn allocated_directory_bytes(roots: &[PathBuf], budget: &mut DiskScanBudget) -> 
     (std::time::Instant::now() < budget.deadline).then_some(files.bytes)
 }
 
-pub(super) fn cgroup_paths_for_roots(
-    provider: &dyn ResourceProvider,
-    roots: &HashSet<u32>,
-) -> HashMap<u32, String> {
-    roots
-        .iter()
-        .filter_map(|&root| {
-            provider
-                .process_cgroup(root)
-                .and_then(|path| application_cgroup_path(&path).map(str::to_owned))
-                .map(|path| (root, path))
-        })
-        .collect()
-}
-
-pub(super) fn cgroup_members_for_paths(
-    provider: &dyn ResourceProvider,
-    paths: &HashMap<u32, String>,
-) -> HashMap<String, HashSet<u32>> {
-    paths
-        .values()
-        .collect::<HashSet<_>>()
-        .into_iter()
-        .filter_map(|path| {
-            let members = provider.cgroup_members(path);
-            (!members.is_empty()).then(|| (path.clone(), members))
-        })
-        .collect()
-}
-
 fn owned_process_cgroups(processes: &HashMap<u32, ProcessStat>) -> HashMap<u32, String> {
     let Ok(current) = fs::metadata("/proc/self") else {
         return HashMap::new();
@@ -293,25 +263,6 @@ fn owned_process_cgroups(processes: &HashMap<u32, ProcessStat>) -> HashMap<u32, 
                 .map(|path| (pid, path))
         })
         .collect()
-}
-
-fn application_cgroup_path(mut path: &str) -> Option<&str> {
-    loop {
-        if specific_application_cgroup(path) {
-            return Some(path);
-        }
-        path = path.rsplit_once('/')?.0;
-    }
-}
-
-fn specific_application_cgroup(path: &str) -> bool {
-    let name = Path::new(path)
-        .file_name()
-        .and_then(|value| value.to_str())
-        .unwrap_or("");
-    name != "app-daemon.service"
-        && (name.ends_with(".scope") || name.ends_with(".service"))
-        && (name.starts_with("app-") || name.contains("flatpak") || name.contains("snap."))
 }
 
 fn read_cgroup_counters(path: &str) -> Option<CgroupCounters> {

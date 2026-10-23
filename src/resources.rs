@@ -9,7 +9,7 @@ use shelllist_daemon_tokio::ResumeDetector;
 use crate::{
     metrics::{add_counter, available_label, finite_nonnegative, rate, rounded},
     model::{EnergyUsage, NetworkUsage, ResourceUsage},
-    process::descendants,
+    process::{Identity as ProcessIdentity, descendants},
 };
 
 mod discovery;
@@ -569,8 +569,6 @@ impl Default for ResourceSampler {
         }
     }
 }
-
-type ProcessIdentity = (u32, u64);
 
 #[derive(Debug, Default)]
 struct ProcessCache<T> {

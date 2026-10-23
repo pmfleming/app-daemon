@@ -23,7 +23,7 @@ fn retry_backoff_survives_construction_success_and_rewatch_storms() {
     watch
         .attempt::<&str>(now, || panic!("healthy watcher must not be replaced"))
         .unwrap();
-    watch.failed(now);
+    watch.rebuild(now);
     assert_eq!(watch.retry_deadline(), Some(now + Duration::from_secs(30)));
     watch.rebuild(now + Duration::from_secs(1));
     assert_eq!(watch.retry_deadline(), Some(now + Duration::from_secs(30)));
@@ -31,7 +31,7 @@ fn retry_backoff_survives_construction_success_and_rewatch_storms() {
     now += Duration::from_secs(30);
     watch.attempt(now, || Ok::<_, &str>(1)).unwrap();
     now += Duration::from_secs(60);
-    watch.failed(now);
+    watch.rebuild(now);
     assert_eq!(watch.retry_deadline(), Some(now + Duration::from_secs(1)));
     assert_eq!(
         reconciliation_intervals(false, false),

@@ -33,7 +33,7 @@ fn query_ranks_window_metadata_before_hydrating_only_selected_rows() {
     let directory = tempfile::tempdir().unwrap();
     std::fs::write(
         directory.path().join("editor.desktop"),
-        "[Desktop Entry]\nType=Application\nName=Editor\nExec=true\nCategories=Development;\n",
+        "[Desktop Entry]\nType=Application\nName=Editor\nExec=true\nCategories=Development;\nActions=New;\n[Desktop Action New]\nName=New document\nExec=true\n",
     )
     .unwrap();
     let catalog = Catalog::from_paths(vec![directory.path().into()]);
@@ -47,14 +47,14 @@ fn query_ranks_window_metadata_before_hydrating_only_selected_rows() {
     };
     let settings = SettingsStore::load(None);
     let resources = ResourceSnapshot::default();
-    let query = |limit, category: &str| {
+    let query = |text: &str, limit, category: &str| {
         page(
             &catalog,
             &snapshot,
             &resources,
             &settings,
             &QueryParams {
-                query: "needle".into(),
+                query: text.into(),
                 category: category.into(),
                 generation: 42,
                 limit,
@@ -66,8 +66,8 @@ fn query_ranks_window_metadata_before_hydrating_only_selected_rows() {
             0,
         )
     };
-    let full = query(10, "");
-    let limited = query(1, "");
+    let full = query("needle", 10, "");
+    let limited = query("needle", 1, "");
     assert_eq!(full.applications.len(), 2);
     assert!(limited.has_more);
     assert_eq!(limited.generation, 42);
@@ -75,13 +75,21 @@ fn query_ranks_window_metadata_before_hydrating_only_selected_rows() {
         serde_json::to_value(&limited.applications[0]).unwrap(),
         serde_json::to_value(&full.applications[0]).unwrap()
     );
-    let editor = &query(10, "code").applications[0];
-    assert_eq!(editor.identity.id, "editor.desktop");
-    assert!(editor.runtime.focused && editor.runtime.running);
-    assert_eq!(editor.runtime.instances[0].title, "needle document");
-    assert_eq!(editor.runtime.instances[0].id, "window-1");
+    for (text, kind) in [
+        (" needle ", "metadata"),
+        ("nd", "acronym"),
+        ("document desktop", "terms"),
+    ] {
+        let editor = &query(text, 10, "code").applications[0];
+        assert_eq!(editor.match_kind, kind);
+        assert_eq!(editor.desktop_actions, catalog.entries[0].actions);
+        assert_eq!(editor.identity.id, "editor.desktop");
+        assert!(editor.runtime.focused && editor.runtime.running);
+        assert_eq!(editor.runtime.instances[0].title, "needle document");
+        assert_eq!(editor.runtime.instances[0].id, "window-1");
+    }
     assert_eq!(
-        query(10, "shell").applications[0].identity.id,
+        query("needle", 10, "shell").applications[0].identity.id,
         "window-group:Terminal"
     );
 }

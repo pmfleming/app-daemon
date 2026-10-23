@@ -1,7 +1,6 @@
 use super::{
     ProcessIdentity, ResourceSnapshot,
     provider::{ProcessStat, ResourceProvider},
-    system::{cgroup_members_for_paths, cgroup_paths_for_roots},
 };
 use crate::{
     catalog::Catalog,
@@ -76,24 +75,14 @@ impl ProcessSample {
             .flatten()
             .copied()
             .filter(|pid| *pid > 0)
+            .collect::<HashSet<_>>();
+        let cgroup_path_by_root = roots
+            .iter()
+            .filter_map(|&root| {
+                let path = provider.process_cgroup(root)?;
+                Some((root, targets.cgroup_path(root, &path, catalog)?.to_owned()))
+            })
             .collect();
-        let cgroup_path_by_root = match catalog {
-            None => cgroup_paths_for_roots(provider, &roots),
-            Some(catalog) => roots
-                .iter()
-                .filter_map(|&root| {
-                    let path = provider.process_cgroup(root)?;
-                    let (target, path) = catalog.application_cgroup(&path)?;
-                    // A PID match does not authorize charging its launcher's entire
-                    // cgroup. Scope counters require the scope's own catalog identity.
-                    targets
-                        .roots
-                        .get(target)
-                        .is_some_and(|roots| roots.contains(&root))
-                        .then(|| (root, path.to_owned()))
-                })
-                .collect(),
-        };
         let cgroup_members_by_path = cgroup_members_for_paths(provider, &cgroup_path_by_root);
         let mut active = descendants(roots, &children);
         active.extend(cgroup_members_by_path.values().flatten());
@@ -123,6 +112,56 @@ impl ProcessSample {
             snapshot,
         )
     }
+}
+
+impl Targets {
+    fn cgroup_path<'a>(
+        &self,
+        root: u32,
+        path: &'a str,
+        catalog: Option<&Catalog>,
+    ) -> Option<&'a str> {
+        let Some(catalog) = catalog else {
+            return application_cgroup_path(path);
+        };
+        let (target, path) = catalog.application_cgroup(path)?;
+        // A PID match does not authorize charging its launcher's entire cgroup.
+        self.roots.get(target)?.contains(&root).then_some(path)
+    }
+}
+
+fn cgroup_members_for_paths(
+    provider: &dyn ResourceProvider,
+    paths: &HashMap<u32, String>,
+) -> HashMap<String, HashSet<u32>> {
+    paths
+        .values()
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .filter_map(|path| {
+            let members = provider.cgroup_members(path);
+            (!members.is_empty()).then(|| (path.clone(), members))
+        })
+        .collect()
+}
+
+fn application_cgroup_path(mut path: &str) -> Option<&str> {
+    loop {
+        if specific_application_cgroup(path) {
+            return Some(path);
+        }
+        path = path.rsplit_once('/')?.0;
+    }
+}
+
+fn specific_application_cgroup(path: &str) -> bool {
+    let name = std::path::Path::new(path)
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("");
+    name != "app-daemon.service"
+        && (name.ends_with(".scope") || name.ends_with(".service"))
+        && (name.starts_with("app-") || name.contains("flatpak") || name.contains("snap."))
 }
 
 impl KnownRoots {
