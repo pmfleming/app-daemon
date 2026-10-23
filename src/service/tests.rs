@@ -33,7 +33,7 @@ fn query_ranks_window_metadata_before_hydrating_only_selected_rows() {
     let directory = tempfile::tempdir().unwrap();
     std::fs::write(
         directory.path().join("editor.desktop"),
-        "[Desktop Entry]\nType=Application\nName=Editor\nExec=true\nCategories=Development;\nActions=New;\n[Desktop Action New]\nName=New document\nExec=true\n",
+        "[Desktop Entry]\nType=Application\nName=Editor\nGenericName=Document editor\nComment=Edit café\nIcon=editor-icon\nKeywords=Writer;Note;\nStartupWMClass=EditWindow\nExec=true\nCategories=Development;\nActions=New;\n[Desktop Action New]\nName=New document\nExec=true\n",
     )
     .unwrap();
     let catalog = Catalog::from_paths(vec![directory.path().into()]);
@@ -45,7 +45,12 @@ fn query_ranks_window_metadata_before_hydrating_only_selected_rows() {
         available: true,
         ..Default::default()
     };
-    let settings = SettingsStore::load(None);
+    let (settings, _) = SettingsStore::load(None)
+        .prepare_update("editor.desktop".into(), "code".into())
+        .unwrap();
+    let (settings, _) = settings
+        .prepare_update("window-group:Terminal".into(), "browser".into())
+        .unwrap();
     let resources = ResourceSnapshot::default();
     let query = |text: &str, limit, category: &str| {
         page(
@@ -77,21 +82,59 @@ fn query_ranks_window_metadata_before_hydrating_only_selected_rows() {
     );
     for (text, kind) in [
         (" needle ", "metadata"),
-        ("nd", "acronym"),
+        ("CAFÉ", "metadata"),
+        ("Editor", "exact-name"),
+        ("editor.desktop", "exact-id"),
+        ("wn", "acronym"),
         ("document desktop", "terms"),
     ] {
         let editor = &query(text, 10, "code").applications[0];
         assert_eq!(editor.match_kind, kind);
         assert_eq!(editor.desktop_actions, catalog.entries[0].actions);
-        assert_eq!(editor.identity.id, "editor.desktop");
+        assert_eq!(
+            serde_json::to_value(&editor.identity).unwrap(),
+            serde_json::json!({
+                "id":"editor.desktop", "kind":"desktop-application", "name":"Editor",
+                "generic_name":"Document editor", "comment":"Edit café", "icon":"editor-icon",
+                "keywords":["Writer","Note"], "categories":["Development"], "category":"code",
+                "default_workspace_id":"3", "startup_class":"EditWindow"
+            })
+        );
+        assert_eq!(
+            editor.revision,
+            super::query::target_revision(
+                "editor.desktop",
+                catalog.by_id("editor.desktop"),
+                &[&windows[0]],
+                settings.for_application("editor.desktop"),
+                true,
+            )
+        );
         assert!(editor.runtime.focused && editor.runtime.running);
         assert_eq!(editor.runtime.instances[0].title, "needle document");
         assert_eq!(editor.runtime.instances[0].id, "window-1");
     }
+    let unmatched = &query("needle", 10, "shell").applications[0];
+    assert_eq!(unmatched.identity.id, "window-group:Terminal");
+    assert_eq!(unmatched.identity.keywords, ["needle terminal", "Terminal"]);
+    assert_eq!(unmatched.identity.default_workspace_id, None);
+    assert!(unmatched.desktop_actions.is_empty());
     assert_eq!(
-        query("needle", 10, "shell").applications[0].identity.id,
-        "window-group:Terminal"
+        unmatched.revision,
+        super::query::target_revision(
+            &unmatched.identity.id,
+            None,
+            &[&windows[1]],
+            settings.for_application(&unmatched.identity.id),
+            true,
+        )
     );
+    let corpus = "Terminal Running window  window-group:Terminal  needle terminal Terminal needle terminal Terminal".to_lowercase();
+    assert_eq!(
+        unmatched.match_score,
+        7_500 - corpus.find("needle").unwrap() as i64
+    );
+    assert!(query("no-such-match", 10, "").applications.is_empty());
 }
 
 pub(super) fn close_missing(expected_revision: Option<u64>) -> ExecuteParams {

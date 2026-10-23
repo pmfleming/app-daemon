@@ -1,4 +1,4 @@
-use std::{cmp::Reverse, collections::HashMap};
+use std::{borrow::Cow, cmp::Reverse, collections::HashMap};
 
 use serde::{Deserialize, Serialize};
 
@@ -101,29 +101,29 @@ pub(crate) fn page(
         .entries
         .iter()
         .map(|entry| {
-            summary_for_entry(
-                entry,
+            Candidate::new(
+                Cow::Borrowed(&entry.id),
+                Some(entry),
                 grouped.remove(&entry.id).unwrap_or_default(),
                 settings,
-                available,
             )
         })
         .collect();
     applications.extend(
         grouped
             .into_iter()
-            .map(|(id, clients)| summary_for_unmatched(id, clients, settings, available)),
+            .map(|(id, clients)| Candidate::new(Cow::Owned(id), None, clients, settings)),
     );
     let query = params.query.trim().to_lowercase();
     applications.retain_mut(|candidate| {
-        (params.category.is_empty() || candidate.identity.category == params.category)
+        (params.category.is_empty() || candidate.category() == params.category)
             && rank(candidate, &query)
     });
     applications.sort_by_cached_key(|app| {
         (
             Reverse(app.score),
-            app.identity.name.to_lowercase(),
-            app.identity.id.clone(),
+            app.name().to_lowercase(),
+            app.id.clone(),
         )
     });
     let limit = params.limit.clamp(1, 1000);
@@ -134,7 +134,7 @@ pub(crate) fn page(
         generation: params.generation,
         applications: applications
             .into_iter()
-            .map(|candidate| candidate.finish(resources))
+            .map(|candidate| candidate.finish(resources, available))
             .collect(),
         has_more,
         hyprland_available: available,
@@ -164,11 +164,12 @@ fn instances(
         .collect()
 }
 
-// Ranking needs metadata and focus order, not process aggregation or window payloads.
+// Own only unmatched IDs and window grouping. Catalog metadata, preferences and
+// revision inputs remain borrowed until a row survives filtering and pagination.
 struct Candidate<'a> {
-    identity: ApplicationIdentity,
-    desktop_actions: &'a [crate::model::DesktopActionSummary],
-    revision: u64,
+    id: Cow<'a, str>,
+    entry: Option<&'a CatalogEntry>,
+    preferences: Option<&'a ApplicationSettings>,
     clients: Vec<&'a Client>,
     focused: bool,
     runtime_score: i64,
@@ -177,17 +178,117 @@ struct Candidate<'a> {
     score: i64,
 }
 
-impl Candidate<'_> {
-    fn finish(self, resources: &ResourceSnapshot) -> ApplicationSummary {
-        let usage = resources.usage_for_application(
-            &self.identity.id,
-            self.clients.iter().map(|window| window.pid),
-        );
-        let instances = instances(&self.identity.id, &self.clients, resources);
+impl<'a> Candidate<'a> {
+    fn new(
+        id: Cow<'a, str>,
+        entry: Option<&'a CatalogEntry>,
+        clients: Vec<&'a Client>,
+        settings: &'a SettingsStore,
+    ) -> Self {
+        let focused = clients.iter().any(|window| window.focus_rank == 0);
+        let best_rank = clients
+            .iter()
+            .map(|window| window.focus_rank)
+            .min()
+            .unwrap_or(i64::MAX);
+        let runtime_score = running_score(focused, best_rank);
+        Self {
+            preferences: settings.for_application(&id),
+            id,
+            entry,
+            clients,
+            focused,
+            match_score: 0,
+            match_kind: "none",
+            runtime_score,
+            score: runtime_score,
+        }
+    }
+
+    fn name(&self) -> &str {
+        self.entry.map_or_else(
+            || {
+                self.clients
+                    .first()
+                    .filter(|window| !window.class.is_empty())
+                    .map_or_else(
+                        || self.id.strip_prefix("window-group:").unwrap_or(&self.id),
+                        |window| window.class.as_str(),
+                    )
+            },
+            |entry| entry.name.as_str(),
+        )
+    }
+
+    fn category(&self) -> &str {
+        self.entry.map_or("shell", |entry| {
+            self.preferences
+                .map(|value| value.category.as_str())
+                .filter(|category| !category.is_empty())
+                .unwrap_or_else(|| inferred_category(&entry.categories))
+        })
+    }
+
+    fn fields(&self) -> [&str; 5] {
+        [
+            self.name(),
+            self.entry
+                .map_or("Running window", |entry| entry.generic_name.as_str()),
+            self.entry.map_or("", |entry| entry.comment.as_str()),
+            &self.id,
+            self.entry.map_or("", |entry| entry.startup_class.as_str()),
+        ]
+    }
+
+    fn keywords(&self) -> impl Iterator<Item = &str> {
+        self.entry
+            .into_iter()
+            .flat_map(|entry| entry.keywords.iter().map(String::as_str))
+            .chain(window_fields(&self.clients).filter(|_| self.entry.is_none()))
+    }
+
+    fn into_identity(self) -> ApplicationIdentity {
+        let [name, generic_name, comment, _, startup_class] = self.fields();
+        ApplicationIdentity {
+            kind: self.entry.map_or("window-group", CatalogEntry::kind).into(),
+            name: name.into(),
+            generic_name: generic_name.into(),
+            comment: comment.into(),
+            startup_class: startup_class.into(),
+            icon: self
+                .entry
+                .map(|entry| entry.icon.clone())
+                .unwrap_or_default(),
+            keywords: self.keywords().map(str::to_owned).collect(),
+            categories: self
+                .entry
+                .map(|entry| entry.categories.clone())
+                .unwrap_or_default(),
+            category: self.category().into(),
+            default_workspace_id: self
+                .entry
+                .and(self.preferences)
+                .and_then(|value| value.workspace_id.clone()),
+            id: self.id.into_owned(),
+        }
+    }
+
+    fn finish(self, resources: &ResourceSnapshot, available: bool) -> ApplicationSummary {
+        let usage =
+            resources.usage_for_application(&self.id, self.clients.iter().map(|window| window.pid));
+        let instances = instances(&self.id, &self.clients, resources);
         ApplicationSummary {
-            identity: self.identity,
-            desktop_actions: self.desktop_actions.to_vec(),
-            revision: self.revision,
+            desktop_actions: self
+                .entry
+                .map(|entry| entry.actions.clone())
+                .unwrap_or_default(),
+            revision: target_revision(
+                &self.id,
+                self.entry,
+                &self.clients,
+                self.preferences,
+                available,
+            ),
             runtime: ApplicationRuntime {
                 running: !instances.is_empty() || usage.compute.process_count > 0,
                 focused: self.focused,
@@ -199,102 +300,15 @@ impl Candidate<'_> {
             match_score: self.match_score,
             match_kind: self.match_kind.into(),
             score: self.score,
+            identity: self.into_identity(),
         }
     }
 }
 
-fn summary<'a>(
-    identity: ApplicationIdentity,
-    desktop_actions: &'a [crate::model::DesktopActionSummary],
-    clients: Vec<&'a Client>,
-    revision: u64,
-) -> Candidate<'a> {
-    let focused = clients.iter().any(|window| window.focus_rank == 0);
-    let best_rank = clients
+fn window_fields<'a>(clients: &'a [&Client]) -> impl Iterator<Item = &'a str> {
+    clients
         .iter()
-        .map(|window| window.focus_rank)
-        .min()
-        .unwrap_or(i64::MAX);
-    let runtime_score = running_score(focused, best_rank);
-    Candidate {
-        identity,
-        revision,
-        desktop_actions,
-        clients,
-        focused,
-        match_score: 0,
-        match_kind: "none",
-        runtime_score,
-        score: runtime_score,
-    }
-}
-
-fn summary_for_entry<'a>(
-    entry: &'a CatalogEntry,
-    clients: Vec<&'a Client>,
-    settings: &SettingsStore,
-    available: bool,
-) -> Candidate<'a> {
-    let preferences = settings.for_application(&entry.id);
-    let revision = target_revision(&entry.id, Some(entry), &clients, preferences, available);
-    let identity = ApplicationIdentity {
-        id: entry.id.clone(),
-        kind: entry.kind().into(),
-        name: entry.name.clone(),
-        generic_name: entry.generic_name.clone(),
-        comment: entry.comment.clone(),
-        icon: entry.icon.clone(),
-        keywords: entry.keywords.clone(),
-        categories: entry.categories.clone(),
-        category: preferences
-            .map(|value| value.category.clone())
-            .filter(|value| !value.is_empty())
-            .unwrap_or_else(|| inferred_category(&entry.categories).into()),
-        default_workspace_id: preferences.and_then(|value| value.workspace_id.clone()),
-        startup_class: entry.startup_class.clone(),
-    };
-    summary(identity, &entry.actions, clients, revision)
-}
-
-fn summary_for_unmatched<'a>(
-    id: String,
-    clients: Vec<&'a Client>,
-    settings: &SettingsStore,
-    available: bool,
-) -> Candidate<'a> {
-    let revision = target_revision(
-        &id,
-        None,
-        &clients,
-        settings.for_application(&id),
-        available,
-    );
-    let name = clients
-        .first()
-        .filter(|window| !window.class.is_empty())
-        .map_or_else(
-            || id.strip_prefix("window-group:").unwrap_or(&id),
-            |window| &window.class,
-        )
-        .to_owned();
-    let keywords = clients
-        .iter()
-        .flat_map(|window| [window.title.clone(), window.class.clone()])
-        .collect();
-    let identity = ApplicationIdentity {
-        id,
-        kind: "window-group".into(),
-        name,
-        generic_name: "Running window".into(),
-        comment: String::new(),
-        icon: String::new(),
-        keywords,
-        categories: Vec::new(),
-        category: "shell".into(),
-        default_workspace_id: None,
-        startup_class: String::new(),
-    };
-    summary(identity, &[], clients, revision)
+        .flat_map(|window| [window.title.as_str(), window.class.as_str()])
 }
 
 pub(super) fn running_score(focused: bool, focus_rank: i64) -> i64 {
@@ -338,8 +352,8 @@ fn search_match(application: &Candidate<'_>, query: &str) -> Option<SearchMatch>
         });
     }
 
-    let name = application.identity.name.to_lowercase();
-    let id = application.identity.id.to_lowercase();
+    let name = application.name().to_lowercase();
+    let id = application.id.to_lowercase();
     let name_penalty = name.len().min(500) as i64;
     let id_penalty = id.len().min(500) as i64;
     // A contiguous name/ID match already contains every query term. Do not
@@ -407,22 +421,17 @@ fn direct_match(name: &str, id: &str, id_stem: &str, query: &str) -> Option<Sear
 
 fn search_corpus(application: &Candidate<'_>) -> (String, String) {
     let values = || {
-        [
-            application.identity.name.as_str(),
-            application.identity.generic_name.as_str(),
-            application.identity.comment.as_str(),
-            application.identity.id.as_str(),
-            application.identity.startup_class.as_str(),
-        ]
-        .into_iter()
-        .chain(application.identity.keywords.iter().map(String::as_str))
-        .chain(application.identity.categories.iter().map(String::as_str))
-        .chain(
-            application
-                .clients
-                .iter()
-                .flat_map(|window| [window.title.as_str(), window.class.as_str()]),
-        )
+        application
+            .fields()
+            .into_iter()
+            .chain(application.keywords())
+            .chain(
+                application
+                    .entry
+                    .into_iter()
+                    .flat_map(|entry| entry.categories.iter().map(String::as_str)),
+            )
+            .chain(window_fields(&application.clients))
     };
     let mut searchable = String::with_capacity(values().map(|value| value.len() + 1).sum());
     let mut acronym = String::new();

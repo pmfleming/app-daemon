@@ -39,3 +39,28 @@ not a claim that every static gate improves.
 Validation: 33 library and 15 session tests pass, five existing ignored registrations
 unchanged; all-target/all-feature Clippy with `-D warnings`, formatting and diff
 checks pass. RQLens paired snapshots: `before.json` → `step1.json`.
+
+## 2. Borrow query identities until pagination
+
+Candidates retain borrowed catalog entries/preferences and `Cow` IDs, owning only
+unmatched IDs and window groups. Name/category/search fields are borrowed views;
+selected rows alone construct `ApplicationIdentity`, copy action payloads and hash
+row revisions. Cached sorting borrows catalog IDs rather than copying them. Unmatched
+window keywords still appear in the search corpus twice, preserving existing offsets
+and acronym scores. The public regression now checks full identity JSON, configured
+workspace defaults, unmatched preference handling, row revisions, Unicode metadata,
+exact matches, acronyms, terms, pagination equivalence and negative searches.
+
+Against step 1: empty-query allocations 60,704 → 54,704 and bytes 7,149,934 → 6,821,434;
+search allocations 18,200 → 8,110 and bytes 1,013,816 → 582,043. Other workload allocation
+counts are unchanged. Same release fixture/100 iterations as step 1.
+
+Production cognitive sum stays 549; effort falls 4,412,810 → 4,392,396 and clone sites
+91 → 83. Cyclomatic sum rises 1,244 → 1,248 (more small view methods), production-file
+lines grow 9 and total Rust lines grow 52 including extended contracts. Architecture,
+duplicated lines and escape hatches are unchanged. All-function effort grows because
+of the stronger regression. This deliberately prioritizes fewer per-candidate copies,
+not hiding complexity through test removal.
+
+Validation: 33 library and 15 session tests, strict all-target/all-feature Clippy,
+formatting and diff checks pass. Paired snapshots: `step1.json` → `step2.json`.
