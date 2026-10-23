@@ -159,3 +159,71 @@ fn split_buckets_persist_without_losing_totals_availability_or_energy_retention(
     }
     Ok(())
 }
+
+#[test]
+fn live_and_repaired_energy_preserve_weighting_labels_and_overlap_boundaries() {
+    use super::aggregate::PendingPoint;
+    use crate::model::{ResourceAvailability, ResourceHistoryPoint};
+    let mut usage = ResourceUsage::unprojected();
+    usage.compute.cpu_percent = 20.0;
+    usage.storage.disk_read_bytes = 101;
+    usage.energy.energy_mwh = 8.0;
+    usage.energy.battery_percent = 0.008;
+    usage.energy.system_power_watts = 12.0;
+    usage.energy.attributed_fraction = 0.25;
+    usage.energy.energy_source = "rapl".into();
+    usage.energy.energy_confidence = "low".into();
+    usage.measurement.coverage = 1.0;
+    let fragment = |usage: &ResourceUsage, range: std::ops::Range<u64>| {
+        let mut pending = PendingPoint::default();
+        pending.end_ms = range.start;
+        pending.add(usage, range, 4_000);
+        pending.finish().unwrap()
+    };
+    let first = fragment(&usage, 0..1_000);
+    let mut live = PendingPoint::default();
+    live.add(&usage, 0..1_000, 4_000);
+    usage.energy.system_power_watts = 4.0;
+    usage.energy.attributed_fraction = 0.75;
+    usage.energy.energy_source = "battery".into();
+    usage.energy.energy_confidence = "high".into();
+    usage.measurement.coverage = 0.0;
+    let second = fragment(&usage, 1_000..4_000);
+    live.add(&usage, 1_000..4_000, 4_000);
+    let merged = PendingPoint::merge_finished(&first, &second);
+    assert_eq!(merged, live.finish().unwrap());
+    let resource = &merged.resources;
+    assert_eq!(resource.energy_mwh, 8.0);
+    assert_eq!(resource.battery_percent, 0.008);
+    assert_eq!(resource.average_power_watts, 7.2);
+    assert_eq!(resource.system_power_watts, 6.0);
+    assert_eq!(resource.attributed_fraction, 0.625);
+    assert_eq!(resource.coverage, 0.25);
+    assert_eq!(resource.sample_count, 2);
+    assert_eq!(resource.energy_source, "mixed");
+    assert_eq!(resource.energy_confidence, "mixed");
+    assert_eq!(resource.storage.disk_read_bytes, 101);
+    assert_eq!(resource.peaks.cpu_percent, 20.0);
+    assert_eq!(resource.availability, Some(ResourceAvailability::default()));
+
+    let mut backfill = first.clone();
+    backfill.duration_ms = 500;
+    backfill.resources.availability = None;
+    backfill.resources.sample_count = u64::MAX;
+    backfill.resources.energy_source = "unavailable".into();
+    backfill.resources.energy_confidence.clear();
+    let overlap = PendingPoint::merge_finished(&first, &backfill);
+    assert_eq!((overlap.timestamp_ms, overlap.duration_ms), (1_000, 1_000));
+    assert_eq!(overlap.resources.energy_mwh, 4.0);
+    assert_eq!(overlap.resources.sample_count, u64::MAX);
+    assert_eq!(overlap.resources.energy_source, "rapl");
+    assert_eq!(overlap.resources.energy_confidence, "low");
+    assert_eq!(overlap.resources.availability, None);
+    assert!(PendingPoint::default().finish().is_none());
+    let zero = ResourceHistoryPoint {
+        timestamp_ms: 1_000,
+        duration_ms: 0,
+        resources: first.resources,
+    };
+    assert_eq!(PendingPoint::merge_finished(&zero, &zero), zero);
+}

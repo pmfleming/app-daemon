@@ -93,3 +93,30 @@ escape hatches are unchanged. No runtime speedup is claimed for watcher orchestr
 
 Validation: 35 library and 15 session tests pass, strict all-target/all-feature
 Clippy, formatting and diff checks pass. Snapshots: `step2.json` → `step3.json`.
+
+## 4. Share history energy accumulation
+
+`WeightedEnergy` owns energy/battery totals, duration-weighted power/attribution/
+coverage, saturating sample counts and label merging. Both live fragments and repaired
+finished points feed it a borrowed `EnergyObservation`, without copying labels or
+resource payloads. Finalization/rounding is shared. Integer counter splitting,
+availability intersection, peak merging, zero-duration fallback and overlap endpoint
+repair remain separate because their semantics differ.
+
+A regression compares live accumulation with repaired fragments and checks exact
+energy/battery totals, weighted averages, mixed labels, missing availability,
+saturating sample counts, overlapping backfills and zero-duration legacy points.
+Existing integer-conservation and restart/persistence tests still pass.
+
+The two main accumulation functions' effort falls 162,241 → 120,403; including the
+new energy helpers and all other production functions, effort falls
+4,362,592 → 4,324,098. Maximum production effort becomes 80,318 (operation admission).
+Production cognitive sum stays 555; cyclomatic 1,264 → 1,266. Tradeoffs: production-file
+lines +51, all Rust lines +119, all-code clone sites +1 in the overlap fixture,
+and duplicated lines 638 → 652 (the new observation mappings remain structurally
+similar). Production clone sites and escape hatches are unchanged. Mean locality is
+unchanged; observed leverage rises 25.7353 → 25.8824 with the new direct aggregate test.
+No allocation or latency improvement is claimed for this step.
+
+Validation: 36 library and 15 session tests pass, strict all-target/all-feature
+Clippy, formatting and diff checks pass. Snapshots: `step3.json` → `step4.json`.

@@ -16,6 +16,15 @@ pub(super) struct PendingPoint {
     compute: WeightedCompute,
     storage: WeightedStorage,
     network: WeightedNetwork,
+    energy: WeightedEnergy,
+    peaks: ResourcePeaks,
+    availability: Option<ResourceAvailability>,
+}
+
+// Totals are summed; power, attribution and coverage are duration-weighted.
+// Live interval fragments and repaired finished buckets share this arithmetic.
+#[derive(Debug, Default)]
+struct WeightedEnergy {
     energy_mwh: f64,
     battery_percent: f64,
     system_power: f64,
@@ -24,8 +33,15 @@ pub(super) struct PendingPoint {
     sample_count: u64,
     energy_source: String,
     energy_confidence: String,
-    peaks: ResourcePeaks,
-    availability: Option<ResourceAvailability>,
+}
+
+struct EnergyObservation<'a> {
+    energy_mwh: f64,
+    battery_percent: f64,
+    system_power: f64,
+    attributed_fraction: f64,
+    source: &'a str,
+    confidence: &'a str,
 }
 
 #[derive(Debug, Default)]
@@ -99,7 +115,6 @@ impl PendingPoint {
         for point in [first, second] {
             let resource = &point.resources;
             let duration = point.duration_ms;
-            let weight = duration as f64;
             merged.duration_ms = merged.duration_ms.saturating_add(duration);
             merged.compute.add(duration, &resource.compute);
             merged
@@ -108,14 +123,19 @@ impl PendingPoint {
             merged
                 .network
                 .add(duration, &resource.network, |value| value);
-            merged.energy_mwh += resource.energy_mwh;
-            merged.battery_percent += resource.battery_percent;
-            merged.system_power += resource.system_power_watts * weight;
-            merged.attributed_fraction += resource.attributed_fraction * weight;
-            merged.coverage += resource.coverage * weight;
-            merged.sample_count = merged.sample_count.saturating_add(resource.sample_count);
-            merge_label(&mut merged.energy_source, &resource.energy_source);
-            merge_label(&mut merged.energy_confidence, &resource.energy_confidence);
+            merged.energy.add(
+                EnergyObservation {
+                    energy_mwh: resource.energy_mwh,
+                    battery_percent: resource.battery_percent,
+                    system_power: resource.system_power_watts,
+                    attributed_fraction: resource.attributed_fraction,
+                    source: &resource.energy_source,
+                    confidence: &resource.energy_confidence,
+                },
+                duration,
+                resource.coverage,
+                resource.sample_count,
+            );
             merged.peaks.merge(&resource.peaks);
         }
         let start = first
@@ -155,15 +175,19 @@ impl PendingPoint {
         self.compute.add(duration_ms, &usage.compute);
         self.storage.add(duration_ms, &usage.storage, portion);
         self.network.add(duration_ms, &usage.network, portion);
-        self.energy_mwh += usage.energy.energy_mwh * fraction;
-        self.battery_percent += usage.energy.battery_percent * fraction;
-        let weight = duration_ms as f64;
-        self.system_power += usage.energy.system_power_watts * weight;
-        self.attributed_fraction += usage.energy.attributed_fraction * weight;
-        self.coverage += usage.measurement.coverage * weight;
-        self.sample_count = self.sample_count.saturating_add(1);
-        merge_label(&mut self.energy_source, &usage.energy.energy_source);
-        merge_label(&mut self.energy_confidence, &usage.energy.energy_confidence);
+        self.energy.add(
+            EnergyObservation {
+                energy_mwh: usage.energy.energy_mwh * fraction,
+                battery_percent: usage.energy.battery_percent * fraction,
+                system_power: usage.energy.system_power_watts,
+                attributed_fraction: usage.energy.attributed_fraction,
+                source: &usage.energy.energy_source,
+                confidence: &usage.energy.energy_confidence,
+            },
+            duration_ms,
+            usage.measurement.coverage,
+            1,
+        );
         self.peaks.merge(&ResourcePeaks {
             cpu_percent: usage.compute.cpu_percent,
             cpu_percent_of_machine: usage.compute.cpu_percent_of_machine,
@@ -192,18 +216,45 @@ impl PendingPoint {
                 compute: self.compute.finish(duration),
                 storage: self.storage.finish(duration),
                 network: self.network.finish(duration),
-                energy_mwh: rounded(self.energy_mwh, 4),
-                battery_percent: rounded(self.battery_percent, 6),
-                average_power_watts: rounded(self.energy_mwh * 3_600.0 / duration, 3),
-                system_power_watts: rounded(self.system_power / duration, 3),
-                attributed_fraction: rounded(self.attributed_fraction / duration, 4),
-                energy_source: available_label(self.energy_source),
-                energy_confidence: available_label(self.energy_confidence),
-                sample_count: self.sample_count,
-                coverage: rounded(self.coverage / duration, 4),
                 peaks: self.peaks,
+                ..self.energy.finish(duration)
             },
         })
+    }
+}
+
+impl WeightedEnergy {
+    fn add(
+        &mut self,
+        observation: EnergyObservation<'_>,
+        duration_ms: u64,
+        coverage: f64,
+        samples: u64,
+    ) {
+        self.energy_mwh += observation.energy_mwh;
+        self.battery_percent += observation.battery_percent;
+        let weight = duration_ms as f64;
+        self.system_power += observation.system_power * weight;
+        self.attributed_fraction += observation.attributed_fraction * weight;
+        self.coverage += coverage * weight;
+        self.sample_count = self.sample_count.saturating_add(samples);
+        merge_label(&mut self.energy_source, observation.source);
+        merge_label(&mut self.energy_confidence, observation.confidence);
+    }
+
+    fn finish(self, duration: f64) -> HistoricalResourceUsage {
+        HistoricalResourceUsage {
+            energy_mwh: rounded(self.energy_mwh, 4),
+            battery_percent: rounded(self.battery_percent, 6),
+            average_power_watts: rounded(self.energy_mwh * 3_600.0 / duration, 3),
+            system_power_watts: rounded(self.system_power / duration, 3),
+            attributed_fraction: rounded(self.attributed_fraction / duration, 4),
+            energy_source: available_label(self.energy_source),
+            energy_confidence: available_label(self.energy_confidence),
+            sample_count: self.sample_count,
+            coverage: rounded(self.coverage / duration, 4),
+            ..Default::default()
+        }
     }
 }
 
