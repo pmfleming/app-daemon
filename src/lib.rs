@@ -4,6 +4,8 @@ pub mod benchmarks;
 pub mod catalog;
 pub mod client;
 pub mod daemon;
+#[cfg(test)]
+mod frontend_contract;
 pub mod history;
 pub mod hyprland;
 pub mod launch;
