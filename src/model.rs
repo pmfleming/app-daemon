@@ -408,6 +408,7 @@ pub struct MetricSummary {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct ApplicationEnergySummary {
+    pub energy_label: String,
     pub target_id: String,
     pub name: String,
     pub icon: String,
@@ -418,6 +419,7 @@ pub struct ApplicationEnergySummary {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct ApplicationEnergyOverview {
+    pub total_energy_label: String,
     pub since_ms: u64,
     pub until_ms: u64,
     pub total_energy_mwh: f64,

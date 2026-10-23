@@ -2000,6 +2000,10 @@
           "$defs": {
             "ApplicationEnergySummary": {
               "properties": {
+                "energy_label": {
+                  "default": "",
+                  "type": "string"
+                },
                 "energy_mwh": {
                   "default": 0.0,
                   "format": "double",
@@ -2024,6 +2028,7 @@
                 }
               },
               "required": [
+                "energy_label",
                 "target_id",
                 "name",
                 "icon",
@@ -2056,6 +2061,10 @@
               "minimum": 0,
               "type": "integer"
             },
+            "total_energy_label": {
+              "default": "",
+              "type": "string"
+            },
             "total_energy_mwh": {
               "default": 0.0,
               "format": "double",
@@ -2069,6 +2078,7 @@
             }
           },
           "required": [
+            "total_energy_label",
             "since_ms",
             "until_ms",
             "total_energy_mwh",

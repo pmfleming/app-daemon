@@ -27,6 +27,8 @@ use crate::{
 };
 
 mod action;
+mod energy_labels;
+use energy_labels::energy_label;
 #[cfg(feature = "benchmarks")]
 pub(crate) mod benchmarks;
 mod catalog_watch;
@@ -375,6 +377,7 @@ impl ApplicationService {
             .map(|value| {
                 let identity = catalog.by_id(&value.target_id);
                 ApplicationEnergySummary {
+                    energy_label: energy_label(value.energy_mwh),
                     name: identity
                         .map(|entry| entry.name.clone())
                         .unwrap_or_else(|| value.target_id.clone()),
@@ -390,6 +393,7 @@ impl ApplicationService {
             })
             .collect();
         ApplicationEnergyOverview {
+            total_energy_label: energy_label(total_energy_mwh),
             since_ms,
             until_ms,
             total_energy_mwh: (total_energy_mwh * 10_000.0).round() / 10_000.0,
