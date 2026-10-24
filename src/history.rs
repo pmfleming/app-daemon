@@ -222,11 +222,13 @@ impl HistoryStore {
                 .map_or(end, |p| p.timestamp_ms.saturating_sub(p.duration_ms))
         });
         let summary = summary::summarize(window(), start, end, epoch);
-        let mut matching = window()
-            // Keep endpoint-based pagination: a summary-only overlapping
-            // bucket must not advance the cursor past the selected window.
-            .filter(|point| until_ms.is_none_or(|until| point.timestamp_ms <= until))
-            .filter(|point| after.is_none_or(|timestamp| point.timestamp_ms > timestamp));
+        // Page by endpoints, independently of summary-only overlaps. Seek past
+        // the cursor instead of revisiting every earlier bucket on every page.
+        let mut matching = retained_from(self.points.get(target_id), |point| {
+            since_ms.is_some_and(|since| point.timestamp_ms < since)
+                || after.is_some_and(|after| point.timestamp_ms <= after)
+        })
+        .take_while(|point| until_ms.is_none_or(|until| point.timestamp_ms <= until));
         let points = matching
             .by_ref()
             .take(limit)
@@ -270,12 +272,10 @@ impl HistoryStore {
 
     fn energy_total(&self, target_id: &str, since_ms: u64, until_ms: u64) -> PendingEnergy {
         let mut total = PendingEnergy::default();
-        for point in self
-            .energy_points
-            .get(target_id)
-            .into_iter()
-            .flatten()
-            .filter(|point| point.timestamp_ms >= since_ms && point.timestamp_ms <= until_ms)
+        for point in retained_from(self.energy_points.get(target_id), |point| {
+            point.timestamp_ms < since_ms
+        })
+        .take_while(|point| point.timestamp_ms <= until_ms)
         {
             total.add(
                 point.energy_mwh,
@@ -490,23 +490,33 @@ impl PendingEnergy {
     }
 }
 
+// Persisted queues are endpoint-sorted. `before` must describe a monotone
+// prefix; seeking it neither copies buckets nor scans already-consumed pages.
+fn retained_from<T>(
+    points: Option<&VecDeque<Arc<T>>>,
+    before: impl Fn(&T) -> bool,
+) -> impl DoubleEndedIterator<Item = &T> {
+    points
+        .into_iter()
+        .flat_map(move |points| points.range(points.partition_point(|point| before(point))..))
+        .map(Arc::as_ref)
+}
+
 fn window_points(
     points: Option<&VecDeque<Arc<ResourceHistoryPoint>>>,
     since: Option<u64>,
     until: Option<u64>,
 ) -> impl DoubleEndedIterator<Item = &ResourceHistoryPoint> {
-    points
-        .into_iter()
-        .flatten()
-        .map(Arc::as_ref)
-        .filter(move |point| since.is_none_or(|since| point.timestamp_ms >= since))
-        // Include summary-only overlaps; pagination separately checks endpoints.
-        .filter(move |point| {
-            until.is_none_or(|until| {
-                point.timestamp_ms <= until
-                    || point.timestamp_ms.saturating_sub(point.duration_ms) < until
-            })
+    retained_from(points, move |point| {
+        since.is_some_and(|since| point.timestamp_ms < since)
+    })
+    // Include summary-only overlaps; pagination separately checks endpoints.
+    .filter(move |point| {
+        until.is_none_or(|until| {
+            point.timestamp_ms <= until
+                || point.timestamp_ms.saturating_sub(point.duration_ms) < until
         })
+    })
 }
 
 fn new_cursor_epoch() -> String {

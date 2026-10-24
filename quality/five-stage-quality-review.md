@@ -61,3 +61,25 @@ production cognition 557→559, cyclomatic 1,274→1,275 and effort
 4,317,880→4,330,536. This explicit branch trades a small static increase for
 roughly 49% less allocated sampling memory. Architecture/escape metrics stay
 unchanged. Rust lines increase by 51, mostly the new transition regression.
+
+## Stage 3 — indexed history selection
+
+Share a borrowed, binary-seeking iterator across resource summaries, resource
+pagination and energy totals. Pagination seeks past both the lower bound and the
+validated cursor, then stops at the upper endpoint. Energy totals likewise stop
+at their upper endpoint. Summary selection deliberately does **not** stop there:
+a later long-duration bucket can overlap the selected window even after an
+intervening non-overlapping bucket. No cursor expiry/rewrite checks were removed.
+
+A differential matrix compares public pages with a linear reference, including
+anchors outside the window, exhausted cursors, zero-width windows, clamped limits
+and late summary-only overlaps. A 4,096-record prefix probe requires at most 14
+comparisons before returning record 4,000. This proves indexed prefix selection,
+not constant-time whole queries: summaries still visit the selected observations.
+
+Full all-feature tests, formatting and strict Clippy pass. Evidence:
+`target/stages-3{.json,/}`. Production cognition stays 559; cyclomatic rises by one
+(shared iterator) to 1,276 and effort rises 4,330,536→4,342,605. Architecture,
+duplication and escape metrics are unchanged. Rust lines increase by 105 (95 test
+lines). This stage prioritizes bounded prefix work and explicit boundary coverage,
+not a static-metric or test-volume win.

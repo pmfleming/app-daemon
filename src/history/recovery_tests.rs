@@ -14,6 +14,101 @@ fn usage(cpu: f64, energy: f64) -> ResourceUsage {
 }
 
 #[test]
+fn indexed_windows_match_linear_selection_including_late_overlaps() -> anyhow::Result<()> {
+    use crate::model::{HistoricalResourceUsage, ResourceAvailability, ResourceHistoryPoint};
+    let base = now_milliseconds() + 60_000;
+    let points: Vec<_> = [
+        (1000, 1000),
+        (2000, 500),
+        (3000, 3000),
+        (4000, 500),
+        (5000, 5000),
+    ]
+    .into_iter()
+    .map(|(end, duration)| ResourceHistoryPoint {
+        timestamp_ms: base + end,
+        duration_ms: duration,
+        resources: HistoricalResourceUsage {
+            availability: Some(ResourceAvailability {
+                cpu: true,
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
+    })
+    .collect();
+    let mut store = HistoryStore::load(None);
+    store.insert_points("app".into(), points.iter().cloned());
+    for (since, until, after, limit) in [
+        (0, 2500, None, 1),
+        (2000, 4500, Some(1000), 2),
+        (2500, 2500, Some(3000), 2),
+        (0, 5000, Some(5000), 1),
+        (0, 5000, None, 0),
+    ] {
+        let cursor = after
+            .map(|after| super::encode_cursor("app", base + after, &store.cursor_epochs["app"]))
+            .transpose()?;
+        let page = store.query_window(
+            "app",
+            Some(base + since),
+            Some(base + until),
+            cursor.as_deref(),
+            limit,
+        )?;
+        let expected: Vec<_> = points
+            .iter()
+            .filter(|p| {
+                p.timestamp_ms >= base + since
+                    && p.timestamp_ms <= base + until
+                    && after.is_none_or(|after| p.timestamp_ms > base + after)
+            })
+            .map(|p| p.timestamp_ms)
+            .collect();
+        assert_eq!(
+            page.points
+                .iter()
+                .map(|p| p.timestamp_ms)
+                .collect::<Vec<_>>(),
+            expected
+                .iter()
+                .copied()
+                .take(limit.max(1))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(page.has_more, expected.len() > limit.max(1));
+        let observed: u64 = points
+            .iter()
+            .filter(|p| p.timestamp_ms >= base + since)
+            .map(|p| {
+                p.timestamp_ms
+                    .min(base + until)
+                    .saturating_sub((p.timestamp_ms - p.duration_ms).max(base + since))
+            })
+            .sum();
+        assert_eq!(
+            page.summary.metrics["cpu_percent_of_machine"].observed_ms,
+            observed
+        );
+    }
+    let points = (0..4096).map(std::sync::Arc::new).collect();
+    let comparisons = std::cell::Cell::new(0);
+    assert_eq!(
+        super::retained_from(Some(&points), |value| {
+            comparisons.set(comparisons.get() + 1);
+            *value < 4000
+        })
+        .next(),
+        Some(&4000)
+    );
+    assert!(
+        comparisons.get() <= 14,
+        "selection must seek, not scan the prefix"
+    );
+    Ok(())
+}
+
+#[test]
 fn cursor_decoding_borrows_plain_fields_and_preserves_escaped_targets() -> anyhow::Result<()> {
     for target in ["app", "app\"escaped\n"] {
         let cursor = super::encode_cursor(target, 42, "epoch")?;
