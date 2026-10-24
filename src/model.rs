@@ -264,6 +264,48 @@ pub struct ResourcePeaks {
     pub network_transmit_bytes_per_second: f64,
 }
 
+impl ResourcePeaks {
+    pub(crate) fn for_usage(usage: &ResourceUsage) -> Self {
+        Self {
+            cpu_percent: usage.compute.cpu_percent,
+            cpu_percent_of_machine: usage.compute.cpu_percent_of_machine,
+            memory_bytes: usage.compute.memory_bytes,
+            gpu_percent: usage.compute.gpu_percent,
+            gpu_busy_percent: usage.compute.gpu_busy_percent,
+            disk_read_bytes_per_second: usage.storage.disk_read_bytes_per_second,
+            disk_write_bytes_per_second: usage.storage.disk_write_bytes_per_second,
+            network_receive_bytes_per_second: usage.network.network_receive_bytes_per_second,
+            network_transmit_bytes_per_second: usage.network.network_transmit_bytes_per_second,
+            estimated_app_power_watts: usage.energy.estimated_app_power_watts,
+        }
+    }
+
+    pub(crate) fn merge(&mut self, other: &Self) {
+        self.cpu_percent = self.cpu_percent.max(other.cpu_percent);
+        self.cpu_percent_of_machine = self
+            .cpu_percent_of_machine
+            .max(other.cpu_percent_of_machine);
+        self.memory_bytes = self.memory_bytes.max(other.memory_bytes);
+        self.gpu_percent = self.gpu_percent.max(other.gpu_percent);
+        self.gpu_busy_percent = self.gpu_busy_percent.max(other.gpu_busy_percent);
+        self.disk_read_bytes_per_second = self
+            .disk_read_bytes_per_second
+            .max(other.disk_read_bytes_per_second);
+        self.disk_write_bytes_per_second = self
+            .disk_write_bytes_per_second
+            .max(other.disk_write_bytes_per_second);
+        self.network_receive_bytes_per_second = self
+            .network_receive_bytes_per_second
+            .max(other.network_receive_bytes_per_second);
+        self.network_transmit_bytes_per_second = self
+            .network_transmit_bytes_per_second
+            .max(other.network_transmit_bytes_per_second);
+        self.estimated_app_power_watts = self
+            .estimated_app_power_watts
+            .max(other.estimated_app_power_watts);
+    }
+}
+
 /// A capability is true only when available throughout the observed bucket.
 /// Missing metadata in older history files means unknown, not measured zero.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]

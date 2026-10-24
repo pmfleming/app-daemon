@@ -59,10 +59,10 @@ impl AppDaemon {
             }
         };
         let api = self.api.clone();
-        let method = method.to_owned();
+        let method = declared.name();
         let owner = header.sender().map(ToString::to_string);
         admitted
-            .run(async move { api.dispatch_owned(&method, params, owner).await })
+            .run(async move { api.dispatch_owned(method, params, owner).await })
             .await
     }
 
@@ -96,7 +96,7 @@ impl AppDaemon {
             }
         };
         let id = self.subscriptions.next_id("subscription");
-        let owner = header.sender().map(|owner| owner.to_owned());
+        let owner = header.sender().map(ToString::to_string);
         let destination = directed_emitter(&emitter, &header);
         let connection = destination.connection().clone();
         let changes = self.applications.subscribe_state();
@@ -110,12 +110,10 @@ impl AppDaemon {
             id.clone(),
             selected,
         );
-        if let Err(error) = self.subscriptions.spawn_for_owner(
-            id.clone(),
-            owner.as_ref().map(ToString::to_string),
-            &connection,
-            events,
-        ) {
+        if let Err(error) =
+            self.subscriptions
+                .spawn_for_owner(id.clone(), owner, &connection, events)
+        {
             return api::error(ErrorCode::SubscriptionUnavailable, error.to_string()).to_string();
         }
         api::success(Reply::Subscription {

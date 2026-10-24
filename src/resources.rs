@@ -29,7 +29,7 @@ use provider::{
 };
 use system::{LinuxResourceProvider, merge_disk_files};
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug)]
 struct PreviousProcess {
     total_ticks: u64,
     start_ticks: u64,
@@ -309,11 +309,7 @@ impl ResourceSnapshot {
         }
         // A missing controller must not replace valid procfs counters with zero.
         if let Some(io) = groups().try_fold(IoCounters::default(), |mut total, group| {
-            let current = group.io?;
-            add_counter(&mut total.read_bytes, current.read_bytes);
-            add_counter(&mut total.write_bytes, current.write_bytes);
-            add_counter(&mut total.read_operations, current.read_operations);
-            add_counter(&mut total.write_operations, current.write_operations);
+            total += group.io?;
             Some(total)
         }) {
             usage.storage.disk_read_bytes = io.read_bytes;

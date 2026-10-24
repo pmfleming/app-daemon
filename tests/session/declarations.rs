@@ -9,6 +9,7 @@ async fn every_declared_method_reaches_its_typed_handler_on_the_private_bus() ->
     let mut session = Session::start(true).await?;
     let proxy = session.proxy().await?;
     let registry = protocol::registry()?;
+    let replies = protocol::reply_contract_fixture();
     let frozen: Value = serde_json::from_str(include_str!("../../test_support/app-api-v1.json"))?;
     assert_eq!(registry, frozen["registry"]);
     assert_eq!(protocol::contract_fixture()?, frozen);
@@ -34,6 +35,14 @@ async fn every_declared_method_reaches_its_typed_handler_on_the_private_bus() ->
     for entry in registry["methods"].as_array().context("method registry")? {
         let name = entry["name"].as_str().context("wire name")?;
         let method = Method::parse(name).context("declared method")?;
+        let example = &replies[name];
+        assert_eq!(example["protocol"], protocol::NAME);
+        assert_eq!(example["version"], protocol::VERSION);
+        assert_eq!(example["ok"], true, "{name}: {example}");
+        assert!(
+            example["data"].get(method.response_key()).is_some(),
+            "{name}: {example}"
+        );
         let mut params = entry["params_example"].clone();
         if params.get("target_id").is_some() {
             params["target_id"] = json!("ok.desktop");

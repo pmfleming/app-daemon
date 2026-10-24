@@ -205,7 +205,12 @@ mod tests {
         )
     }
     #[tokio::test]
-    async fn cancellation_is_terminal_and_admission_is_bounded() {
+    async fn admission_precedes_execution_and_cancellation_is_terminal() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
+        let runs = Arc::new(AtomicUsize::new(0));
         let mut registry = OperationRegistry::default();
         for id in 0..MAX_ACTIVE_PER_OWNER {
             let mut value = result(id, "accepted");
@@ -215,19 +220,50 @@ mod tests {
                 status: "observing".into(),
                 ..Default::default()
             });
-            registry
-                .spawn(None, value, |_| std::future::pending())
-                .unwrap();
-        }
-        assert!(
-            registry
-                .spawn(None, result(MAX_ACTIVE_PER_OWNER, "accepted"), |_| async {
-                    panic!("full registry must not start work")
+            let runs = Arc::clone(&runs);
+            let accepted = registry
+                .spawn(None, value, move |_| async move {
+                    runs.fetch_add(1, Ordering::SeqCst);
+                    std::future::pending::<()>().await;
                 })
-                .is_err()
-        );
+                .unwrap();
+            assert_eq!(registry.status(&accepted.id, None), Some(accepted));
+        }
+        for (owner, id) in [(Some(":1.2"), 0), (None, MAX_ACTIVE_PER_OWNER)] {
+            assert_rejected(&mut registry, owner, id);
+        }
+        assert!(registry.status("operation-0", Some(":1.2")).is_none());
         assert!(registry.active.admit(Some(":1.2")).is_ok());
         assert!(registry.cancel("operation-0", Some(":1.2")).is_none());
+        cancel_is_terminal(&mut registry);
+        // Cancellation before the first poll must prevent effects, not just hide their result.
+        tokio::task::yield_now().await;
+        assert_eq!(runs.load(Ordering::SeqCst), MAX_ACTIVE_PER_OWNER - 1);
+        assert_eq!(registry.cancel_all().len(), MAX_ACTIVE_PER_OWNER - 1);
+        registry.recent.prune(std::time::Instant::now() + RETENTION);
+        assert!(registry.status("operation-0", None).is_none());
+    }
+
+    fn assert_rejected(registry: &mut OperationRegistry, owner: Option<&str>, id: usize) {
+        let (started, mut receiver) = tokio::sync::oneshot::channel();
+        assert!(
+            registry
+                .spawn(
+                    owner.map(str::to_owned),
+                    result(id, "accepted"),
+                    move |_| async move {
+                        let _ = started.send(());
+                    }
+                )
+                .is_err()
+        );
+        assert_eq!(
+            receiver.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Closed)
+        );
+    }
+
+    fn cancel_is_terminal(registry: &mut OperationRegistry) {
         let cancelled = registry.cancel("operation-0", None).unwrap();
         assert_eq!(cancelled.status, "cancelled");
         let close = cancelled.close.unwrap();
@@ -241,56 +277,5 @@ mod tests {
             "cancelled"
         );
         assert!(registry.active.admit(None).is_ok());
-        assert_eq!(registry.cancel_all().len(), MAX_ACTIVE_PER_OWNER - 1);
-        registry.recent.prune(std::time::Instant::now() + RETENTION);
-        assert!(registry.status("operation-0", None).is_none());
-    }
-
-    #[tokio::test]
-    async fn registration_rejects_duplicates_before_starting_and_cancels_queued_work() {
-        use std::sync::{
-            Arc,
-            atomic::{AtomicUsize, Ordering},
-        };
-        let runs = Arc::new(AtomicUsize::new(0));
-        let work = || {
-            let runs = Arc::clone(&runs);
-            move |_| async move {
-                runs.fetch_add(1, Ordering::SeqCst);
-                std::future::pending::<()>().await;
-            }
-        };
-        let mut registry = OperationRegistry::default();
-        let accepted = registry
-            .spawn(Some(":1.1".into()), result(0, "accepted"), work())
-            .unwrap();
-        assert_eq!(registry.status(&accepted.id, Some(":1.1")), Some(accepted));
-        let (started, mut receiver) = tokio::sync::oneshot::channel();
-        assert!(
-            registry
-                .spawn(
-                    Some(":1.2".into()),
-                    result(0, "accepted"),
-                    move |_| async move {
-                        let _ = started.send(());
-                    }
-                )
-                .is_err()
-        );
-        assert_eq!(
-            receiver.try_recv(),
-            Err(tokio::sync::oneshot::error::TryRecvError::Closed)
-        );
-        registry.spawn(None, result(1, "accepted"), work()).unwrap();
-        assert_eq!(
-            registry.cancel("operation-1", None).unwrap().status,
-            "cancelled"
-        );
-        tokio::task::yield_now().await;
-        assert_eq!(runs.load(Ordering::SeqCst), 1);
-        assert!(registry.status("operation-0", Some(":1.2")).is_none());
-        assert!(!registry.finish(result(1, "completed")));
-        assert!(!registry.running(result(1, "running")));
-        assert_eq!(registry.cancel_all().len(), 1);
     }
 }

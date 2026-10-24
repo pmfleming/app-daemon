@@ -190,7 +190,7 @@ fn live_and_repaired_energy_preserve_weighting_labels_and_overlap_boundaries() {
     usage.measurement.coverage = 0.0;
     let second = fragment(&usage, 1_000..4_000);
     live.add(&usage, 1_000..4_000, 4_000);
-    let merged = PendingPoint::merge_finished(&first, &second);
+    let merged = PendingPoint::merge_finished(&first, second);
     assert_eq!(merged, live.finish().unwrap());
     let resource = &merged.resources;
     assert_eq!(resource.energy_mwh, 8.0);
@@ -212,7 +212,7 @@ fn live_and_repaired_energy_preserve_weighting_labels_and_overlap_boundaries() {
     backfill.resources.sample_count = u64::MAX;
     backfill.resources.energy_source = "unavailable".into();
     backfill.resources.energy_confidence.clear();
-    let overlap = PendingPoint::merge_finished(&first, &backfill);
+    let overlap = PendingPoint::merge_finished(&first, backfill);
     assert_eq!((overlap.timestamp_ms, overlap.duration_ms), (1_000, 1_000));
     assert_eq!(overlap.resources.energy_mwh, 4.0);
     assert_eq!(overlap.resources.sample_count, u64::MAX);
@@ -225,5 +225,5 @@ fn live_and_repaired_energy_preserve_weighting_labels_and_overlap_boundaries() {
         duration_ms: 0,
         resources: first.resources,
     };
-    assert_eq!(PendingPoint::merge_finished(&zero, &zero), zero);
+    assert_eq!(PendingPoint::merge_finished(&zero, zero.clone()), zero);
 }

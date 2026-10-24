@@ -101,7 +101,7 @@ pub(super) fn adjacent_in_bucket(
 impl PendingPoint {
     pub(super) fn merge_finished(
         first: &ResourceHistoryPoint,
-        second: &ResourceHistoryPoint,
+        second: ResourceHistoryPoint,
     ) -> ResourceHistoryPoint {
         let mut merged = Self {
             end_ms: first.timestamp_ms.max(second.timestamp_ms),
@@ -112,7 +112,7 @@ impl PendingPoint {
             (Some(previous), Some(next)) => previous.intersect(next),
             _ => merged.availability = None,
         }
-        for point in [first, second] {
+        for point in [first, &second] {
             let resource = &point.resources;
             let duration = point.duration_ms;
             merged.duration_ms = merged.duration_ms.saturating_add(duration);
@@ -142,7 +142,7 @@ impl PendingPoint {
             .timestamp_ms
             .saturating_sub(first.duration_ms)
             .min(second.timestamp_ms.saturating_sub(second.duration_ms));
-        let mut point = merged.finish().unwrap_or_else(|| second.clone());
+        let mut point = merged.finish().unwrap_or(second);
         // Equal-endpoint backfills can overlap. Do not turn duplicated weight
         // into an observation of time before either sample began.
         point.duration_ms = point.timestamp_ms.saturating_sub(start);
@@ -188,18 +188,7 @@ impl PendingPoint {
             usage.measurement.coverage,
             1,
         );
-        self.peaks.merge(&ResourcePeaks {
-            cpu_percent: usage.compute.cpu_percent,
-            cpu_percent_of_machine: usage.compute.cpu_percent_of_machine,
-            memory_bytes: usage.compute.memory_bytes,
-            gpu_percent: usage.compute.gpu_percent,
-            gpu_busy_percent: usage.compute.gpu_busy_percent,
-            disk_read_bytes_per_second: usage.storage.disk_read_bytes_per_second,
-            disk_write_bytes_per_second: usage.storage.disk_write_bytes_per_second,
-            network_receive_bytes_per_second: usage.network.network_receive_bytes_per_second,
-            network_transmit_bytes_per_second: usage.network.network_transmit_bytes_per_second,
-            estimated_app_power_watts: usage.energy.estimated_app_power_watts,
-        });
+        self.peaks.merge(&ResourcePeaks::for_usage(usage));
     }
 
     pub(super) fn finish(self) -> Option<ResourceHistoryPoint> {
@@ -255,33 +244,6 @@ impl WeightedEnergy {
             coverage: rounded(self.coverage / duration, 4),
             ..Default::default()
         }
-    }
-}
-
-impl crate::model::ResourcePeaks {
-    fn merge(&mut self, other: &Self) {
-        self.cpu_percent = self.cpu_percent.max(other.cpu_percent);
-        self.cpu_percent_of_machine = self
-            .cpu_percent_of_machine
-            .max(other.cpu_percent_of_machine);
-        self.memory_bytes = self.memory_bytes.max(other.memory_bytes);
-        self.gpu_percent = self.gpu_percent.max(other.gpu_percent);
-        self.gpu_busy_percent = self.gpu_busy_percent.max(other.gpu_busy_percent);
-        self.disk_read_bytes_per_second = self
-            .disk_read_bytes_per_second
-            .max(other.disk_read_bytes_per_second);
-        self.disk_write_bytes_per_second = self
-            .disk_write_bytes_per_second
-            .max(other.disk_write_bytes_per_second);
-        self.network_receive_bytes_per_second = self
-            .network_receive_bytes_per_second
-            .max(other.network_receive_bytes_per_second);
-        self.network_transmit_bytes_per_second = self
-            .network_transmit_bytes_per_second
-            .max(other.network_transmit_bytes_per_second);
-        self.estimated_app_power_watts = self
-            .estimated_app_power_watts
-            .max(other.estimated_app_power_watts);
     }
 }
 

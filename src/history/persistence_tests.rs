@@ -105,7 +105,8 @@ fn saves_track_successful_generations_and_flush_pending_on_shutdown() -> anyhow:
     let path = dir.path().join("state");
     let mut store = HistoryStore::load(Some(path.clone()));
     let first = store.snapshot(false).unwrap();
-    let t = now_milliseconds() + 60_000;
+    // Keep the whole sample inside one future bucket, independent of wall-clock phase.
+    let t = (now_milliseconds() / BUCKET_MILLISECONDS + 4) * BUCKET_MILLISECONDS + 1000;
     store.record("app", t, 1.0, &ResourceUsage::default());
     persist_snapshot(first)?;
     assert!(

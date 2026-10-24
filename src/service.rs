@@ -16,22 +16,20 @@ use tokio::{
 
 use crate::{
     catalog::Catalog,
-    history::{HistoryStore, merged_labels, now_milliseconds, persist_snapshot},
+    history::{HistoryStore, now_milliseconds, persist_snapshot},
     hyprland::Snapshot,
     model::{
-        ApplicationEnergyOverview, ApplicationEnergySummary, ApplicationPage,
-        ApplicationResourceHistory, OperationResult,
+        ApplicationEnergyOverview, ApplicationPage, ApplicationResourceHistory, OperationResult,
     },
     resources::{ResourceSampler, ResourceSnapshot},
     settings::{ApplicationSettings, SettingsStore},
 };
 
 mod action;
-mod energy_labels;
-use energy_labels::energy_label;
 #[cfg(feature = "benchmarks")]
 pub(crate) mod benchmarks;
 mod catalog_watch;
+mod energy_labels;
 mod identity;
 mod operations;
 pub(crate) mod query;
@@ -359,48 +357,14 @@ impl ApplicationService {
         self.mark_resource_demand();
         let until_ms = now_milliseconds();
         let since_ms = params.since_ms.min(until_ms);
-        let mut totals = self.history.lock().await.energy_totals(since_ms, until_ms);
-        totals.sort_by(|left, right| {
-            right
-                .energy_mwh
-                .total_cmp(&left.energy_mwh)
-                .then(left.target_id.cmp(&right.target_id))
-        });
-        let total_energy_mwh = totals.iter().map(|value| value.energy_mwh).sum::<f64>();
-        let energy_source = merged_labels(totals.iter().map(|value| value.energy_source.as_str()));
-        let energy_confidence =
-            merged_labels(totals.iter().map(|value| value.energy_confidence.as_str()));
-        let catalog = self.catalog.read().await;
-        let applications = totals
-            .into_iter()
-            .take(params.limit.clamp(1, 100))
-            .map(|value| {
-                let identity = catalog.by_id(&value.target_id);
-                ApplicationEnergySummary {
-                    energy_label: energy_label(value.energy_mwh),
-                    name: identity
-                        .map(|entry| entry.name.clone())
-                        .unwrap_or_else(|| value.target_id.clone()),
-                    icon: identity.map(|entry| entry.icon.clone()).unwrap_or_default(),
-                    share: if total_energy_mwh > 0.0 {
-                        ((value.energy_mwh / total_energy_mwh) * 10_000.0).round() / 10_000.0
-                    } else {
-                        0.0
-                    },
-                    target_id: value.target_id,
-                    energy_mwh: value.energy_mwh,
-                }
-            })
-            .collect();
-        ApplicationEnergyOverview {
-            total_energy_label: energy_label(total_energy_mwh),
+        let totals = self.history.lock().await.energy_totals(since_ms, until_ms);
+        energy_labels::overview(
+            totals,
+            &*self.catalog.read().await,
             since_ms,
             until_ms,
-            total_energy_mwh: (total_energy_mwh * 10_000.0).round() / 10_000.0,
-            energy_source,
-            energy_confidence,
-            applications,
-        }
+            params.limit,
+        )
     }
 
     fn mark_resource_demand(&self) {

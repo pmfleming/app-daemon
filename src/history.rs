@@ -1,4 +1,5 @@
 use std::{
+    borrow::Cow,
     collections::{HashMap, VecDeque},
     path::{Path, PathBuf},
     sync::{
@@ -67,11 +68,13 @@ pub struct EnergyTotal {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-struct HistoryCursor<Text = String> {
+struct HistoryCursor<'a> {
     version: u8,
-    target_id: Text,
+    #[serde(borrow)]
+    target_id: Cow<'a, str>,
     after_timestamp_ms: u64,
-    epoch: Text,
+    #[serde(borrow)]
+    epoch: Cow<'a, str>,
 }
 
 #[derive(Debug)]
@@ -187,13 +190,13 @@ impl HistoryStore {
                 .is_none_or(|(start, end)| start <= end),
             "history window start exceeds its end"
         );
-        self.flush_expired(now_milliseconds());
-        self.prune(now_milliseconds());
+        let now = now_milliseconds();
+        self.flush_expired(now);
+        self.prune(now);
         let epoch = self.cursor_epochs.get(target_id).map_or("", String::as_str);
         let after = cursor
             .map(|value| decode_cursor(value, target_id, epoch))
-            .transpose()?
-            .map(|cursor| cursor.after_timestamp_ms);
+            .transpose()?;
         if let Some(after) = after {
             // Rewrite epochs stay stable during ordinary retention pruning.
             // Validate the cursor's anchor against all retained points (not
@@ -211,9 +214,8 @@ impl HistoryStore {
         let limit = limit.clamp(1, 10_000);
         // Recreate borrowed iterators instead of collecting the entire selected window.
         let window = || window_points(self.points.get(target_id), since_ms, until_ms);
-        let end = until_ms.unwrap_or_else(|| {
-            now_milliseconds().max(window().next_back().map_or(0, |p| p.timestamp_ms))
-        });
+        let end =
+            until_ms.unwrap_or_else(|| now.max(window().next_back().map_or(0, |p| p.timestamp_ms)));
         let start = since_ms.unwrap_or_else(|| {
             window()
                 .next()
@@ -396,7 +398,7 @@ impl HistoryStore {
                 && aggregate::adjacent_in_bucket(&points[index], &point)
                 && let Some(previous) = points.remove(index)
             {
-                point = PendingPoint::merge_finished(&previous, &point);
+                point = PendingPoint::merge_finished(&previous, point);
                 self.cursor_epochs.insert(id.clone(), new_cursor_epoch());
             }
             self.insert_points(id, [point]);
@@ -425,7 +427,7 @@ impl HistoryStore {
             }
             match points.binary_search_by_key(&point.timestamp_ms, |point| point.timestamp_ms) {
                 Ok(index) => {
-                    points[index] = Arc::new(PendingPoint::merge_finished(&points[index], &point))
+                    points[index] = Arc::new(PendingPoint::merge_finished(&points[index], point))
                 }
                 Err(index) => points.insert(index, Arc::new(point)),
             }
@@ -514,18 +516,19 @@ fn new_cursor_epoch() -> String {
 fn encode_cursor(target_id: &str, timestamp_ms: u64, epoch: &str) -> anyhow::Result<String> {
     let cursor = HistoryCursor {
         version: CURSOR_VERSION,
-        target_id,
+        target_id: target_id.into(),
         after_timestamp_ms: timestamp_ms,
-        epoch,
+        epoch: epoch.into(),
     };
     Ok(URL_SAFE_NO_PAD.encode(serde_json::to_vec(&cursor)?))
 }
 
-fn decode_cursor(value: &str, target_id: &str, epoch: &str) -> anyhow::Result<HistoryCursor> {
+fn decode_cursor(value: &str, target_id: &str, epoch: &str) -> anyhow::Result<u64> {
     let bytes = URL_SAFE_NO_PAD
         .decode(value)
         .context("history cursor is not valid base64url")?;
-    let cursor: HistoryCursor =
+    // Borrow unescaped fields, but still accept escaped JSON from older clients.
+    let cursor: HistoryCursor<'_> =
         serde_json::from_slice(&bytes).context("history cursor is not valid JSON")?;
     anyhow::ensure!(
         cursor.version == CURSOR_VERSION,
@@ -539,15 +542,7 @@ fn decode_cursor(value: &str, target_id: &str, epoch: &str) -> anyhow::Result<Hi
         cursor.epoch == epoch,
         "history changed or expired; restart pagination without a cursor"
     );
-    Ok(cursor)
-}
-
-pub(crate) fn merged_labels<'a>(values: impl Iterator<Item = &'a str>) -> String {
-    let mut merged = String::new();
-    for value in values {
-        merge_label(&mut merged, value);
-    }
-    available_label(merged)
+    Ok(cursor.after_timestamp_ms)
 }
 
 pub fn now_milliseconds() -> u64 {

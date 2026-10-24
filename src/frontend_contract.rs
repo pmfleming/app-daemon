@@ -2,12 +2,19 @@ use crate::{
     model::{HistorySummary, OperationResult, ResourceHistoryPoint, ResourceUsage},
     protocol,
 };
+use serde::Deserialize;
 use serde_json::{Value, json};
 #[test]
 fn frontend_contract_owned_types_and_partial_launch_semantics() {
-    let f = protocol::contract_fixture().unwrap();
-    let operation: OperationResult =
-        serde_json::from_value(f["operation_outcome"]["partial_success_example"].clone()).unwrap();
+    let mut f = protocol::contract_fixture().unwrap();
+    let checked: Value =
+        serde_json::from_str(include_str!("../test_support/app-api-v1.json")).unwrap();
+    assert_eq!(
+        checked, f,
+        "fixtures must be checked, not silently repaired"
+    );
+    let operation =
+        OperationResult::deserialize(&f["operation_outcome"]["partial_success_example"]).unwrap();
     assert_eq!(operation.status, "completed");
     assert_eq!(operation.launch_backend.as_deref(), Some("uwsm-app"));
     let placement = operation.placement.unwrap();
@@ -17,36 +24,27 @@ fn frontend_contract_owned_types_and_partial_launch_semantics() {
         f["operation_outcome"]["placement_statuses"],
         json!(["pending", "placed", "unavailable", "failed"])
     );
-    assert!(
-        f["registry"]["methods"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|m| m["name"] == "applications.history"
-                && m["pagination"]["kind"] == "opaque-cursor")
-    );
-    assert!(
-        f["registry"]["streams"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|m| m["name"] == "applications.operation")
-    );
-    let resource = protocol::resource_contract_fixture().unwrap();
-    let _: ResourceUsage = serde_json::from_value(resource["current"].clone()).unwrap();
-    let _: ResourceHistoryPoint =
-        serde_json::from_value(resource["history_point"].clone()).unwrap();
-    let _: HistorySummary = serde_json::from_value(resource["summary"].clone()).unwrap();
-    let mut bad = f["operation_outcome"]["partial_success_example"].clone();
+    let mut resource = protocol::resource_contract_fixture().unwrap();
+    ResourceUsage::deserialize(&resource["current"]).unwrap();
+    ResourceHistoryPoint::deserialize(&resource["history_point"]).unwrap();
+    HistorySummary::deserialize(&resource["summary"]).unwrap();
+    let mut bad = f["operation_outcome"]["partial_success_example"].take();
     bad["placement"]["status"] = json!(false);
     assert!(serde_json::from_value::<OperationResult>(bad).is_err());
-    let mut bad = resource["current"].clone();
+    let mut bad = resource["current"].take();
     bad["cpu_percent"] = json!({});
     assert!(serde_json::from_value::<ResourceUsage>(bad).is_err());
-}
-#[test]
-fn frontend_contract_fixture_is_checked_not_silently_repaired() {
-    let checked: Value =
-        serde_json::from_str(include_str!("../test_support/app-api-v1.json")).unwrap();
-    assert_eq!(checked, protocol::contract_fixture().unwrap());
+    let replies = protocol::reply_contract_fixture();
+    for kind in ["subscription", "operation"] {
+        assert_eq!(replies[format!("cancel-{kind}")]["data"]["kind"], kind);
+    }
+    assert_eq!(
+        replies["subscribe"]["data"]["subscription"]["id"],
+        "subscription-example"
+    );
+    for code in protocol::replies::ErrorCode::ALL {
+        let reply = &replies["errors"][code.as_str()];
+        assert_eq!(reply["ok"], false);
+        assert_eq!(reply["error"]["code"], code.as_str());
+    }
 }

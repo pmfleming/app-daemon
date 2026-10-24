@@ -56,6 +56,14 @@ pub(crate) fn merge_label(current: &mut String, next: &str) {
     }
 }
 
+pub(crate) fn merged_labels<'a>(values: impl Iterator<Item = &'a str>) -> String {
+    let mut merged = String::new();
+    for value in values {
+        merge_label(&mut merged, value);
+    }
+    available_label(merged)
+}
+
 pub(crate) fn available_label(value: String) -> String {
     if value.is_empty() {
         "unavailable".into()

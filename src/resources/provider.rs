@@ -79,6 +79,15 @@ pub(super) struct IoCounters {
     pub write_operations: u64,
 }
 
+impl std::ops::AddAssign for IoCounters {
+    fn add_assign(&mut self, other: Self) {
+        self.read_bytes = self.read_bytes.saturating_add(other.read_bytes);
+        self.write_bytes = self.write_bytes.saturating_add(other.write_bytes);
+        self.read_operations = self.read_operations.saturating_add(other.read_operations);
+        self.write_operations = self.write_operations.saturating_add(other.write_operations);
+    }
+}
+
 impl IoCounters {
     pub fn delta(self, previous: Self) -> Self {
         Self {

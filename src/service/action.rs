@@ -85,14 +85,6 @@ impl PreparedAction {
             None,
         )
     }
-
-    pub(super) async fn execute(
-        &self,
-        service: &super::ApplicationService,
-        id: &str,
-    ) -> anyhow::Result<ActionOutcome> {
-        execute_action(&self.catalog, &self.params, service, id).await
-    }
 }
 
 impl ApplicationAction {
@@ -202,39 +194,41 @@ impl super::ApplicationService {
     }
 }
 
-async fn execute_action(
-    catalog: &Catalog,
-    params: &ExecuteParams,
-    service: &super::ApplicationService,
-    operation_id: &str,
-) -> anyhow::Result<ActionOutcome> {
-    // The caller holds the application's launch lock. Never use a cached window
-    // baseline: a preceding launch or compositor event may not have reconciled yet.
-    service.refresh_ownership(false).await;
-    let ownership = service.ownership_snapshot();
-    let windows = Snapshot::load().await;
-    let progress = LaunchProgress {
-        service,
-        operation_id,
-    };
-    let target_id = &params.target_id;
-    match params.action {
-        ApplicationAction::Activate => activate(catalog, &windows, params, &progress).await,
-        ApplicationAction::Launch | ApplicationAction::DesktopAction => {
-            launch_on_workspace(catalog, &windows, params, &progress, false).await
-        }
-        ApplicationAction::FocusWindow => {
-            hyprland::focus(&selected_window(catalog, &windows, params, &ownership)?.address)
-                .await
-                .map(|()| ActionOutcome::new(catalog, target_id, "Focused"))
-        }
-        ApplicationAction::Close | ApplicationAction::CloseWindow => {
-            close_application(catalog, &windows, params, &ownership, &progress).await
-        }
-        ApplicationAction::MoveToWorkspace => {
-            move_to_workspace(catalog, &windows, params, &ownership)
-                .await
-                .map(|()| ActionOutcome::new(catalog, target_id, "Moved"))
+impl PreparedAction {
+    pub(super) async fn execute(
+        &self,
+        service: &super::ApplicationService,
+        operation_id: &str,
+    ) -> anyhow::Result<ActionOutcome> {
+        let Self { catalog, params } = self;
+        // The caller holds the application's launch lock. Never use a cached window
+        // baseline: a preceding launch or compositor event may not have reconciled yet.
+        service.refresh_ownership(false).await;
+        let ownership = service.ownership_snapshot();
+        let windows = Snapshot::load().await;
+        let progress = LaunchProgress {
+            service,
+            operation_id,
+        };
+        let target_id = &params.target_id;
+        match params.action {
+            ApplicationAction::Activate => activate(catalog, &windows, params, &progress).await,
+            ApplicationAction::Launch | ApplicationAction::DesktopAction => {
+                launch_on_workspace(catalog, &windows, params, &progress, false).await
+            }
+            ApplicationAction::FocusWindow => {
+                hyprland::focus(&selected_window(catalog, &windows, params, &ownership)?.address)
+                    .await
+                    .map(|()| ActionOutcome::new(catalog, target_id, "Focused"))
+            }
+            ApplicationAction::Close | ApplicationAction::CloseWindow => {
+                close_application(catalog, &windows, params, &ownership, &progress).await
+            }
+            ApplicationAction::MoveToWorkspace => {
+                move_to_workspace(catalog, &windows, params, &ownership)
+                    .await
+                    .map(|()| ActionOutcome::new(catalog, target_id, "Moved"))
+            }
         }
     }
 }

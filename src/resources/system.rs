@@ -33,7 +33,28 @@ impl EnergyProvider for LinuxResourceProvider {
 
 impl ResourceProvider for LinuxResourceProvider {
     fn system_cpu(&self) -> (u64, usize) {
-        read_system_cpu()
+        let Ok(stat) = fs::read_to_string("/proc/stat") else {
+            return (0, 1);
+        };
+        let mut total = 0_u64;
+        let mut logical_cpus = 0_usize;
+        for line in stat.lines() {
+            if let Some(values) = line.strip_prefix("cpu ") {
+                // Exclude guest and guest_nice, already represented in user and nice.
+                total = values
+                    .split_whitespace()
+                    .filter_map(|value| value.parse::<u64>().ok())
+                    .take(8)
+                    .sum();
+            } else if line
+                .strip_prefix("cpu")
+                .and_then(|value| value.split_whitespace().next())
+                .is_some_and(|value| value.chars().all(|character| character.is_ascii_digit()))
+            {
+                logical_cpus += 1;
+            }
+        }
+        (total, logical_cpus.max(1))
     }
 
     fn processes(&self) -> HashMap<u32, ProcessStat> {
@@ -41,19 +62,45 @@ impl ResourceProvider for LinuxResourceProvider {
     }
 
     fn process_memory(&self, pid: u32) -> MemoryUsage {
-        read_process_memory(pid)
+        match fs::read_to_string(format!("/proc/{pid}/smaps_rollup")) {
+            Ok(rollup) => parse_memory_rollup(&rollup),
+            Err(_) => parse_memory_status(
+                &fs::read_to_string(format!("/proc/{pid}/status")).unwrap_or_default(),
+            ),
+        }
     }
 
     fn process_io(&self, pid: u32) -> Option<ProcessIo> {
-        read_process_io(pid)
+        let value = fs::read_to_string(format!("/proc/{pid}/io")).ok()?;
+        Some(parse_process_io(&value))
     }
 
     fn process_files(&self, pid: u32) -> ProcessFiles {
-        read_process_file_sets(pid)
+        let Some(open) = read_open_files(&format!("/proc/{pid}/fd")) else {
+            return ProcessFiles::default();
+        };
+        ProcessFiles {
+            open,
+            mapped: read_open_files(&format!("/proc/{pid}/map_files")).unwrap_or_default(),
+            fd_available: true,
+        }
     }
 
     fn process_sockets(&self, pid: u32) -> Option<HashSet<u64>> {
-        read_process_sockets(pid)
+        let entries = fs::read_dir(format!("/proc/{pid}/fd")).ok()?;
+        Some(
+            entries
+                .filter_map(Result::ok)
+                .filter_map(|entry| {
+                    let link = fs::read_link(entry.path()).ok()?;
+                    link.to_str()?
+                        .strip_prefix("socket:[")?
+                        .strip_suffix(']')?
+                        .parse()
+                        .ok()
+                })
+                .collect(),
+        )
     }
 
     fn network_counters(&self, inodes: &HashSet<u64>) -> Option<HashMap<u64, NetworkCounters>> {
@@ -69,15 +116,42 @@ impl ResourceProvider for LinuxResourceProvider {
     }
 
     fn owned_process_cgroups(&self, processes: &HashMap<u32, ProcessStat>) -> HashMap<u32, String> {
-        owned_process_cgroups(processes)
+        let Ok(current) = fs::metadata("/proc/self") else {
+            return HashMap::new();
+        };
+        let uid = current.uid();
+        processes
+            .keys()
+            .filter_map(|&pid| {
+                let metadata = fs::metadata(format!("/proc/{pid}")).ok()?;
+                (metadata.uid() == uid)
+                    .then(|| process_cgroup(pid))
+                    .flatten()
+                    .map(|path| (pid, path))
+            })
+            .collect()
     }
 
     fn cgroup_counters(&self, path: &str) -> Option<CgroupCounters> {
-        read_cgroup_counters(path)
+        let root = Path::new("/sys/fs/cgroup").join(path.trim_start_matches('/'));
+        read_cgroup_counters_at(&root)
     }
 
     fn cgroup_members(&self, path: &str) -> HashSet<u32> {
-        read_cgroup_members(path)
+        let root = Path::new("/sys/fs/cgroup").join(path.trim_start_matches('/'));
+        walkdir::WalkDir::new(root)
+            .follow_links(false)
+            .into_iter()
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_type().is_file() && entry.file_name() == "cgroup.procs")
+            .filter_map(|entry| fs::read_to_string(entry.path()).ok())
+            .flat_map(|value| {
+                value
+                    .lines()
+                    .filter_map(|line| line.parse::<u32>().ok())
+                    .collect::<Vec<_>>()
+            })
+            .collect()
     }
 
     fn application_disk_usage(&self, target_id: &str) -> Option<DiskBreakdown> {
@@ -138,7 +212,9 @@ fn xdg_roots<const N: usize>(home: &Option<PathBuf>, roots: [(&str, &str); N]) -
     roots
         .into_iter()
         .filter_map(|(variable, fallback)| {
-            xdg_directory(variable, home.as_ref().map(|path| path.join(fallback)))
+            std::env::var_os(variable)
+                .map(PathBuf::from)
+                .or_else(|| home.as_ref().map(|path| path.join(fallback)))
         })
         .collect()
 }
@@ -163,10 +239,6 @@ fn append_flatpak_roots(
         permanent.extend([root.join("config"), root.join("data")]);
         temporary.push(root.join("cache"));
     }
-}
-
-fn xdg_directory(variable: &str, fallback: Option<PathBuf>) -> Option<PathBuf> {
-    std::env::var_os(variable).map(PathBuf::from).or(fallback)
 }
 
 struct DiskScanBudget {
@@ -248,28 +320,6 @@ fn allocated_directory_bytes(roots: &[PathBuf], budget: &mut DiskScanBudget) -> 
     (std::time::Instant::now() < budget.deadline).then_some(files.bytes)
 }
 
-fn owned_process_cgroups(processes: &HashMap<u32, ProcessStat>) -> HashMap<u32, String> {
-    let Ok(current) = fs::metadata("/proc/self") else {
-        return HashMap::new();
-    };
-    let uid = current.uid();
-    processes
-        .keys()
-        .filter_map(|&pid| {
-            let metadata = fs::metadata(format!("/proc/{pid}")).ok()?;
-            (metadata.uid() == uid)
-                .then(|| process_cgroup(pid))
-                .flatten()
-                .map(|path| (pid, path))
-        })
-        .collect()
-}
-
-fn read_cgroup_counters(path: &str) -> Option<CgroupCounters> {
-    let root = Path::new("/sys/fs/cgroup").join(path.trim_start_matches('/'));
-    read_cgroup_counters_at(&root)
-}
-
 fn read_cgroup_counters_at(root: &Path) -> Option<CgroupCounters> {
     let cpu_usage_usec = fs::read_to_string(root.join("cpu.stat"))
         .ok()
@@ -298,10 +348,12 @@ fn parse_cgroup_io(value: &str) -> Option<IoCounters> {
             key_values(line.split_whitespace(), |ch| ch == '='),
             ["rbytes", "wbytes", "rios", "wios"],
         );
-        counters.read_bytes = counters.read_bytes.saturating_add(read?);
-        counters.write_bytes = counters.write_bytes.saturating_add(write?);
-        counters.read_operations = counters.read_operations.saturating_add(reads?);
-        counters.write_operations = counters.write_operations.saturating_add(writes?);
+        counters += IoCounters {
+            read_bytes: read?,
+            write_bytes: write?,
+            read_operations: reads?,
+            write_operations: writes?,
+        };
     }
     Some(counters)
 }
@@ -328,52 +380,6 @@ fn selected_values<'a, const N: usize>(
         }
     }
     values
-}
-
-fn read_cgroup_members(path: &str) -> HashSet<u32> {
-    let root = Path::new("/sys/fs/cgroup").join(path.trim_start_matches('/'));
-    walkdir::WalkDir::new(root)
-        .follow_links(false)
-        .into_iter()
-        .filter_map(Result::ok)
-        .filter(|entry| entry.file_type().is_file() && entry.file_name() == "cgroup.procs")
-        .filter_map(|entry| fs::read_to_string(entry.path()).ok())
-        .flat_map(|value| {
-            value
-                .lines()
-                .filter_map(|line| line.parse::<u32>().ok())
-                .collect::<Vec<_>>()
-        })
-        .collect()
-}
-
-fn read_process_file_sets(pid: u32) -> ProcessFiles {
-    let fd_directory = format!("/proc/{pid}/fd");
-    let Some(open) = read_open_files(&fd_directory) else {
-        return ProcessFiles::default();
-    };
-    ProcessFiles {
-        open,
-        mapped: read_open_files(&format!("/proc/{pid}/map_files")).unwrap_or_default(),
-        fd_available: true,
-    }
-}
-
-fn read_process_sockets(pid: u32) -> Option<HashSet<u64>> {
-    let entries = fs::read_dir(format!("/proc/{pid}/fd")).ok()?;
-    Some(
-        entries
-            .filter_map(Result::ok)
-            .filter_map(|entry| {
-                let link = fs::read_link(entry.path()).ok()?;
-                link.to_str()?
-                    .strip_prefix("socket:[")?
-                    .strip_suffix(']')?
-                    .parse()
-                    .ok()
-            })
-            .collect(),
-    )
 }
 
 fn read_open_files(directory: &str) -> Option<HashMap<DiskFileId, DiskFile>> {
@@ -446,11 +452,6 @@ fn parse_field<T: std::str::FromStr>(
     fields.nth(skip)?.parse().ok()
 }
 
-fn read_process_io(pid: u32) -> Option<ProcessIo> {
-    let value = fs::read_to_string(format!("/proc/{pid}/io")).ok()?;
-    Some(parse_process_io(&value))
-}
-
 fn parse_process_io(value: &str) -> ProcessIo {
     let [
         read_bytes,
@@ -483,40 +484,6 @@ fn parse_process_io(value: &str) -> ProcessIo {
         logical_read_bytes,
         logical_write_bytes,
         cancelled_write_bytes,
-    }
-}
-
-fn read_system_cpu() -> (u64, usize) {
-    let Ok(stat) = fs::read_to_string("/proc/stat") else {
-        return (0, 1);
-    };
-    let mut total = 0_u64;
-    let mut logical_cpus = 0_usize;
-    for line in stat.lines() {
-        if let Some(values) = line.strip_prefix("cpu ") {
-            // Exclude guest and guest_nice, already represented in user and nice.
-            total = values
-                .split_whitespace()
-                .filter_map(|value| value.parse::<u64>().ok())
-                .take(8)
-                .sum();
-        } else if line
-            .strip_prefix("cpu")
-            .and_then(|value| value.split_whitespace().next())
-            .is_some_and(|value| value.chars().all(|character| character.is_ascii_digit()))
-        {
-            logical_cpus += 1;
-        }
-    }
-    (total, logical_cpus.max(1))
-}
-
-fn read_process_memory(pid: u32) -> MemoryUsage {
-    match fs::read_to_string(format!("/proc/{pid}/smaps_rollup")) {
-        Ok(rollup) => parse_memory_rollup(&rollup),
-        Err(_) => parse_memory_status(
-            &fs::read_to_string(format!("/proc/{pid}/status")).unwrap_or_default(),
-        ),
     }
 }
 
@@ -615,7 +582,7 @@ mod tests {
         );
         assert_eq!(parse_cgroup_io("").unwrap().read_bytes, 0);
         assert!(parse_cgroup_io("8:0 rbytes=1 wbytes=2 rios=3").is_none());
-        let io = parse_cgroup_io("8:0 rbytes=1 wbytes=2 rios=3 wios=4\n8:1 rbytes=5 rbytes=6 rbytes=bad wbytes=7 rios=8 wios=9").unwrap();
+        let io = parse_cgroup_io("8:0 rbytes=1 wbytes=2 rios=18446744073709551615 wios=4\n8:1 rbytes=5 rbytes=18446744073709551615 rbytes=bad wbytes=7 rios=8 wios=9").unwrap();
         assert_eq!(
             (
                 io.read_bytes,
@@ -623,7 +590,7 @@ mod tests {
                 io.read_operations,
                 io.write_operations
             ),
-            (7, 9, 11, 13)
+            (u64::MAX, 9, u64::MAX, 13)
         );
         #[cfg(feature = "benchmarks")]
         assert_eq!(

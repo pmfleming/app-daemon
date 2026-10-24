@@ -14,6 +14,27 @@ fn usage(cpu: f64, energy: f64) -> ResourceUsage {
 }
 
 #[test]
+fn cursor_decoding_borrows_plain_fields_and_preserves_escaped_targets() -> anyhow::Result<()> {
+    for target in ["app", "app\"escaped\n"] {
+        let cursor = super::encode_cursor(target, 42, "epoch")?;
+        assert_eq!(super::decode_cursor(&cursor, target, "epoch")?, 42);
+    }
+    #[cfg(feature = "benchmarks")]
+    {
+        let cursor = super::encode_cursor("app", 42, "epoch")?;
+        assert_eq!(
+            allocation_counter::measure(|| {
+                assert_eq!(super::decode_cursor(&cursor, "app", "epoch").unwrap(), 42);
+            })
+            .count_total,
+            1,
+            "only the base64 decode buffer should allocate"
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn cursor_lifecycle_survives_restart_but_rejects_expiry_rewrites_and_backfills()
 -> anyhow::Result<()> {
     let dir = tempfile::tempdir()?;

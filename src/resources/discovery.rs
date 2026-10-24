@@ -22,6 +22,7 @@ pub(super) struct KnownRoots {
 struct Targets {
     roots: HashMap<String, Vec<u32>>,
     owners: Owners,
+    children: HashMap<u32, Vec<u32>>,
 }
 
 impl super::ResourceSampler {
@@ -31,11 +32,15 @@ impl super::ResourceSampler {
         active_targets: &HashMap<String, Vec<u32>>,
     ) -> ResourceSnapshot {
         self.sample_with(|provider, _| {
+            let processes = provider.processes();
             let targets = Targets {
                 roots: active_targets.clone(),
                 owners: HashMap::new(),
+                children: process_children(
+                    processes.iter().map(|(&pid, stat)| (pid, stat.parent_pid)),
+                ),
             };
-            ProcessSample::discover(provider, targets, provider.processes(), None)
+            ProcessSample::discover(provider, targets, processes, None)
         })
     }
 
@@ -67,8 +72,6 @@ impl ProcessSample {
         processes: HashMap<u32, ProcessStat>,
         catalog: Option<&Catalog>,
     ) -> (Self, ResourceSnapshot) {
-        let children =
-            process_children(processes.iter().map(|(&pid, stat)| (pid, stat.parent_pid)));
         let roots = targets
             .roots
             .values()
@@ -84,7 +87,7 @@ impl ProcessSample {
             })
             .collect();
         let cgroup_members_by_path = cgroup_members_for_paths(provider, &cgroup_path_by_root);
-        let mut active = descendants(roots, &children);
+        let mut active = descendants(roots, &targets.children);
         active.extend(cgroup_members_by_path.values().flatten());
         active.retain(|pid| processes.contains_key(pid));
         let identities = active
@@ -94,7 +97,7 @@ impl ProcessSample {
         let mut snapshot = ResourceSnapshot {
             target_roots: targets.roots,
             target_owners: targets.owners,
-            children,
+            children: targets.children,
             cgroup_path_by_root,
             cgroup_members_by_path,
             ..Default::default()
@@ -205,7 +208,11 @@ impl KnownRoots {
                     .collect(),
             );
         }
-        Targets { roots, owners }
+        Targets {
+            roots,
+            owners,
+            children,
+        }
     }
 
     fn restore(
@@ -297,15 +304,15 @@ fn root_pids(pids: &HashSet<u32>, processes: &HashMap<u32, ProcessStat>) -> Vec<
 /// Propagate definite cgroup ownership to helpers lacking their own observation.
 /// Seed all explicit owners first, so nested application boundaries always win.
 fn inherit_owners(owners: &mut Owners, children: &HashMap<u32, Vec<u32>>) {
-    let mut pending = owners.keys().copied().collect::<Vec<_>>();
-    while let Some(pid) = pending.pop() {
-        let Some(owner) = owners.get(&pid).cloned() else {
-            continue;
-        };
+    let mut pending = owners
+        .iter()
+        .map(|(&pid, owner)| (pid, Arc::clone(owner)))
+        .collect::<Vec<_>>();
+    while let Some((pid, owner)) = pending.pop() {
         for &child in children.get(&pid).into_iter().flatten() {
             if let Entry::Vacant(entry) = owners.entry(child) {
                 entry.insert(Arc::clone(&owner));
-                pending.push(child);
+                pending.push((child, Arc::clone(&owner)));
             }
         }
     }

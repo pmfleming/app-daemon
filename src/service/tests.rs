@@ -37,7 +37,7 @@ async fn gated_blocking_worker() -> (std::sync::mpsc::Sender<()>, tokio::task::J
 }
 
 #[test]
-fn query_uses_immutable_snapshots_without_blocking_state_publication() {
+fn query_snapshots_release_locks_but_abandoned_workers_retain_admission() {
     use futures::poll;
     use std::sync::Arc;
     tokio::runtime::Builder::new_current_thread()
@@ -67,40 +67,9 @@ fn query_uses_immutable_snapshots_without_blocking_state_publication() {
             });
             // A control/read operation can still observe state while the worker is held.
             service.revision().await;
-            release.send(()).unwrap();
-            gate.await.unwrap();
-            let page = query.await.unwrap();
-            assert!(
-                !page.hyprland_available,
-                "publication cannot mutate the query's captured snapshot"
-            );
-            assert!(
-                service
-                    .query(serde_json::from_str("{}").unwrap())
-                    .await
-                    .unwrap()
-                    .hyprland_available
-            );
-        });
-}
-
-#[test]
-fn abandoned_queries_keep_blocking_admission_until_the_jobs_finish() {
-    use futures::poll;
-    tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .max_blocking_threads(1)
-        .build()
-        .unwrap()
-        .block_on(async {
-            let service = ApplicationService::build(false);
-            let (release, gate) = gated_blocking_worker().await;
-            let mut first = Box::pin(service.query(serde_json::from_str("{}").unwrap()));
-            let mut second = Box::pin(service.query(serde_json::from_str("{}").unwrap()));
-            assert!(poll!(first.as_mut()).is_pending());
-            assert!(poll!(second.as_mut()).is_pending());
-            drop(first);
-            drop(second);
+            let mut abandoned = Box::pin(service.query(serde_json::from_str("{}").unwrap()));
+            assert!(poll!(abandoned.as_mut()).is_pending());
+            drop(abandoned);
             assert_eq!(
                 service.query_slots.available_permits(),
                 0,
@@ -111,7 +80,11 @@ fn abandoned_queries_keep_blocking_admission_until_the_jobs_finish() {
             assert!(service.resources.try_write().is_ok());
             release.send(()).unwrap();
             gate.await.unwrap();
-            next.await.unwrap();
+            assert!(
+                !query.await.unwrap().hyprland_available,
+                "publication cannot mutate the query's captured snapshot"
+            );
+            assert!(next.await.unwrap().hyprland_available);
             assert_eq!(service.query_slots.available_permits(), 2);
         });
 }

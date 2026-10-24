@@ -1,5 +1,9 @@
 # RustQualityLens baseline
 
+The latest [paired metric refactor review](metric-refactor-review.md) records the
+history/provider/service changes, reduced test volume, increased coverage, and
+explicit remaining cognition/locality regressions. Tracked policy is unchanged.
+
 The [five-priority implementation](five-priority-implementation.md) records the
 next five independently committed improvements, verification and metric tradeoffs.
 

@@ -188,33 +188,27 @@ impl crate::model::MetricSummary {
 mod tests {
     use super::{ResourceAvailability, ResourceHistoryPoint};
     use crate::model::{HistoricalResourceUsage, ResourcePeaks};
-    fn point(timestamp: u64, duration: u64, cpu: f64) -> ResourceHistoryPoint {
-        let mut resources = HistoricalResourceUsage {
-            availability: Some(ResourceAvailability {
-                cpu: true,
-                ..Default::default()
-            }),
-            peaks: ResourcePeaks {
-                cpu_percent_of_machine: cpu + 10.0,
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-        resources.compute.cpu_percent_of_machine = cpu;
-        ResourceHistoryPoint {
-            timestamp_ms: timestamp,
-            duration_ms: duration,
-            resources,
-        }
-    }
-
     #[test]
     fn totals_and_confidence_use_only_available_clipped_intervals() {
-        let mut first = point(1000, 1000, 0.0);
-        first.resources.availability.as_mut().unwrap().energy = true;
-        first.resources.energy_source = "rapl".into();
-        first.resources.energy_confidence = "high".into();
-        first.resources.average_power_watts = 3.6;
+        let mut first = ResourceHistoryPoint {
+            timestamp_ms: 1000,
+            duration_ms: 1000,
+            resources: HistoricalResourceUsage {
+                availability: Some(ResourceAvailability {
+                    cpu: true,
+                    energy: true,
+                    ..Default::default()
+                }),
+                peaks: ResourcePeaks {
+                    cpu_percent_of_machine: 10.0,
+                    ..Default::default()
+                },
+                energy_source: "rapl".into(),
+                energy_confidence: "high".into(),
+                average_power_watts: 3.6,
+                ..Default::default()
+            },
+        };
         let mut second = first.clone();
         second.timestamp_ms = 3000;
         second.resources.energy_confidence = "low".into();
