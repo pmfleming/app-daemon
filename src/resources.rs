@@ -707,12 +707,11 @@ impl ResourceSampler {
             .refresh(identities, now, MEMORY_REFRESH_INTERVAL, |pid| {
                 provider.process_memory(pid)
             });
+        snapshot.processes.reserve(active_processes.len());
         for (&pid, process) in current {
             let identity = (pid, process.start_ticks);
-            let sampled_io = active_processes
-                .contains(&pid)
-                .then(|| provider.process_io(pid))
-                .flatten();
+            let active = active_processes.contains(&pid);
+            let sampled_io = active.then(|| provider.process_io(pid)).flatten();
             let mut usage = ProcessUsage::from_counters(
                 process,
                 self.previous_processes.get(&pid),
@@ -720,16 +719,7 @@ impl ResourceSampler {
                 system_delta,
                 logical_cpus,
             );
-            usage.memory = self
-                .memory
-                .samples
-                .get(&identity)
-                .copied()
-                .unwrap_or_default();
-            usage.files = self.open_files.samples.get(&identity).cloned();
-            usage.sockets = self.network.sockets(identity);
             snapshot.total_process_cpu_percent += usage.cpu_percent;
-            snapshot.processes.insert(pid, usage);
             self.previous_processes.insert(
                 pid,
                 PreviousProcess {
@@ -739,6 +729,20 @@ impl ResourceSampler {
                     io: sampled_io,
                 },
             );
+            // Keep CPU continuity for every process, but publish details only
+            // for discovered application members, not the entire desktop.
+            if !active {
+                continue;
+            }
+            usage.memory = self
+                .memory
+                .samples
+                .get(&identity)
+                .copied()
+                .unwrap_or_default();
+            usage.files = self.open_files.samples.get(&identity).cloned();
+            usage.sockets = self.network.sockets(identity);
+            snapshot.processes.insert(pid, usage);
         }
         for (pid, gpu) in self.gpu.sample(
             current_gpu

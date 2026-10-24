@@ -70,6 +70,53 @@ fn set_process(provider: &TestProvider, start_ticks: u64, bytes: u64, socket: u6
 }
 
 #[test]
+fn snapshots_keep_active_details_but_all_process_cpu_baselines() {
+    let provider = Arc::new(TestProvider::default());
+    provider.state.lock().unwrap().processes = [1, 2]
+        .into_iter()
+        .map(|pid| {
+            (
+                pid,
+                ProcessStat {
+                    parent_pid: 0,
+                    start_ticks: 1,
+                    total_ticks: 0,
+                    major_faults: 0,
+                    thread_count: 1,
+                },
+            )
+        })
+        .collect();
+    let mut sampler = ResourceSampler {
+        provider: provider.clone(),
+        ..Default::default()
+    };
+    sampler.sample_for_targets(&HashMap::new());
+    for roots in [vec![1], vec![2], vec![], vec![1, 2]] {
+        {
+            let mut state = provider.state.lock().unwrap();
+            state.system_ticks += 40;
+            state.processes.get_mut(&1).unwrap().total_ticks += 10;
+            state.processes.get_mut(&2).unwrap().total_ticks += 30;
+        }
+        let targets = HashMap::from([("app".into(), roots.clone())]);
+        let mut snapshot = sampler.sample_for_targets(&targets);
+        snapshot.energy_source = "rapl".into();
+        assert_eq!(snapshot.processes.len(), roots.len());
+        assert_eq!(sampler.previous_processes.len(), 2);
+        assert_eq!(snapshot.total_process_cpu_percent, 100.0);
+        let usage = snapshot.usage_for_target("app", roots.iter().copied());
+        let expected = roots
+            .iter()
+            .map(|pid| if *pid == 1 { 25.0 } else { 75.0 })
+            .sum::<f64>();
+        assert_eq!(usage.compute.cpu_percent, expected);
+        assert_eq!(usage.compute.process_count, roots.len() as u64);
+        assert_eq!(usage.energy.attributed_fraction, expected / 100.0);
+    }
+}
+
+#[test]
 fn identity_changes_resume_and_exit_rebaseline_resource_caches() {
     let provider = Arc::new(TestProvider::default());
     let mut sampler = ResourceSampler {

@@ -37,3 +37,27 @@ Raw evidence: `target/stages-0{.json,/}` and `target/stages-1{.json,/}`. Each sc
 snapshot uses the unchanged `quality/regression.toml` and local RQLens binary.
 As in the preceding review, authored-syntax evidence is partial only for the
 existing `declare_methods!` expansion; semantic dependency identity is complete.
+
+## Stage 2 — active-only process details
+
+Keep CPU baselines and the energy denominator for every observed process, but
+reserve/publish detailed usage only for discovered active members. Background
+processes no longer occupy the much larger `ProcessUsage` snapshot map. A matrix
+switches active roots through one process, the other, no processes and both;
+checks snapshot size, CPU continuity, process counts and attributed energy share.
+Existing PID-reuse, disappearance and resume regressions remain intact.
+
+The unchanged release workload (1,000 processes, 256 active; 30 iterations)
+measures calling-thread bytes/iteration **1,652,755→847,111** for warm sampling,
+and **1,639,457→833,813** with blocked disk workers. Allocations fall 5,317→5,308
+and 5,252→5,243 respectively. Stage 1 does not affect this file-free fixture.
+These are synthetic allocation results, not a latency guarantee or whole-process
+peak-memory measurement. Logs: `/tmp/app-stages-bench-{0,2}.log`.
+
+Full all-feature tests passed; after the final reserve change, focused resource
+tests, formatting and strict Clippy passed again. RQLens evidence is in
+`target/stages-2{.json,/}`. Compared with stage 1, the active-only guard raises
+production cognition 557→559, cyclomatic 1,274→1,275 and effort
+4,317,880→4,330,536. This explicit branch trades a small static increase for
+roughly 49% less allocated sampling memory. Architecture/escape metrics stay
+unchanged. Rust lines increase by 51, mostly the new transition regression.
