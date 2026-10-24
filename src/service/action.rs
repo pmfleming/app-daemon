@@ -125,6 +125,7 @@ pub(super) fn operation_result(
         })
         .unwrap_or_default();
     OperationResult {
+        revision: 1,
         close: None,
         id,
         action: params.action.as_str().into(),

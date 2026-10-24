@@ -6,7 +6,7 @@ use shelllist_daemon_core::{
     ApiIdentity, Correlation,
     wire::{Event as Envelope, Gap},
 };
-use zbus::object_server::SignalEmitter;
+use shelllist_daemon_tokio::EventEmitter;
 
 #[derive(Serialize, schemars::JsonSchema)]
 struct OperationData<'a> {
@@ -96,12 +96,9 @@ fn envelope(
         .expect("serializable app event"),
     }
 }
-pub(super) async fn emit(emitter: &SignalEmitter<'_>, event: Event) {
+pub(super) async fn emit(emitter: &EventEmitter<'_>, event: Event) {
     let stream = event.stream;
-    if let Err(error) = emitter
-        .emit(api::INTERFACE, "Event", &(stream, event.value.to_string()))
-        .await
-    {
+    if let Err(error) = emitter.emit(api::INTERFACE, stream, event.value).await {
         tracing::warn!(%stream, %error, "app-api event could not be emitted");
     }
 }

@@ -10,9 +10,9 @@ cargo test --locked
 
 Keep `daemon-framework` beside this checkout. All five daemons use that same current framework, including tracked uncommitted edits; do not vendor or revision-pin it. `local-build` snapshots the local graph once for Nix builds/checks without writing deployment pins. Cargo uses the sibling directly. Add new files to Git first. Hyprland IPC comes from the framework's `shelllist-hyprland` crate; no vendored copy or separate Hyprland checkout is needed. Registry dependencies and nixpkgs remain locked. Without Nix, install stable Rust plus `sh`, `sleep`, and `dbus-daemon`, then use `cargo test --locked`. Runtime launching needs UWSM or a user systemd manager plus the configured launch helpers.
 
-`app-daemon daemon` exports `org.laufan.AppDaemon`; `app-daemon client` bridges JSONL requests to the session service using `app-api` v1. Resource collection is isolated behind an injectable Linux provider so procfs, cgroup, and energy edge cases can be tested without relying on the host.
+`app-daemon daemon` exports `org.laufan.AppDaemon`; `app-daemon client` bridges JSONL requests to the session service using `app-api` v2. Resource collection is isolated behind an injectable Linux provider so procfs, cgroup, and energy edge cases can be tested without relying on the host.
 
-Application execution returns an accepted operation immediately. Subscribe to `applications.operation` for `running`, `completed`, `failed`, or `cancelled` updates, and cancel an active operation through the transport's existing `cancel` request. Passing `expected_revision` rejects stale actions; `move-to-workspace` also accepts `window_id` and `workspace_id`. Operation status is recoverable through `applications.operation.status` with `{"operation_id":"operation-..."}` (response: `data.operation_status`). Lookup and cancellation are scoped to the originating D-Bus connection. The latest 256 terminal outcomes are retained for up to 15 minutes; unknown, expired, or foreign IDs return `request-not-found`. A lagging operation subscription emits `resync-required`; look up outstanding IDs rather than waiting indefinitely. Admission is bounded to 128 active operations globally and 32 per connection.
+Application execution returns an accepted operation immediately. Subscribe to `applications.operation` for `running`, `completed`, `failed`, or `cancelled` updates, and cancel an active operation through the transport's existing `cancel` request. Passing `expected_revision` rejects stale actions; `move-to-workspace` also accepts `window_id` and `workspace_id`. Operation status is recoverable through `applications.operation.status` with `{"operation_id":"operation-..."}` (response: `data.operation_status`). Lookup, event visibility and cancellation are scoped to the originating transport connection. The latest 256 terminal outcomes are retained for up to 15 minutes; unknown, expired, or foreign IDs return `request-not-found`. A lagging operation subscription emits `resync-required`; look up outstanding IDs rather than waiting indefinitely. Admission is bounded to 128 active operations globally and 32 per connection.
 
 Use each application's `revision` as `expected_revision` for row actions. This target-scoped token covers the full desktop entry (including launch/action metadata), saved preferences, compositor availability, and the target's window identities/placements. Titles, focus order, resource samples and unrelated applications do not invalidate it. Page-level `revision` and `applications.revision` remain whole-state invalidation tokens and are still accepted as stricter action preconditions for existing clients. A mismatch returns `error.code: "stale-state"` **before admitting an operation**. Consumers should fetch a new snapshot and allow an explicit new action, never automatically replay a mutation. All numeric revision fields, including subscription events, are restricted to JavaScript-safe 53-bit integers.
 
@@ -40,9 +40,42 @@ Per-application category preferences are persisted in `$XDG_CONFIG_HOME/app-daem
 
 Launch operations with workspace context expose an optional `placement` object: `workspace_id`, `status` (`pending`, `placed`, `unavailable`, or `failed`), and an optional `reason`. It is retained in owner-scoped operation-status reads. `completed` with `placement.status` of `unavailable` or `failed` means the application **did start** but placement did not succeed; consumers must show the warning without replaying the launch. Ambiguous multi-window launches, singleton handoffs without a new window, unavailable baselines and unprovable ownership leave windows untouched. Launch-only shortcuts do not claim placement. Launch failure remains an ordinary failed operation without a launch receipt. See [placement safety and validation](docs/workspace-placement.md).
 
+## Direct Unix JSONL ingress
+
+The daemon also listens on `$XDG_RUNTIME_DIR/app-daemon.sock` through the shared
+framework. The runtime directory and socket must be private `0700`; the kernel
+peer UID must match. Bind/permission failures fail the daemon, including for D-Bus
+users. Stale-socket/lock handling and bounded ingress/output use the framework,
+not a second D-Bus client. Both transports enter the same `ServiceBoundary` and
+application coordinator. Disconnect cancels only that owner's subscription tasks
+and unfinished operations; completed launches are not undone. A crash during a
+handoff can leave its outcome unknown. New connections never inherit old status
+access and never automatically relaunch.
+
+`SHELLLIST_APP_SOCKET=1` opts the matching Shelllist into this listener. The daemon
+must already be running; this is not cold-start activation or a default switch.
+D-Bus and the stdio client remain supported.
+
+Each operation now carries a positive exact `revision`, assigned atomically with
+its cached status. It increases through the finite lifecycle phases, including
+cancellation; the never-reused operation ID is its ordering namespace. Status
+reads and events carry the same stamped value. Missing revisions require a
+matching frontend/producer build, on either transport. Catalog/window hashes are
+still content identities, not lifecycle or delivery counters. Lag is conservative
+upstream broadcast loss (possibly other owners), not proof of a missing owned
+transition; recover only outstanding owned IDs.
+
 ## Validation
 
 `cargo test --locked --all-features` includes private D-Bus/compositor integration tests. They create their own bus configuration, isolated HOME/XDG roots, command fixtures, and Unix sockets; no host desktop service is activated. Coverage includes metadata refresh, D-Bus-only activation/actions, operation recovery/ownership, launch failures, the real ten-second handoff timeout, cancellation, shutdown persistence, and compositor recovery.
+
+The socket integration case additionally covers validation parity, routed reads,
+foreign status/cancellation and event visibility, disconnect with unread acceptance,
+release, and SIGKILL/restart of the actual private daemon during a fake handoff.
+The ignored `socket::native_quickshell_app_socket_acceptance` runs the real shared
+Quickshell transport against those fixtures with `SHELLLIST_SOURCE` and
+`SHELLLIST_QUICKSHELL` set; its bus addresses are deliberately nonexistent and it
+only queries/subscribes. It does not measure release performance, load or hardware.
 
 An opt-in, two-case test uses the real user systemd manager to verify that service-mode executables and scope-mode GTK handoffs survive stopping their host service. It creates only uniquely named temporary fixture units/processes and cleans them up:
 

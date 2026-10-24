@@ -59,25 +59,36 @@ impl OperationRegistry {
         Ok(result)
     }
 
-    pub fn running(&mut self, result: OperationResult) -> bool {
-        let Some(active) = self.active.get_mut(&result.id) else {
-            return false;
-        };
-        active.result = result;
-        true
+    pub fn running(&mut self, mut result: OperationResult) -> Option<OperationResult> {
+        let active = self.active.get_mut(&result.id)?;
+        result.revision = active.result.revision + 1;
+        active.result = result.clone();
+        Some(result)
     }
 
-    pub fn finish(&mut self, result: OperationResult) -> bool {
-        let Some(active) = self.active.claim(&result.id) else {
-            return false;
-        };
-        self.recent.record(result.id.clone(), active.owner, result);
-        true
+    pub fn finish(&mut self, mut result: OperationResult) -> Option<OperationResult> {
+        let active = self.active.claim(&result.id)?;
+        result.revision = active.value.result.revision + 1;
+        self.recent
+            .record(result.id.clone(), active.owner, result.clone());
+        Some(result)
     }
 
     pub fn cancel(&mut self, id: &str, owner: Option<&str>) -> Option<OperationResult> {
         let active = self.active.claim_owned(id, owner)?;
         Some(record_cancelled(&mut self.recent, active))
+    }
+
+    pub fn cancel_owner(&mut self, owner: &str) -> Vec<OperationResult> {
+        let ids: Vec<_> = self
+            .active
+            .iter()
+            .filter(|(_, operation)| operation.owner.as_deref() == Some(owner))
+            .map(|(id, _)| id.clone())
+            .collect();
+        ids.into_iter()
+            .filter_map(|id| self.cancel(&id, Some(owner)))
+            .collect()
     }
 
     pub fn cancel_all(&mut self) -> Vec<OperationResult> {
@@ -129,16 +140,16 @@ impl super::ApplicationService {
                 result.message = error.to_string();
             }
         }
-        if self.operations.lock().await.finish(result.clone()) {
+        if let Some(result) = self.operations.lock().await.finish(result) {
             let _ = self.operation_changes.send(result);
         }
     }
 
     pub(super) async fn publish_running(&self, result: OperationResult) -> bool {
         let mut operations = self.operations.lock().await;
-        if !operations.running(result.clone()) {
+        let Some(result) = operations.running(result) else {
             return false;
-        }
+        };
         let _ = self.operation_changes.send(result);
         true
     }
@@ -161,6 +172,12 @@ impl super::ApplicationService {
         self.operations.lock().await.status(operation_id, owner)
     }
 
+    pub async fn cancel_owner_operations(&self, owner: &str) {
+        for cancelled in self.operations.lock().await.cancel_owner(owner) {
+            let _ = self.operation_changes.send(cancelled);
+        }
+    }
+
     pub async fn cancel_all_operations(&self) {
         for cancelled in self.operations.lock().await.cancel_all() {
             let _ = self.operation_changes.send(cancelled);
@@ -174,6 +191,7 @@ fn record_cancelled(
 ) -> OperationResult {
     active.value.abort.abort();
     let mut result = active.value.result;
+    result.revision += 1;
     result.status = "cancelled".into();
     result.message = "Operation cancelled".into();
     if let Some(close) = &mut result.close {
@@ -244,6 +262,33 @@ mod tests {
         assert!(registry.status("operation-0", None).is_none());
     }
 
+    #[tokio::test]
+    async fn revisions_are_atomic_with_status_and_owner_cancellation_is_local() {
+        let mut registry = OperationRegistry::default();
+        for (id, owner) in [(1, "a"), (2, "b")] {
+            let accepted = registry
+                .spawn(Some(owner.into()), result(id, "accepted"), |_| {
+                    std::future::pending()
+                })
+                .unwrap();
+            assert_eq!(accepted.revision, 1);
+        }
+        let before = registry.status("operation-1", Some("a")).unwrap();
+        let running = registry.running(result(1, "running")).unwrap();
+        assert_eq!(running.revision, before.revision + 1);
+        assert_eq!(registry.status("operation-1", Some("a")), Some(running));
+        let terminal = registry.cancel_owner("a").pop().unwrap();
+        assert_eq!(terminal.revision, 3);
+        assert_eq!(registry.status("operation-1", Some("a")), Some(terminal));
+        assert!(registry.status("operation-1", Some("b")).is_none());
+        assert_eq!(
+            registry.status("operation-2", Some("b")).unwrap().status,
+            "accepted"
+        );
+        assert!(registry.cancel_owner("a").is_empty());
+        registry.cancel_all();
+    }
+
     fn assert_rejected(registry: &mut OperationRegistry, owner: Option<&str>, id: usize) {
         let (started, mut receiver) = tokio::sync::oneshot::channel();
         assert!(
@@ -270,8 +315,8 @@ mod tests {
         assert_eq!(close.status, "unknown");
         assert_eq!(close.dispatched_window_ids, ["window-a"]);
         assert!(cancelled.message.contains("may still take effect"));
-        assert!(!registry.running(result(0, "running")));
-        assert!(!registry.finish(result(0, "completed")));
+        assert!(registry.running(result(0, "running")).is_none());
+        assert!(registry.finish(result(0, "completed")).is_none());
         assert_eq!(
             registry.status("operation-0", None).unwrap().status,
             "cancelled"

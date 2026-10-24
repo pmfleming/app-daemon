@@ -500,6 +500,10 @@ pub struct CloseObservation {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct OperationResult {
+    /// Monotonic within this never-reused operation ID, assigned with cached status.
+    /// Each operation has finitely many phases; this is not a transport sequence.
+    #[schemars(range(min = 1, max = 9007199254740991_u64))]
+    pub revision: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub close: Option<CloseObservation>,
     pub id: String,

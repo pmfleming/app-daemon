@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use serde_json::Value;
-use shelllist_daemon_tokio::{OwnedTaskRegistry, directed_emitter};
+use shelllist_daemon_tokio::{EventEmitter, OwnedTaskRegistry, directed_emitter};
 use tokio::sync::broadcast;
 use zbus::{connection, message::Header, object_server::SignalEmitter};
 
@@ -16,6 +16,7 @@ use crate::{
 };
 
 pub(crate) mod events;
+mod socket;
 
 pub struct AppDaemon {
     boundary: shelllist_daemon_tokio::ServiceBoundary,
@@ -24,14 +25,8 @@ pub struct AppDaemon {
     subscriptions: Arc<OwnedTaskRegistry>,
 }
 
-#[zbus::interface(name = "org.laufan.AppDaemon2")]
 impl AppDaemon {
-    async fn call(
-        &self,
-        method: &str,
-        params_json: &str,
-        #[zbus(header)] header: Header<'_>,
-    ) -> String {
+    async fn call_owned(&self, method: &str, params_json: &str, owner: Option<String>) -> String {
         let Some(declared) = protocol::methods::Method::parse(method) else {
             return api::error(
                 ErrorCode::UnsupportedMethod,
@@ -40,7 +35,7 @@ impl AppDaemon {
             .to_string();
         };
         let admitted = match self.boundary.call_policy(
-            header.sender().map(|s| s.as_str()),
+            owner.as_deref(),
             method,
             params_json,
             declared.policy(),
@@ -60,22 +55,19 @@ impl AppDaemon {
         };
         let api = self.api.clone();
         let method = declared.name();
-        let owner = header.sender().map(ToString::to_string);
         admitted
             .run(async move { api.dispatch_owned(method, params, owner).await })
             .await
     }
 
-    async fn subscribe(
+    async fn subscribe_owned(
         &self,
         streams: Vec<String>,
-        #[zbus(header)] header: Header<'_>,
-        #[zbus(signal_emitter)] emitter: SignalEmitter<'_>,
+        owner: Option<String>,
+        destination: EventEmitter<'static>,
+        stop: impl std::future::Future<Output = ()> + Send + 'static,
     ) -> String {
-        let _admitted = match self
-            .boundary
-            .subscribe(header.sender().map(|s| s.as_str()), &streams)
-        {
+        let _admitted = match self.boundary.subscribe(owner.as_deref(), &streams) {
             Ok(admitted) => admitted,
             Err(response) => return response,
         };
@@ -96,9 +88,6 @@ impl AppDaemon {
             }
         };
         let id = self.subscriptions.next_id("subscription");
-        let owner = header.sender().map(ToString::to_string);
-        let destination = directed_emitter(&emitter, &header);
-        let connection = destination.connection().clone();
         let changes = self.applications.subscribe_state();
         let operations = self.applications.subscribe_operations();
         let applications = Arc::clone(&self.applications);
@@ -109,10 +98,11 @@ impl AppDaemon {
             destination,
             id.clone(),
             selected,
+            owner.clone(),
         );
-        if let Err(error) =
-            self.subscriptions
-                .spawn_for_owner(id.clone(), owner, &connection, events)
+        if let Err(error) = self
+            .subscriptions
+            .spawn_until(id.clone(), owner, stop, events)
         {
             return api::error(ErrorCode::SubscriptionUnavailable, error.to_string()).to_string();
         }
@@ -122,20 +112,12 @@ impl AppDaemon {
         .to_string()
     }
 
-    async fn cancel(&self, request_id: &str, #[zbus(header)] header: Header<'_>) -> String {
-        let _admitted = match self
-            .boundary
-            .cancel(header.sender().map(|s| s.as_str()), request_id)
-        {
+    async fn cancel_owned(&self, request_id: &str, owner: Option<&str>) -> String {
+        let _admitted = match self.boundary.cancel(owner, request_id) {
             Ok(admitted) => admitted,
             Err(response) => return response,
         };
-        let owner = header.sender().map(ToString::to_string);
-        if self
-            .subscriptions
-            .cancel_owned(request_id, owner.as_deref())
-            .await
-        {
+        if self.subscriptions.cancel_owned(request_id, owner).await {
             return api::success(Reply::Cancelled {
                 cancelled: request_id.into(),
                 kind: RequestKind::Subscription,
@@ -144,7 +126,7 @@ impl AppDaemon {
         }
         if self
             .applications
-            .cancel_operation_owned(request_id, owner.as_deref())
+            .cancel_operation_owned(request_id, owner)
             .await
             .is_some()
         {
@@ -159,6 +141,52 @@ impl AppDaemon {
             format!("No active request named {request_id}"),
         )
         .to_string()
+    }
+}
+
+#[zbus::interface(name = "org.laufan.AppDaemon2")]
+impl AppDaemon {
+    async fn call(
+        &self,
+        method: &str,
+        params_json: &str,
+        #[zbus(header)] header: Header<'_>,
+    ) -> String {
+        self.call_owned(
+            method,
+            params_json,
+            header.sender().map(ToString::to_string),
+        )
+        .await
+    }
+
+    async fn subscribe(
+        &self,
+        streams: Vec<String>,
+        #[zbus(header)] header: Header<'_>,
+        #[zbus(signal_emitter)] emitter: SignalEmitter<'_>,
+    ) -> String {
+        let owner = header.sender().map(ToString::to_string);
+        let watched = owner.clone();
+        let monitor = self.subscriptions.owner_monitor(emitter.connection());
+        self.subscribe_owned(
+            streams,
+            owner,
+            directed_emitter(&emitter, &header).into(),
+            async move {
+                if let Some(owner) = watched {
+                    let _ = monitor.wait(&owner).await;
+                } else {
+                    std::future::pending::<()>().await;
+                }
+            },
+        )
+        .await
+    }
+
+    async fn cancel(&self, request_id: &str, #[zbus(header)] header: Header<'_>) -> String {
+        self.cancel_owned(request_id, header.sender().map(|s| s.as_str()))
+            .await
     }
 
     #[zbus(signal)]
@@ -190,9 +218,10 @@ async fn forward_events(
     applications: Arc<ApplicationService>,
     mut changes: broadcast::Receiver<StateRevision>,
     mut operations: broadcast::Receiver<crate::model::OperationResult>,
-    emitter: SignalEmitter<'static>,
+    emitter: EventEmitter<'static>,
     subscription_id: String,
     selected: (bool, bool, bool),
+    owner: Option<String>,
 ) {
     let mut previous = applications.revisions().await;
     for (stream, enabled) in [
@@ -228,7 +257,10 @@ async fn forward_events(
             operation = operations.recv(), if selected.2 => {
                 match operation {
                     Ok(operation) => {
-                        events::emit(&emitter, events::operation(&subscription_id, &operation)).await;
+                        // Subscription visibility follows the same ownership gate as status.
+                        if applications.operation_status_owned(&operation.id, owner.as_deref()).await.is_some() {
+                            events::emit(&emitter, events::operation(&subscription_id, &operation)).await;
+                        }
                     }
                     Err(broadcast::error::RecvError::Lagged(count)) => {
                         tracing::warn!(count, "application operation subscriber lagged");
@@ -277,7 +309,7 @@ pub async fn run() -> Result<()> {
         applications,
         subscriptions: Arc::clone(&subscriptions),
     };
-    let _connection = connection::Builder::session()
+    let connection = connection::Builder::session()
         .context("connect to session D-Bus")?
         .name(BUS_NAME)
         .context("claim app-daemon bus name")?
@@ -291,7 +323,23 @@ pub async fn run() -> Result<()> {
         object_path = OBJECT_PATH,
         "app-daemon started"
     );
-    let result = shelllist_daemon_tokio::wait_for_shutdown().await;
+    let (stop, stopped) = tokio::sync::oneshot::channel();
+    let mut listener = tokio::spawn(socket::listen(connection.clone(), async {
+        let _ = stopped.await;
+    }));
+    let (mut result, joined) = tokio::select! {
+        result = shelllist_daemon_tokio::wait_for_shutdown() => (result, false),
+        result = &mut listener => (result.context("join app socket listener").and_then(|r| r), true),
+    };
+    let _ = stop.send(());
+    if !joined {
+        result = result.and(
+            listener
+                .await
+                .context("join app socket shutdown")
+                .and_then(|r| r),
+        );
+    }
     subscriptions.shutdown().await;
     shutdown_applications.shutdown().await;
     result

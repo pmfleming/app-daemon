@@ -16,6 +16,11 @@ use crate::{
 
 pub(super) fn operation(status: &str) -> OperationResult {
     OperationResult {
+        revision: match status {
+            "accepted" => 1,
+            "running" => 2,
+            _ => 3,
+        },
         id: "operation-example".into(),
         action: "activate".into(),
         target_id: "Alpha".into(),

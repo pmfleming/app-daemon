@@ -12,7 +12,7 @@ const ENDPOINT: DaemonEndpoint =
     DaemonEndpoint::new("app-daemon", BUS_NAME, OBJECT_PATH, INTERFACE);
 
 #[derive(Debug, Clone, Copy)]
-struct AppCorrelation;
+pub(crate) struct AppCorrelation;
 
 impl CorrelationPolicy for AppCorrelation {
     fn operation_id<'a>(&self, response: &'a Value) -> Option<&'a str> {

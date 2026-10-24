@@ -49,6 +49,7 @@ impl Session {
         ] {
             fs::create_dir_all(root.path().join(dir))?;
         }
+        fs::set_permissions(root.path().join("run"), fs::Permissions::from_mode(0o700))?;
         let shell = tool("sh")?;
         let sleeper = tool("sleep")?;
         executable(
@@ -180,6 +181,16 @@ impl Session {
 
     pub async fn restart(&mut self) -> Result<()> {
         self.shutdown().await?;
+        self.start_again().await
+    }
+
+    pub async fn crash_restart(&mut self) -> Result<()> {
+        // SIGKILL the private OS process: no graceful owner cleanup or unlink.
+        self.daemon.kill().await?;
+        self.start_again().await
+    }
+
+    async fn start_again(&mut self) -> Result<()> {
         self.daemon = self.daemon_command.spawn()?;
         let bus = zbus::fdo::DBusProxy::new(&self.connection).await?;
         timeout(DEADLINE, async {

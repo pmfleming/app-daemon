@@ -38,7 +38,7 @@ pub fn reply_contract_fixture() -> Value {
 /// Offline examples built with the same event constructors as live subscriptions.
 pub fn event_contract_fixture() -> Value {
     let mut fixture = serde_json::Map::new();
-    for status in ["completed", "failed", "cancelled"] {
+    for status in ["running", "completed", "failed", "cancelled"] {
         let operation = fixtures::operation(status);
         fixture.insert(
             status.into(),

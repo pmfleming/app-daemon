@@ -8,6 +8,8 @@ mod extra;
 mod ownership;
 #[path = "session/placement.rs"]
 mod placement;
+#[path = "session/socket.rs"]
+mod socket;
 mod support;
 
 use anyhow::{Context, Result};

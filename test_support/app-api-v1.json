@@ -11,6 +11,7 @@
         "status": "unavailable",
         "workspace_id": "3"
       },
+      "revision": 3,
       "status": "completed",
       "target_id": "org.example.App.desktop"
     },
@@ -3421,6 +3422,13 @@
                 }
               ]
             },
+            "revision": {
+              "description": "Monotonic within this never-reused operation ID, assigned with cached status.\nEach operation has finitely many phases; this is not a transport sequence.",
+              "format": "uint64",
+              "maximum": 9007199254740991,
+              "minimum": 1,
+              "type": "integer"
+            },
             "status": {
               "type": "string"
             },
@@ -3429,6 +3437,7 @@
             }
           },
           "required": [
+            "revision",
             "id",
             "action",
             "target_id",
@@ -3586,6 +3595,13 @@
                 }
               ]
             },
+            "revision": {
+              "description": "Monotonic within this never-reused operation ID, assigned with cached status.\nEach operation has finitely many phases; this is not a transport sequence.",
+              "format": "uint64",
+              "maximum": 9007199254740991,
+              "minimum": 1,
+              "type": "integer"
+            },
             "status": {
               "type": "string"
             },
@@ -3594,6 +3610,7 @@
             }
           },
           "required": [
+            "revision",
             "id",
             "action",
             "target_id",
@@ -3910,6 +3927,13 @@
                         }
                       ]
                     },
+                    "revision": {
+                      "description": "Monotonic within this never-reused operation ID, assigned with cached status.\nEach operation has finitely many phases; this is not a transport sequence.",
+                      "format": "uint64",
+                      "maximum": 9007199254740991,
+                      "minimum": 1,
+                      "type": "integer"
+                    },
                     "status": {
                       "type": "string"
                     },
@@ -3918,6 +3942,7 @@
                     }
                   },
                   "required": [
+                    "revision",
                     "id",
                     "action",
                     "target_id",
@@ -4057,6 +4082,13 @@
                         }
                       ]
                     },
+                    "revision": {
+                      "description": "Monotonic within this never-reused operation ID, assigned with cached status.\nEach operation has finitely many phases; this is not a transport sequence.",
+                      "format": "uint64",
+                      "maximum": 9007199254740991,
+                      "minimum": 1,
+                      "type": "integer"
+                    },
                     "status": {
                       "type": "string"
                     },
@@ -4065,6 +4097,7 @@
                     }
                   },
                   "required": [
+                    "revision",
                     "id",
                     "action",
                     "target_id",
@@ -4204,6 +4237,13 @@
                         }
                       ]
                     },
+                    "revision": {
+                      "description": "Monotonic within this never-reused operation ID, assigned with cached status.\nEach operation has finitely many phases; this is not a transport sequence.",
+                      "format": "uint64",
+                      "maximum": 9007199254740991,
+                      "minimum": 1,
+                      "type": "integer"
+                    },
                     "status": {
                       "type": "string"
                     },
@@ -4212,6 +4252,7 @@
                     }
                   },
                   "required": [
+                    "revision",
                     "id",
                     "action",
                     "target_id",
@@ -4351,6 +4392,13 @@
                         }
                       ]
                     },
+                    "revision": {
+                      "description": "Monotonic within this never-reused operation ID, assigned with cached status.\nEach operation has finitely many phases; this is not a transport sequence.",
+                      "format": "uint64",
+                      "maximum": 9007199254740991,
+                      "minimum": 1,
+                      "type": "integer"
+                    },
                     "status": {
                       "type": "string"
                     },
@@ -4359,6 +4407,7 @@
                     }
                   },
                   "required": [
+                    "revision",
                     "id",
                     "action",
                     "target_id",
@@ -4498,6 +4547,13 @@
                         }
                       ]
                     },
+                    "revision": {
+                      "description": "Monotonic within this never-reused operation ID, assigned with cached status.\nEach operation has finitely many phases; this is not a transport sequence.",
+                      "format": "uint64",
+                      "maximum": 9007199254740991,
+                      "minimum": 1,
+                      "type": "integer"
+                    },
                     "status": {
                       "type": "string"
                     },
@@ -4506,6 +4562,7 @@
                     }
                   },
                   "required": [
+                    "revision",
                     "id",
                     "action",
                     "target_id",
