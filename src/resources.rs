@@ -24,10 +24,10 @@ use discovery::ProcessSample;
 use disk::AppDiskCache;
 use energy::EnergySampler;
 use provider::{
-    CgroupCounters, DiskBreakdown, DiskFile, DiskFileId, IoCounters, MemoryUsage, NetworkCounters,
+    CgroupCounters, DiskBreakdown, DiskFileId, IoCounters, MemoryUsage, NetworkCounters,
     ProcessFiles, ProcessIo, ProcessStat, ResourceProvider,
 };
-use system::{LinuxResourceProvider, merge_disk_files};
+use system::LinuxResourceProvider;
 
 #[derive(Debug)]
 struct PreviousProcess {
@@ -89,10 +89,16 @@ struct ResourceAttribution<'a> {
     cgroups_cover_process_trees: bool,
 }
 
+#[derive(Default)]
+struct FileFootprint {
+    open_bytes: u64,
+    referenced_bytes: u64,
+    temporary: bool,
+}
+
 struct ProcessAggregation {
     usage: ResourceUsage,
-    open_files: HashMap<DiskFileId, DiskFile>,
-    referenced_files: HashMap<DiskFileId, DiskFile>,
+    files: HashMap<DiskFileId, FileFootprint>,
     network_sockets: HashSet<u64>,
     covered_processes: u64,
     memory_processes: u64,
@@ -107,8 +113,7 @@ impl Default for ProcessAggregation {
     fn default() -> Self {
         Self {
             usage: ResourceUsage::unprojected(),
-            open_files: HashMap::new(),
-            referenced_files: HashMap::new(),
+            files: HashMap::new(),
             network_sockets: HashSet::new(),
             covered_processes: 0,
             memory_processes: 0,
@@ -117,6 +122,23 @@ impl Default for ProcessAggregation {
             network_processes: 0,
             storage_processes: 0,
             file_processes: 0,
+        }
+    }
+}
+
+impl ProcessAggregation {
+    fn include_files(&mut self, files: &ProcessFiles) {
+        // Preserve the open-only maximum even when a mapping observes a larger size.
+        let observations = files
+            .open
+            .iter()
+            .map(|(id, file)| (id, file, file.bytes))
+            .chain(files.mapped.iter().map(|(id, file)| (id, file, 0)));
+        for (&id, file, open_bytes) in observations {
+            let footprint = self.files.entry(id).or_default();
+            footprint.open_bytes = footprint.open_bytes.max(open_bytes);
+            footprint.referenced_bytes = footprint.referenced_bytes.max(file.bytes);
+            footprint.temporary |= file.temporary;
         }
     }
 }
@@ -274,9 +296,7 @@ impl ResourceSnapshot {
             aggregate.storage_processes += u64::from(process.storage_available);
             if let Some(files) = process.files.as_ref().filter(|files| files.fd_available) {
                 aggregate.file_processes += 1;
-                merge_disk_files(&mut aggregate.open_files, &files.open);
-                merge_disk_files(&mut aggregate.referenced_files, &files.open);
-                merge_disk_files(&mut aggregate.referenced_files, &files.mapped);
+                aggregate.include_files(files);
             }
             aggregate
                 .network_sockets
@@ -320,17 +340,19 @@ impl ResourceSnapshot {
     }
 
     fn apply_file_storage(aggregate: &mut ProcessAggregation) {
-        aggregate.usage.storage.open_file_disk_bytes =
-            aggregate.open_files.values().map(|file| file.bytes).sum();
-        for file in aggregate.referenced_files.values() {
+        for file in aggregate.files.values() {
             let storage = &mut aggregate.usage.storage;
-            add_counter(&mut storage.referenced_file_disk_bytes, file.bytes);
+            add_counter(&mut storage.open_file_disk_bytes, file.open_bytes);
+            add_counter(
+                &mut storage.referenced_file_disk_bytes,
+                file.referenced_bytes,
+            );
             let classified = if file.temporary {
                 &mut storage.referenced_file_temporary_bytes
             } else {
                 &mut storage.referenced_file_permanent_bytes
             };
-            add_counter(classified, file.bytes);
+            add_counter(classified, file.referenced_bytes);
         }
     }
 

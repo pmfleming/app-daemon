@@ -40,6 +40,61 @@ fn acquisition_defers_projection_without_changing_public_defaults() {
 }
 
 #[test]
+fn file_union_saturates_and_keeps_open_sizes_separate_from_mappings() {
+    let id = DiskFileId {
+        device: 1,
+        inode: 1,
+    };
+    let open = ProcessFiles {
+        open: HashMap::from([(
+            id,
+            DiskFile {
+                bytes: 128,
+                temporary: false,
+            },
+        )]),
+        ..Default::default()
+    };
+    let mapped = ProcessFiles {
+        mapped: HashMap::from([(
+            id,
+            DiskFile {
+                bytes: 256,
+                temporary: true,
+            },
+        )]),
+        ..Default::default()
+    };
+    for files in [[&open, &mapped], [&mapped, &open]] {
+        for extra in [0, u64::MAX] {
+            let mut aggregate = super::ProcessAggregation::default();
+            for files in files {
+                aggregate.include_files(files);
+            }
+            aggregate.include_files(&ProcessFiles {
+                open: HashMap::from([(
+                    DiskFileId {
+                        device: 2,
+                        inode: 1,
+                    },
+                    DiskFile {
+                        bytes: extra,
+                        temporary: false,
+                    },
+                )]),
+                ..Default::default()
+            });
+            ResourceSnapshot::apply_file_storage(&mut aggregate);
+            let usage = aggregate.usage.storage;
+            assert_eq!(usage.open_file_disk_bytes, extra.saturating_add(128));
+            assert_eq!(usage.referenced_file_disk_bytes, extra.saturating_add(256));
+            assert_eq!(usage.referenced_file_temporary_bytes, 256);
+            assert_eq!(usage.referenced_file_permanent_bytes, extra);
+        }
+    }
+}
+
+#[test]
 fn totals_resources_without_double_counting_roots_in_either_attribution_mode() {
     let file = |inode, bytes| {
         (

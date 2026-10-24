@@ -407,21 +407,6 @@ fn read_open_files(directory: &str) -> Option<HashMap<DiskFileId, DiskFile>> {
     )
 }
 
-pub(super) fn merge_disk_files(
-    target: &mut HashMap<DiskFileId, DiskFile>,
-    source: &HashMap<DiskFileId, DiskFile>,
-) {
-    for (&id, &file) in source {
-        target
-            .entry(id)
-            .and_modify(|current| {
-                current.bytes = current.bytes.max(file.bytes);
-                current.temporary |= file.temporary;
-            })
-            .or_insert(file);
-    }
-}
-
 fn temporary_path(path: &Path) -> bool {
     path.starts_with("/tmp")
         || path.starts_with("/var/tmp")
