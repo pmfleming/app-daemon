@@ -110,3 +110,80 @@ effort falls 4,342,605→4,337,737; cognition 559→560 and cyclomatic 1,276→1
 increase with the selection boundary and partition guard. Clone sites fall by
 one; architecture/duplication/escape metrics are unchanged. Rust lines rise by 80,
 primarily differential regression coverage.
+
+## Stage 5 — fresh systemd identity observations
+
+Share validated InvocationID/MainPID readers. InvocationID is now a nonzero
+16-byte value at the boundary. Both observations remain uncached, and the read
+order is unchanged: invocation, PID, procfs identity, confirming PID, confirming
+invocation, active state, confirming procfs identity. Recovery deadlines,
+concurrency bounds and rejection of historical ExecMainPID remain intact.
+
+Extended the existing private-bus recovery test rather than adding another
+registered test. It now covers zero, short and long InvocationIDs; changing
+MainPID; and a restart during the confirming PID read with the **same** PID,
+alongside inactive units, historical PIDs and changing invocations. The last case
+specifically protects read ordering. A deliberate reversal of confirming reads
+failed with `invalid identity mode 8` (unexpected recovered owner); the mutation
+was immediately reverted and the correct code passed all validation afterward.
+This is one targeted mutation experiment, not a general mutation score.
+
+`live_main_process` cognition falls 4→1, cyclomatic 15→12 and effort
+31,500→13,436. Production peak cyclomatic complexity falls 15→12; stage-wide
+production effort falls 4,337,737→4,326,066. Total production cyclomatic complexity
+rises by two because of the two reusable readers. Full all-feature tests, strict
+Clippy, formatting and RQLens verification pass. The larger recovery matrix makes
+the private-bus suite take about 55 seconds rather than roughly 20 seconds.
+
+## Overall evidence and limits
+
+| Metric | Baseline | Final |
+| --- | ---: | ---: |
+| Warm sampling allocated bytes/iteration | 1,652,755 | 847,111 |
+| Empty query allocated bytes/iteration | 6,821,434 | 6,781,434 |
+| Production cognitive sum | 557 | 557 |
+| Production cyclomatic sum / max | 1,274 / 15 | 1,281 / 12 |
+| Production effort sum / max | 4,320,344 / 67,797 | 4,326,066 / 80,453 |
+| All-code cognitive / cyclomatic sums | 765 / 1,972 | 783 / 2,006 |
+| All-code effort sum | 9,235,813 | 9,571,062 |
+| Mean locality / leverage | 98.425 / 27.286 | 98.425 / 27.286 |
+| Duplicated lines | 670 | 651 |
+| Escape findings | 0 | 0 |
+| Production-file clone sites | 78 | 77 |
+| All Rust clone sites | 135 | 137 |
+| Rust physical lines | 15,358 | 15,675 |
+| Registered tests, including ignored | 61 | 65 |
+| Line coverage | 92.6091% | 92.6972% |
+| Covered / executable lines | 7,493 / 8,091 | 7,578 / 8,175 |
+| Region coverage | 90.6196% | 90.7607% |
+
+These changes prioritize correctness and bounded runtime work. They do **not**
+achieve uniform reductions in complexity, size or test volume: four focused
+regressions were added, and the active-only sampling guard raises that function's
+effort. The unchanged zero-regression comparator therefore still rejects the
+increases. No tracked baseline or policy exception was changed to conceal them.
+Production labels use the existing gate's naming filter, including its known
+`frontend_contract.rs` classification; file-level counts also include inline tests.
+Clone-site counts exclude qualified `Arc::clone` and are not allocation counts.
+
+Final validation: 45 unit and 15 private-bus integration tests pass; five ignored
+helper/profile/real-systemd cases remain ignored by the parent suites. Formatting,
+strict all-target/all-feature Clippy, rustdoc, cargo-machete and the three Python
+gate tests pass. RQLens verify has zero error failures, five existing practice
+warnings and fourteen skipped optional checks. Line/region coverage does not
+establish branch or full mutation coverage, nor real desktop/systemd behavior.
+
+Static evidence: `target/stages-{0,1,2,3,4,5}{.json,/}`. Final coverage:
+`target/stages-5-coverage.json`, generated with `cargo llvm-cov --locked
+--all-features --json` and LLVM 21.1.8 tools. Baseline coverage reuses
+`target/review-2026-after-coverage.json` from the preceding review: its associated
+RQLens source digest exactly matches the new stage-0 source digest. Benchmark and
+mutation logs are also retained in `target/stages-evidence/`.
+
+All stages use Rust 1.95.0 and the same RQLens binary SHA-256
+`423a8b2f8222b9840871efdabc82f29e700a949ba5d83cfd7f8c3c27386f0158`.
+Measured input fingerprints: `80101020eceb25ff` → `51458e7e2c86e4de`.
+Artifacts describe pre-commit snapshots (committing changes Git provenance).
+Final verification and static fingerprints match. No new incomplete-source
+exceptions were introduced; the existing unexpanded protocol macro remains
+explicitly partial, while semantic dependency identity is complete.

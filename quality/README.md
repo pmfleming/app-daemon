@@ -1,5 +1,9 @@
 # RustQualityLens baseline
 
+The [five-stage quality follow-up](five-stage-quality-review.md) records five
+independent commits for file accounting, active-only sampling, indexed history,
+top-k ranking and systemd identity recovery, with measured benefits and tradeoffs.
+
 The latest [paired metric refactor review](metric-refactor-review.md) records the
 history/provider/service changes, reduced test volume, increased coverage, and
 explicit remaining cognition/locality regressions. Tracked policy is unchanged.

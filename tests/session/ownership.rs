@@ -45,15 +45,17 @@ impl Manager {
 struct Service {
     pid: u32,
     mode: Arc<AtomicUsize>,
+    pid_reads: Arc<AtomicUsize>,
 }
 #[zbus::interface(name = "org.freedesktop.systemd1.Service")]
 impl Service {
     #[zbus(property, name = "MainPID")]
     fn main_pid(&self) -> u32 {
-        if self.mode.load(Ordering::SeqCst) == 1 {
-            0
-        } else {
-            self.pid
+        let read = self.pid_reads.fetch_add(1, Ordering::SeqCst);
+        match self.mode.load(Ordering::SeqCst) {
+            1 => 0,
+            7 if read % 2 == 1 => 0,
+            _ => self.pid,
         }
     }
     #[zbus(property, name = "ExecMainPID")]
@@ -64,6 +66,7 @@ impl Service {
 struct UnitState {
     mode: Arc<AtomicUsize>,
     reads: Arc<AtomicUsize>,
+    pid_reads: Arc<AtomicUsize>,
 }
 #[zbus::interface(name = "org.freedesktop.systemd1.Unit")]
 impl UnitState {
@@ -78,14 +81,15 @@ impl UnitState {
     #[zbus(property, name = "InvocationID")]
     fn invocation_id(&self) -> Vec<u8> {
         let read = self.reads.fetch_add(1, Ordering::SeqCst);
-        vec![
-            if self.mode.load(Ordering::SeqCst) == 3 {
-                (read % 250 + 1) as u8
-            } else {
-                1
-            };
-            16
-        ]
+        match self.mode.load(Ordering::SeqCst) {
+            3 => vec![(read % 250 + 1) as u8; 16],
+            4 => vec![0; 16],
+            5 => vec![1; 15],
+            6 => vec![1; 17],
+            // Restart during the confirming PID read, without changing the PID.
+            8 => vec![(self.pid_reads.load(Ordering::SeqCst) / 2 % 250 + 1) as u8; 16],
+            _ => vec![1; 16],
+        }
     }
 }
 async fn manager(
@@ -95,6 +99,7 @@ async fn manager(
     reads: Arc<AtomicUsize>,
 ) -> Result<zbus::Connection> {
     let connection = session.other_connection().await?;
+    let pid_reads = Arc::default();
     connection
         .object_server()
         .at("/org/freedesktop/systemd1", Manager)
@@ -106,12 +111,20 @@ async fn manager(
             Service {
                 pid,
                 mode: mode.clone(),
+                pid_reads: Arc::clone(&pid_reads),
             },
         )
         .await?;
     connection
         .object_server()
-        .at(PATH, UnitState { mode, reads })
+        .at(
+            PATH,
+            UnitState {
+                mode,
+                reads,
+                pid_reads,
+            },
+        )
         .await?;
     connection.request_name("org.freedesktop.systemd1").await?;
     Ok(connection)
@@ -262,21 +275,20 @@ async fn generated_wayland_identity_is_grouped_placed_and_recovered_after_daemon
 }
 
 #[tokio::test]
-async fn restart_recovery_rejects_historical_pids_inactive_units_and_changed_invocations()
--> Result<()> {
+async fn restart_recovery_rejects_stale_unstable_and_malformed_unit_identity() -> Result<()> {
     let mut session = Session::start(true).await?;
     let mut app = tokio::process::Command::new(tool("sleep")?)
-        .arg("60")
+        .arg("120")
         .kill_on_drop(true)
         .spawn()?;
     let pid = app.id().unwrap();
-    let mode = Arc::new(AtomicUsize::new(1));
+    let mode = Arc::new(AtomicUsize::new(8));
     let reads = Arc::new(AtomicUsize::new(0));
     let _manager = manager(&session, pid, mode.clone(), reads.clone()).await?;
     session
         .compositor
         .set(&json!([window("0x900", pid)]).to_string());
-    for invalid in [1, 2, 3] {
+    for invalid in [8, 1, 2, 3, 4, 5, 6, 7] {
         mode.store(invalid, Ordering::SeqCst);
         session.restart().await?;
         let before = reads.load(Ordering::SeqCst);
@@ -286,7 +298,8 @@ async fn restart_recovery_rejects_historical_pids_inactive_units_and_changed_inv
                 let apps = applications(&session).await?;
                 assert_eq!(
                     apps.iter().find(|a| a["id"] == "ok.desktop").unwrap()["running_count"],
-                    0
+                    0,
+                    "invalid identity mode {invalid}"
                 );
                 if reads.load(Ordering::SeqCst) >= before + 4 {
                     return Result::<()>::Ok(());

@@ -79,24 +79,30 @@ async fn live_main_process(
 ) -> Option<Identity> {
     let unit = uncached_proxy(connection, &path, "org.freedesktop.systemd1.Unit").await?;
     let service = uncached_proxy(connection, &path, "org.freedesktop.systemd1.Service").await?;
-    let invocation: Vec<u8> = unit.get_property("InvocationID").await.ok()?;
-    if invocation.len() != 16 || invocation.iter().all(|b| *b == 0) {
-        return None;
-    }
-    let pid = service.get_property::<u32>("MainPID").await.ok()?;
-    if pid == 0 {
-        return None;
-    }
+    let invocation = invocation_id(&unit).await?;
+    let pid = main_pid(&service).await?;
     let identity = process_identity(pid)?;
-    // These proxies never cache: a restart between reads must invalidate the claim.
-    let current_pid: u32 = service.get_property("MainPID").await.ok()?;
-    let current_invocation: Vec<u8> = unit.get_property("InvocationID").await.ok()?;
+    // Never cache or reorder these reads: InvocationID brackets both PID reads
+    // and the initial procfs identity, rejecting a restart during observation.
+    let current_pid = main_pid(&service).await?;
+    let current_invocation = invocation_id(&unit).await?;
     let active: String = unit.get_property("ActiveState").await.ok()?;
     (active == "active"
         && current_pid == pid
         && invocation == current_invocation
         && process_identity(pid) == Some(identity))
     .then_some(identity)
+}
+
+async fn invocation_id(unit: &zbus::Proxy<'_>) -> Option<[u8; 16]> {
+    let bytes: Vec<u8> = unit.get_property("InvocationID").await.ok()?;
+    let invocation = bytes.try_into().ok()?;
+    (invocation != [0; 16]).then_some(invocation)
+}
+
+async fn main_pid(service: &zbus::Proxy<'_>) -> Option<u32> {
+    let pid = service.get_property("MainPID").await.ok()?;
+    (pid != 0).then_some(pid)
 }
 
 async fn uncached_proxy<'a>(
