@@ -1,4 +1,4 @@
-use std::{borrow::Cow, cmp::Reverse, collections::HashMap};
+use std::{borrow::Cow, cmp::Ordering, collections::HashMap};
 
 use serde::{Deserialize, Serialize};
 
@@ -114,21 +114,7 @@ pub(crate) fn page(
             .into_iter()
             .map(|(id, clients)| Candidate::new(Cow::Owned(id), None, clients, settings)),
     );
-    let query = params.query.trim().to_lowercase();
-    applications.retain_mut(|candidate| {
-        (params.category.is_empty() || candidate.category() == params.category)
-            && rank(candidate, &query)
-    });
-    applications.sort_by_cached_key(|app| {
-        (
-            Reverse(app.score),
-            app.name().to_lowercase(),
-            app.id.clone(),
-        )
-    });
-    let limit = params.limit.clamp(1, 1000);
-    let has_more = applications.len() > limit;
-    applications.truncate(limit);
+    let (applications, has_more) = Candidate::select(applications, params);
     ApplicationPage {
         revision,
         generation: params.generation,
@@ -176,9 +162,34 @@ struct Candidate<'a> {
     match_score: i64,
     match_kind: &'static str,
     score: i64,
+    sort_name: String,
 }
 
 impl<'a> Candidate<'a> {
+    fn select(mut candidates: Vec<Self>, params: &QueryParams) -> (Vec<Self>, bool) {
+        let query = params.query.trim().to_lowercase();
+        candidates.retain_mut(|candidate| {
+            (params.category.is_empty() || candidate.category() == params.category)
+                && rank(candidate, &query)
+        });
+        let limit = params.limit.clamp(1, 1000);
+        let has_more = candidates.len() > limit;
+        if has_more {
+            candidates.select_nth_unstable_by(limit, Self::compare);
+            candidates.truncate(limit);
+        }
+        candidates.sort_unstable_by(Self::compare);
+        (candidates, has_more)
+    }
+
+    fn compare(&self, other: &Self) -> Ordering {
+        other
+            .score
+            .cmp(&self.score)
+            .then_with(|| self.sort_name.cmp(&other.sort_name))
+            .then_with(|| self.id.cmp(&other.id))
+    }
+
     fn new(
         id: Cow<'a, str>,
         entry: Option<&'a CatalogEntry>,
@@ -202,6 +213,7 @@ impl<'a> Candidate<'a> {
             match_kind: "none",
             runtime_score,
             score: runtime_score,
+            sort_name: String::new(),
         }
     }
 
@@ -327,6 +339,8 @@ struct SearchMatch {
 }
 
 fn rank(application: &mut Candidate<'_>, query: &str) -> bool {
+    // The same normalized name serves matching and sorting, even for owned IDs.
+    application.sort_name = application.name().to_lowercase();
     let Some(matched) = search_match(application, query) else {
         return false;
     };
@@ -352,14 +366,14 @@ fn search_match(application: &Candidate<'_>, query: &str) -> Option<SearchMatch>
         });
     }
 
-    let name = application.name().to_lowercase();
+    let name = application.sort_name.as_str();
     let id = application.id.to_lowercase();
     let name_penalty = name.len().min(500) as i64;
     let id_penalty = id.len().min(500) as i64;
     // A contiguous name/ID match already contains every query term. Do not
     // allocate the metadata corpus or acronym for these higher-priority tiers.
-    if let Some(matched) = direct_match(&name, &id, id.trim_end_matches(".desktop"), query)
-        .or_else(|| substring_match(&name, query, 9_500, 10, name_penalty, "name-substring"))
+    if let Some(matched) = direct_match(name, &id, id.trim_end_matches(".desktop"), query)
+        .or_else(|| substring_match(name, query, 9_500, 10, name_penalty, "name-substring"))
         .or_else(|| substring_match(&id, query, 9_000, 10, id_penalty, "id-substring"))
     {
         return Some(matched);
@@ -456,5 +470,71 @@ fn append_initials(acronym: &mut String, value: &str) {
         }
         previous_alphanumeric = character.is_ascii_alphanumeric();
         previous_lowercase = character.is_ascii_lowercase();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Candidate, QueryParams, rank};
+    use crate::settings::SettingsStore;
+    use std::{borrow::Cow, cmp::Reverse};
+
+    #[test]
+    fn top_k_matches_full_sort_with_owned_ids_case_ties_and_clamped_limits() {
+        let settings = SettingsStore::load(None);
+        let candidates = || {
+            (0..1006)
+                .rev()
+                .map(|index| {
+                    Candidate::new(
+                        Cow::Owned(format!(
+                            "window-group:{}{:04}",
+                            if index % 2 == 0 { "a" } else { "A" },
+                            index / 2
+                        )),
+                        None,
+                        Vec::new(),
+                        &settings,
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        for (query, category) in [("", ""), ("a00", ""), ("missing", ""), ("", "not-shell")] {
+            // Independent full-sort reference uses public ordering rules, not compare().
+            let mut expected = candidates()
+                .into_iter()
+                .filter_map(|mut candidate| {
+                    ((category.is_empty() || candidate.category() == category)
+                        && rank(&mut candidate, query))
+                    .then(|| {
+                        (
+                            Reverse(candidate.score),
+                            candidate.name().to_lowercase(),
+                            candidate.id.into_owned(),
+                        )
+                    })
+                })
+                .collect::<Vec<_>>();
+            expected.sort();
+            for limit in [0, 1, 2, 499, 1000, usize::MAX] {
+                let params = QueryParams {
+                    query: query.into(),
+                    category: category.into(),
+                    generation: 0,
+                    limit,
+                };
+                let (selected, has_more) = Candidate::select(candidates(), &params);
+                let limit = limit.clamp(1, 1000);
+                assert_eq!(has_more, expected.len() > limit);
+                assert_eq!(
+                    selected.iter().map(|c| c.id.as_ref()).collect::<Vec<_>>(),
+                    expected
+                        .iter()
+                        .take(limit)
+                        .map(|(_, _, id)| id.as_str())
+                        .collect::<Vec<_>>()
+                );
+            }
+        }
     }
 }

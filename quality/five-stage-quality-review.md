@@ -83,3 +83,30 @@ Full all-feature tests, formatting and strict Clippy pass. Evidence:
 duplication and escape metrics are unchanged. Rust lines increase by 105 (95 test
 lines). This stage prioritizes bounded prefix work and explicit boundary coverage,
 not a static-metric or test-volume win.
+
+## Stage 4 — top-k application ranking
+
+Cache each candidate's normalized name once for matching and ordering. Compare
+IDs by reference rather than copying owned window-group IDs into cached sort
+keys. Partition at the clamped limit, discard the tail, and sort only selected
+candidates. Score-descending/name-ascending/ID-ascending ordering is unchanged.
+Selection now has a named boundary, separate from page revision and hydration.
+
+A differential full-sort reference covers 1,006 owned IDs, case-folded name ties,
+empty/matching/missing queries, category rejection and limits 0, 1, 2, 499, 1,000
+and `usize::MAX`. Existing public-page identity/resource/ranking tests still pass.
+Full all-feature tests, formatting and strict Clippy pass.
+
+The unchanged release fixture shows empty-query bytes 6,821,434→6,781,434 and
+allocations 54,704→54,703. Search allocations fall 8,110→8,098, but bytes rise
+582,043→605,163: keeping the normalized-name slot in every candidate costs more
+when very few candidates match. Observed median times were 5,104→3,978 µs (empty)
+and 515→511 µs (search), but these short synthetic runs are not latency guarantees.
+The benchmark uses catalog IDs; the owned-ID path is exercised by the regression,
+not inferred from those allocation numbers.
+
+Evidence: `target/stages-4{.json,/}`, `/tmp/app-stages-bench-{0,4}.log`. Production
+effort falls 4,342,605→4,337,737; cognition 559→560 and cyclomatic 1,276→1,279
+increase with the selection boundary and partition guard. Clone sites fall by
+one; architecture/duplication/escape metrics are unchanged. Rust lines rise by 80,
+primarily differential regression coverage.
