@@ -9,14 +9,14 @@ use tokio::{
     time::timeout,
 };
 
-struct Bridge {
+pub(super) struct Bridge {
     child: Child,
     input: ChildStdin,
     output: Lines<BufReader<ChildStdout>>,
     seen: Vec<Value>,
 }
 impl Bridge {
-    fn start(session: &Session) -> Result<Self> {
+    pub(super) fn start(session: &Session) -> Result<Self> {
         let mut child = session.bridge()?;
         Ok(Self {
             input: child.stdin.take().context("bridge stdin")?,
@@ -53,7 +53,7 @@ impl Bridge {
         self.until(|v| v["kind"] == "response" && v["id"] == id)
             .await
     }
-    async fn call(&mut self, id: &str, method: &str, params: Value) -> Result<Value> {
+    pub(super) async fn call(&mut self, id: &str, method: &str, params: Value) -> Result<Value> {
         self.send(json!({"op":"call", "id":id, "method":method, "params":params, "route":route(id, "call")})).await?;
         let reply = self.response(id).await?;
         assert_eq!(reply["route"], route(id, "call"));
@@ -81,7 +81,7 @@ impl Bridge {
         }
         Ok(())
     }
-    async fn shutdown(mut self) -> Result<Vec<Value>> {
+    pub(super) async fn shutdown(mut self) -> Result<Vec<Value>> {
         self.send(json!({"op":"shutdown", "id":"shutdown"})).await?;
         assert_eq!(
             self.response("shutdown").await?["response"]["shutdown"],
@@ -113,11 +113,24 @@ async fn oversized_effect_is_not_dispatched_and_two_bridges_remain_owned_and_usa
     let a_subscription = a.subscribe().await?;
     let b_subscription = b.subscribe().await?;
     assert_ne!(a_subscription, b_subscription);
-    // This is otherwise a valid effect: the service accepts unknown additive parameters.
+    // The complete record at the production ceiling is accepted, including its route.
+    let mut maximum = json!({"op":"call", "id":"maximum",
+        "method":"applications.revision", "params":{"padding":""}, "route":route("maximum", "call")});
+    let padding_bytes = MAX_JSONL_REQUEST_BYTES - serde_json::to_vec(&maximum)?.len();
+    maximum["params"]["padding"] = json!("x".repeat(padding_bytes));
+    let mut maximum = serde_json::to_vec(&maximum)?;
+    assert_eq!(maximum.len(), MAX_JSONL_REQUEST_BYTES);
+    maximum.push(b'\n');
+    timeout(DEADLINE, a.input.write_all(&maximum)).await??;
+    let accepted = a.response("maximum").await?;
+    assert_eq!(accepted["response"]["ok"], true);
+    assert_eq!(accepted["route"], route("maximum", "call"));
+    // This is otherwise a valid effect, padded only with legal JSON whitespace.
     // Leave it unterminated while the other connection proves it can still make progress.
     let oversized = json!({"op":"call", "id":"oversized", "method":"applications.execute",
-        "params":{"target_id":"ok.desktop", "action":"launch", "padding":"x".repeat(MAX_JSONL_REQUEST_BYTES + 1)}, "route":route("oversized", "call")});
-    let bytes = serde_json::to_vec(&oversized)?;
+        "params":{"target_id":"ok.desktop", "action":"launch"}, "route":route("oversized", "call")});
+    let mut bytes = serde_json::to_vec(&oversized)?;
+    bytes.resize(MAX_JSONL_REQUEST_BYTES + 1, b' ');
     timeout(DEADLINE, a.input.write_all(&bytes)).await??;
     assert_eq!(
         b.call("healthy", "applications.revision", json!({}))

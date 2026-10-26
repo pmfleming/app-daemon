@@ -63,6 +63,10 @@ impl LocalJsonlService for Service {
         }
     }
 }
+#[cfg(test)]
+#[path = "socket/qualification.rs"]
+mod qualification;
+
 fn decode(response: String) -> Result<Value> {
     Ok(serde_json::from_str(&response)?)
 }

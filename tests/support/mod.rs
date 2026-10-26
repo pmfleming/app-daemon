@@ -12,7 +12,7 @@ use std::{
     time::Duration,
 };
 use tokio::{
-    io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
+    io::{AsyncReadExt, AsyncWriteExt},
     net::UnixListener,
     process::{Child, Command},
     sync::broadcast,
@@ -21,6 +21,8 @@ use tokio::{
 use zbus::{Connection, Proxy, proxy::SignalStream};
 
 pub const DEADLINE: Duration = Duration::from_secs(20);
+
+mod private_bus;
 
 pub struct Session {
     pub root: tempfile::TempDir,
@@ -34,6 +36,16 @@ pub struct Session {
 
 impl Session {
     pub async fn start(uwsm: bool) -> Result<Self> {
+        Self::start_with_workers(uwsm, 2).await
+    }
+
+    /// Configure one or two workers in the fake desktop fixture's child daemon,
+    /// independently of the calling test's Tokio runtime.
+    pub async fn start_with_workers(uwsm: bool, daemon_workers: usize) -> Result<Self> {
+        anyhow::ensure!(
+            (1..=2).contains(&daemon_workers),
+            "private fixture worker bound"
+        );
         // Keep Unix socket paths short even in a deeply nested Nix build directory.
         let root = tempfile::Builder::new()
             .prefix("ad-test-")
@@ -73,7 +85,8 @@ impl Session {
                 "uwsm-app",
                 &shell,
                 &format!(
-                    "printf '%s\\n' \"$@\" > \"$XDG_STATE_HOME/arguments\"\nfor arg do last=\"$arg\"; done\ncase \"$last\" in\nfail.desktop) printf 'fixture launch rejected' >&2; exit 17;;\nslow.desktop) printf '%s' \"$$\" > \"$XDG_STATE_HOME/handoff.pid\"; exec '{}' 60;;\nesac\n",
+                    "printf '%s\\n' \"$@\" > \"$XDG_STATE_HOME/arguments\"\nfor arg do last=\"$arg\"; done\ncase \"$last\" in\nfail.desktop) printf 'fixture launch rejected' >&2; exit 17;;\nslow.desktop) printf '%s' \"$$\" > \"$XDG_STATE_HOME/handoff.pid\"; exec '{}' 60;;\nslow-peer.desktop) printf '%s' \"$$\" > \"$XDG_STATE_HOME/handoff-peer.pid\"; exec '{}' 60;;\nesac\n",
+                    sleeper.display(),
                     sleeper.display()
                 ),
             )?;
@@ -101,31 +114,8 @@ impl Session {
             "[Desktop Entry]\nType=Application\nName=Bus Only\nDBusActivatable=true\nActions=inspect;\n[Desktop Action inspect]\nName=Inspect\n",
         )?;
         let compositor = MockCompositor::start(root.path()).await?;
-        // Do not use --session: it loads the host's session.conf, unavailable in
-        // some sandboxes and capable of activating real desktop services.
-        let config = root.path().join("bus.conf");
-        fs::write(
-            &config,
-            format!(
-                "<busconfig><type>session</type><listen>unix:tmpdir={}</listen><auth>EXTERNAL</auth><policy context=\"default\"><allow user=\"*\"/><allow own=\"*\"/><allow send_destination=\"*\"/><allow receive_sender=\"*\"/></policy></busconfig>",
-                root.path().join("run").display()
-            ),
-        )?;
-        let mut bus = Command::new(tool("dbus-daemon")?)
-            .arg(format!("--config-file={}", config.display()))
-            .args(["--nofork", "--print-address=1"])
-            .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
-            .kill_on_drop(true)
-            .spawn()?;
-        let address = timeout(
-            DEADLINE,
-            BufReader::new(bus.stdout.take().context("bus stdout")?)
-                .lines()
-                .next_line(),
-        )
-        .await??
-        .context("private bus address")?;
+        let (bus, address) =
+            private_bus::start(tool("dbus-daemon")?, root.path(), DEADLINE).await?;
         let connection = zbus::connection::Builder::address(address.as_str())?
             .build()
             .await?;
@@ -140,6 +130,7 @@ impl Session {
             .env("XDG_DATA_DIRS", root.path().join("empty"))
             .env("HYPRLAND_INSTANCE_SIGNATURE", "fixture")
             .env("RUST_LOG", "error")
+            .env("TOKIO_WORKER_THREADS", daemon_workers.to_string())
             .stdout(Stdio::null())
             .kill_on_drop(true);
         for (variable, dir) in [
@@ -213,6 +204,7 @@ impl Session {
             .env("HOME", self.root.path())
             .env("XDG_RUNTIME_DIR", self.root.path().join("run"))
             .env("RUST_LOG", "error")
+            .env("TOKIO_WORKER_THREADS", "2")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
@@ -264,7 +256,7 @@ impl Session {
 
 impl Drop for Session {
     fn drop(&mut self) {
-        for name in ["handoff.pid", "direct.pid"] {
+        for name in ["handoff.pid", "handoff-peer.pid", "direct.pid"] {
             if let Ok(text) = fs::read_to_string(self.state_path(name))
                 && let Ok(raw) = text.parse()
                 && let Some(pid) = Pid::from_raw(raw)

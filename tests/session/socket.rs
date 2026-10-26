@@ -57,13 +57,16 @@ async fn native_quickshell_app_socket_acceptance() -> Result<()> {
     session.shutdown().await
 }
 
-struct Peer {
+#[path = "socket/payload.rs"]
+mod payload;
+
+pub(super) struct Peer {
     io: BufReader<UnixStream>,
     events: VecDeque<Value>,
     sequence: u64,
 }
 impl Peer {
-    async fn open(session: &Session) -> Result<Self> {
+    pub(super) async fn open(session: &Session) -> Result<Self> {
         let io = timeout(support::DEADLINE, async {
             loop {
                 match UnixStream::connect(session.root.path().join("run/app-daemon.sock")).await {
@@ -97,10 +100,13 @@ impl Peer {
         };
         request["route"] =
             json!({"consumerId":"view", "localId":"read", "kind":kind, "generation":1});
-        self.io
-            .get_mut()
-            .write_all(format!("{request}\n").as_bytes())
-            .await?;
+        timeout(
+            support::DEADLINE,
+            self.io
+                .get_mut()
+                .write_all(format!("{request}\n").as_bytes()),
+        )
+        .await??;
         loop {
             let reply = self.record().await?;
             ensure!(
@@ -118,7 +124,7 @@ impl Peer {
             self.events.push_back(reply);
         }
     }
-    async fn call(&mut self, method: &str, params: Value) -> Result<Value> {
+    pub(super) async fn call(&mut self, method: &str, params: Value) -> Result<Value> {
         self.request(json!({"op":"call", "method":method,"params":params}))
             .await
     }

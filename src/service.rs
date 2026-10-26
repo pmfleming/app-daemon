@@ -94,6 +94,14 @@ impl ApplicationService {
         Self::build(true)
     }
 
+    /// Frozen synthetic input for transport boundary qualification, without live trackers.
+    #[cfg(test)]
+    pub(crate) async fn with_fixture_catalog(catalog: Catalog) -> Arc<Self> {
+        let service = Self::build(false);
+        *service.catalog.write().await = Arc::new(catalog);
+        service
+    }
+
     fn build(trackers: bool) -> Arc<Self> {
         let (state_changes, _) = broadcast::channel(32);
         let (operation_changes, _) = broadcast::channel(64);
