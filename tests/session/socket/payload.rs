@@ -149,7 +149,7 @@ async fn exact_request_boundaries_and_retained_transport_validation_parity() -> 
 
 // The real daemon samples resource metadata independently. Leave 64 KiB headroom
 // here; exact byte boundaries use the tracker-free admitted-service unit fixture.
-async fn large_catalog(session: &Session) -> Result<(usize, String)> {
+pub(super) async fn large_catalog(session: &Session) -> Result<(usize, String)> {
     let proxy = session.proxy().await?;
     let path = session.root.path().join("data/applications/large.desktop");
     let entry = "[Desktop Entry]\nType=Application\nName=Large fixture\nExec=true\nComment=";

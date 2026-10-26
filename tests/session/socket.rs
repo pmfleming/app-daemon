@@ -16,14 +16,58 @@ async fn native_quickshell_app_socket_acceptance() -> Result<()> {
     let source =
         std::path::PathBuf::from(std::env::var_os("SHELLLIST_SOURCE").context("SHELLLIST_SOURCE")?);
     let program = std::env::var_os("SHELLLIST_QUICKSHELL").context("SHELLLIST_QUICKSHELL")?;
-    // Wait for listener readiness independently of D-Bus name acquisition.
+    // Ordinary coverage remains a prerequisite; the second pass adds one near-limit
+    // UTF-8 result, routed alongside a healthy subscribed frontend consumer.
     drop(Peer::open(&session).await?);
-    let child = tokio::process::Command::new(program)
+    run_native_probe(&session, &source, &program, 0).await?;
+    let (limit, comment) = payload::large_catalog(&session).await?;
+    let bytes = comment.len();
+    ensure!(
+        (limit - 128 * 1024..limit).contains(&bytes),
+        "native fixture size"
+    );
+    drop(comment);
+    eprintln!("APP_SOCKET_PROBE_FIXTURE payload_bytes={bytes} result_limit={limit}");
+    let mut healthy = Peer::open(&session).await?;
+    let subscription = healthy.subscribe().await?;
+    run_native_probe(&session, &source, &program, bytes).await?;
+    ensure!(
+        healthy.call("applications.revision", json!({})).await?["ok"] == true,
+        "native large read retired healthy socket owner"
+    );
+    ensure!(
+        healthy
+            .request(json!({"op":"cancel", "request_id":subscription}))
+            .await?["data"]["kind"]
+            == "subscription",
+        "native large read retired healthy subscription"
+    );
+    drop(healthy);
+    ensure!(
+        !session.state_path("arguments").exists(),
+        "read probe launched an application"
+    );
+    session.shutdown().await
+}
+
+async fn run_native_probe(
+    session: &Session,
+    source: &std::path::Path,
+    program: &std::ffi::OsStr,
+    payload_bytes: usize,
+) -> Result<()> {
+    use tokio::io::AsyncReadExt;
+    let mut child = tokio::process::Command::new(program)
         .args(["--no-color", "--path"])
         .arg(source.join("tests/e2e/app-unix-jsonl.qml"))
         .env_clear()
         .env("HOME", session.root.path())
         .env("XDG_RUNTIME_DIR", session.root.path().join("run"))
+        .env("XDG_CONFIG_HOME", session.root.path().join("config"))
+        .env("XDG_CACHE_HOME", session.root.path().join("cache"))
+        .env("XDG_STATE_HOME", session.root.path().join("state"))
+        .env("XDG_DATA_HOME", session.root.path().join("data"))
+        .env("XDG_DATA_DIRS", session.root.path().join("empty"))
         .env("QML_IMPORT_PATH", source.join("qml"))
         .env("QT_QPA_PLATFORM", "offscreen")
         .env("QT_QUICK_BACKEND", "software")
@@ -36,23 +80,80 @@ async fn native_quickshell_app_socket_acceptance() -> Result<()> {
             "unix:path=/nonexistent-session-bus",
         )
         .env("SHELLLIST_APP_SOCKET", "1")
+        .env("APP_SOCKET_PROBE_BYTES", payload_bytes.to_string())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true)
         .spawn()?;
-    let output = timeout(support::DEADLINE, child.wait_with_output()).await??;
+    // Never accumulate a payload-sized diagnostic, even on a negative path.
+    const LOG_LIMIT: u64 = 32 * 1024;
+    let mut stdout = child
+        .stdout
+        .take()
+        .context("native stdout")?
+        .take(LOG_LIMIT + 1);
+    let mut stderr = child
+        .stderr
+        .take()
+        .context("native stderr")?
+        .take(LOG_LIMIT + 1);
+    let (mut out, mut err) = (Vec::new(), Vec::new());
+    let result = timeout(support::DEADLINE, async {
+        tokio::try_join!(
+            child.wait(),
+            stdout.read_to_end(&mut out),
+            stderr.read_to_end(&mut err)
+        )
+    })
+    .await;
+    if !matches!(&result, Ok(Ok(_))) {
+        // Dropping a timed-out future only requests kill-on-drop. Own and await
+        // this private child before returning an I/O/deadline error to the fixture.
+        timeout(Duration::from_secs(2), child.kill())
+            .await
+            .context("native probe reap deadline")??;
+    }
+    let (status, _, _) = result.context("native probe deadline")??;
+    ensure!(
+        out.len() <= LOG_LIMIT as usize && err.len() <= LOG_LIMIT as usize,
+        "native diagnostic limit"
+    );
     let log = format!(
         "{}\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
+        String::from_utf8_lossy(&out),
+        String::from_utf8_lossy(&err)
     );
-    ensure!(
-        output.status.success() && log.contains("APP_SOCKET_PROBE_PASS"),
-        "{log}"
-    );
-    ensure!(
-        !session.state_path("arguments").exists(),
-        "read probe launched an application"
+    let marker = if payload_bytes == 0 {
+        "APP_SOCKET_PROBE_PASS reads-and-renewal"
+    } else {
+        "APP_SOCKET_PROBE_PASS large-utf8-and-healthy-peer"
+    };
+    ensure!(status.success() && log.contains(marker), "{log}");
+    Ok(())
+}
+
+#[tokio::test]
+async fn native_probe_timeout_reaps_private_child() -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let mut session = Session::start(true).await?;
+    let program = session.root.path().join("bin/native-stall");
+    std::fs::write(
+        &program,
+        format!(
+            "#!{}\nprintf '%s' \"$$\" > \"$XDG_STATE_HOME/native-probe.pid\"\nexec '{}' 60\n",
+            support::tool("sh")?.display(),
+            support::tool("sleep")?.display()
+        ),
+    )?;
+    std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700))?;
+    // The fake entrypoint ignores Quickshell arguments, execs only private fake
+    // work, and never opens a bus/compositor. No real native runtime is required.
+    let result = run_native_probe(&session, session.root.path(), program.as_os_str(), 0).await;
+    assert!(result.is_err_and(|error| error.to_string() == "native probe deadline"));
+    let pid = session.pid("native-probe.pid").await?;
+    assert!(
+        !std::path::Path::new(&format!("/proc/{}", pid.as_raw_pid())).exists(),
+        "timed-out native fixture child must be reaped before returning"
     );
     session.shutdown().await
 }
