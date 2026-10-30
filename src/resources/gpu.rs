@@ -78,11 +78,7 @@ struct GpuClientStat {
 }
 
 pub(super) fn read_gpu_processes(pids: &HashSet<u32>) -> HashMap<u32, GpuProcessStat> {
-    let mut clients = pids
-        .iter()
-        .map(|&pid| (pid, read_gpu_clients(pid)))
-        .collect::<Vec<_>>();
-    clients.sort_unstable_by_key(|(pid, _)| *pid);
+    let clients = pids.iter().map(|&pid| (pid, read_gpu_clients(pid)));
     let mut processes = HashMap::<u32, GpuProcessStat>::new();
     for (id, (pid, client)) in deduplicate_clients(clients) {
         processes.entry(pid).or_default().add_client(id, client);
@@ -91,17 +87,17 @@ pub(super) fn read_gpu_processes(pids: &HashSet<u32>) -> HashMap<u32, GpuProcess
 }
 
 fn deduplicate_clients(
-    clients: Vec<(u32, HashMap<String, GpuClientStat>)>,
+    clients: impl IntoIterator<Item = (u32, HashMap<String, GpuClientStat>)>,
 ) -> HashMap<String, (u32, GpuClientStat)> {
     let mut unique = HashMap::<String, (u32, GpuClientStat)>::new();
     for (pid, clients) in clients {
         for (id, client) in clients {
-            // Input is PID-sorted: retain the first owner while merging shared FDs.
-            unique
+            // Ownership is deterministic even when procfs arrives in arbitrary order.
+            let (owner, merged) = unique
                 .entry(id)
-                .or_insert_with(|| (pid, GpuClientStat::default()))
-                .1
-                .merge(client);
+                .or_insert_with(|| (pid, GpuClientStat::default()));
+            *owner = (*owner).min(pid);
+            merged.merge(client);
         }
     }
     unique
@@ -254,14 +250,23 @@ mod tests {
     use super::{HashMap, deduplicate_clients, parse_gpu_fdinfo};
 
     #[test]
-    fn shared_client_retains_first_owner_and_maximum_counters() {
+    fn shared_client_retains_lowest_pid_and_maximum_counters() {
         let sample = |pid, ns| {
             let client =
                 parse_gpu_fdinfo(&format!("drm-client-id: 1\ndrm-engine-render: {ns} ns")).unwrap();
             (pid, HashMap::from([client]))
         };
-        let unique = deduplicate_clients(vec![sample(10, 12), sample(20, 8), sample(30, 20)]);
-        let (pid, client) = &unique["unknown/1"];
-        assert_eq!((*pid, client.engine_nanoseconds["render"]), (10, 20));
+        for order in [
+            [10, 20, 30],
+            [10, 30, 20],
+            [20, 10, 30],
+            [20, 30, 10],
+            [30, 10, 20],
+            [30, 20, 10],
+        ] {
+            let unique = deduplicate_clients(order.into_iter().map(|pid| sample(pid, pid)));
+            let (pid, client) = &unique["unknown/1"];
+            assert_eq!((*pid, client.engine_nanoseconds["render"]), (10, 30));
+        }
     }
 }
