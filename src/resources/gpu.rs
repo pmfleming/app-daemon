@@ -122,12 +122,18 @@ fn read_gpu_clients(pid: u32) -> HashMap<String, GpuClientStat> {
 
 impl crate::resources::provider::GpuProcessStat {
     fn add_client(&mut self, client_id: String, client: GpuClientStat) {
-        self.resident_memory_bytes = self
-            .resident_memory_bytes
-            .saturating_add(client.resident_regions.values().sum());
-        self.allocated_memory_bytes = self
-            .allocated_memory_bytes
-            .saturating_add(client.allocated_regions.values().sum());
+        self.resident_memory_bytes = self.resident_memory_bytes.saturating_add(
+            client
+                .resident_regions
+                .into_values()
+                .fold(0, u64::saturating_add),
+        );
+        self.allocated_memory_bytes = self.allocated_memory_bytes.saturating_add(
+            client
+                .allocated_regions
+                .into_values()
+                .fold(0, u64::saturating_add),
+        );
         self.engine_nanoseconds.extend(
             client
                 .engine_nanoseconds
@@ -250,10 +256,10 @@ mod tests {
     use super::{HashMap, deduplicate_clients, parse_gpu_fdinfo};
 
     #[test]
-    fn shared_client_retains_lowest_pid_and_maximum_counters() {
+    fn shared_clients_keep_deterministic_ownership_and_saturating_memory() {
         let sample = |pid, ns| {
             let client =
-                parse_gpu_fdinfo(&format!("drm-client-id: 1\ndrm-engine-render: {ns} ns")).unwrap();
+                parse_gpu_fdinfo(&format!("drm-client-id: 1\ndrm-engine-render: {ns} ns\ndrm-resident-vram: {} B\ndrm-resident-gtt: 1 B\ndrm-memory-vram: {} B\ndrm-memory-gtt: 1 B", u64::MAX, u64::MAX)).unwrap();
             (pid, HashMap::from([client]))
         };
         for order in [
@@ -264,9 +270,13 @@ mod tests {
             [30, 10, 20],
             [30, 20, 10],
         ] {
-            let unique = deduplicate_clients(order.into_iter().map(|pid| sample(pid, pid)));
-            let (pid, client) = &unique["unknown/1"];
-            assert_eq!((*pid, client.engine_nanoseconds["render"]), (10, 30));
+            let mut unique = deduplicate_clients(order.into_iter().map(|pid| sample(pid, pid)));
+            let (pid, client) = unique.remove("unknown/1").unwrap();
+            assert_eq!((pid, client.engine_nanoseconds["render"]), (10, 30));
+            let mut usage = super::GpuProcessStat::default();
+            usage.add_client("unknown/1".into(), client);
+            assert_eq!(usage.resident_memory_bytes, u64::MAX);
+            assert_eq!(usage.allocated_memory_bytes, u64::MAX);
         }
     }
 }

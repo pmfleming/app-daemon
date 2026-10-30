@@ -41,7 +41,7 @@ impl EnergySampler {
                 let &(previous, _) = self.previous_rapl.get(path)?;
                 Some(counter_delta(previous, value, maximum))
             })
-            .reduce(|total, delta| total + delta)
+            .reduce(u64::saturating_add)
             .map(|total| total as f64 / 3_600_000.0);
         self.previous_rapl = current;
         energy
@@ -150,4 +150,37 @@ fn read_u64(path: &Path) -> Option<u64> {
 
 fn file_equals(path: &Path, expected: &str) -> bool {
     fs::read_to_string(path).is_ok_and(|value| value.trim() == expected)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{EnergySampler, HashMap, PathBuf};
+    use crate::resources::test_provider::TestProvider;
+
+    #[test]
+    fn rapl_totals_saturate_without_losing_wrap_or_baseline_semantics() {
+        let zones = |values: [u64; 2], maximum| {
+            HashMap::from([
+                (PathBuf::from("package-0"), (values[0], maximum)),
+                (PathBuf::from("package-1"), (values[1], maximum)),
+            ])
+        };
+        for (previous, current, maximum, expected) in [
+            ([0, 0], [u64::MAX, 1], u64::MAX, u64::MAX),
+            ([90, 10], [5, 20], 100, 25),
+            ([0, 0], [0, 0], 100, 0),
+        ] {
+            let provider = TestProvider::default();
+            let mut sampler = EnergySampler::default();
+            provider.state.lock().unwrap().rapl = zones(previous, maximum);
+            assert_eq!(sampler.rapl_energy_mwh(&provider), None);
+            provider.state.lock().unwrap().rapl = zones(current, maximum);
+            assert_eq!(
+                sampler.rapl_energy_mwh(&provider),
+                Some(expected as f64 / 3_600_000.0)
+            );
+            provider.state.lock().unwrap().rapl.clear();
+            assert_eq!(sampler.rapl_energy_mwh(&provider), None);
+        }
+    }
 }
