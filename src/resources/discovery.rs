@@ -222,6 +222,7 @@ impl KnownRoots {
         windows: &HashMap<String, Vec<u32>>,
         processes: &HashMap<u32, ProcessStat>,
     ) {
+        let window_pids = windows.values().flatten().copied().collect::<HashSet<_>>();
         for (id, mut known) in std::mem::take(&mut self.identities) {
             known.retain(|pid, start| {
                 let same_process = processes
@@ -229,7 +230,7 @@ impl KnownRoots {
                     .is_some_and(|process| process.start_ticks == *start);
                 let same_owner = owners.get(pid).is_none_or(|owner| owner.as_ref() == id);
                 let reassigned = !windows.get(&id).is_some_and(|pids| pids.contains(pid))
-                    && windows.values().any(|pids| pids.contains(pid));
+                    && window_pids.contains(pid);
                 same_process && same_owner && !reassigned
             });
             members.entry(id).or_default().extend(known.into_keys());

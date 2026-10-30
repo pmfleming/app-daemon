@@ -168,6 +168,18 @@ fn ownership_follows_window_reassignment_and_survives_parent_exit_but_not_pid_re
     };
     let windows = HashMap::from([("org.example.App.desktop".into(), vec![42])]);
     sampler.sample_for_applications(&windows, &catalog, &Default::default());
+    let overlapping = HashMap::from([
+        ("org.example.App.desktop".into(), vec![42]),
+        ("org.example.Other.desktop".into(), vec![42]),
+    ]);
+    let shared = sampler.sample_for_applications(&overlapping, &catalog, &Default::default());
+    assert_eq!(shared.target_roots(), &overlapping);
+    assert!(
+        shared
+            .usage_for_application("org.example.App.desktop", [])
+            .measurement
+            .resources_shared
+    );
     let windows = HashMap::from([("org.example.Other.desktop".into(), vec![42])]);
     let reassigned = sampler.sample_for_applications(&windows, &catalog, &Default::default());
     assert_eq!(reassigned.target_roots(), &windows);
