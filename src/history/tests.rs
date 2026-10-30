@@ -1,4 +1,4 @@
-use super::{HistoryStore, persist_snapshot};
+use super::HistoryStore;
 use crate::model::{
     ComputeUsage, EnergyUsage, HistoricalResourceUsage, NetworkUsage, ResourceMeasurement,
     ResourceUsage, StorageUsage,
@@ -55,9 +55,9 @@ fn split_buckets_persist_without_losing_totals_availability_or_energy_retention(
     };
     let now = super::now_milliseconds();
     let bucket = now - now % super::BUCKET_MILLISECONDS;
-    store.record("example.desktop", bucket + 25_000, 20.0, &usage);
+    store.record("example.desktop", bucket + 25_000, 20.0, &usage)?;
     // Final saving must include the partial second bucket, with its actual endpoint.
-    persist_snapshot(store.snapshot(true).unwrap())?;
+    store.flush(true)?;
     let page = store.query_window("example.desktop", None, None, None, 10)?;
     assert!(!page.has_more);
     assert_eq!(
@@ -118,29 +118,30 @@ fn split_buckets_persist_without_losing_totals_availability_or_energy_retention(
         );
     }
     let until = bucket + 2 * super::ENERGY_BUCKET_MILLISECONDS;
-    assert_eq!(store.energy_totals(bucket, until)[0].energy_mwh, 4.0);
+    assert_eq!(store.energy_totals(bucket, until)?[0].energy_mwh, 4.0);
     // The rewritten partial bucket mixes unavailable and measured intervals.
     store.record(
         "example.desktop",
         bucket + 27_000,
         2.0,
         &ResourceUsage::default(),
-    );
-    store.record("example.desktop", bucket + 29_000, 2.0, &usage);
-    persist_snapshot(store.snapshot(true).unwrap())?;
+    )?;
+    store.record("example.desktop", bucket + 29_000, 2.0, &usage)?;
+    store.flush(true)?;
+    drop(store);
     let mut loaded = HistoryStore::load(Some(path));
     let restored = loaded.query_window("example.desktop", None, None, None, 10)?;
     assert_eq!(restored.points.len(), 2);
     assert_eq!(restored.points.first(), page.points.first());
     let available = restored.points[1].resources.availability.unwrap();
     assert!(!available.gpu && !available.memory && !available.network_connections);
-    let totals = loaded.energy_totals(bucket, until);
+    let totals = loaded.energy_totals(bucket, until)?;
     assert_eq!(totals.len(), 1);
     assert_eq!(totals[0].energy_mwh, 8.0);
     assert_eq!(totals[0].energy_source, "rapl");
     for (days, expected_energy) in [(2, 8.0), (8, 0.0)] {
         let timestamp = bucket + days * 24 * 60 * 60 * 1000;
-        loaded.record("other.desktop", timestamp, 1.0, &ResourceUsage::default());
+        loaded.record("other.desktop", timestamp, 1.0, &ResourceUsage::default())?;
         assert!(
             loaded
                 .query_window("example.desktop", None, None, None, 10)?
@@ -148,7 +149,7 @@ fn split_buckets_persist_without_losing_totals_availability_or_energy_retention(
                 .is_empty()
         );
         let energy: f64 = loaded
-            .energy_totals(bucket, timestamp)
+            .energy_totals(bucket, timestamp)?
             .iter()
             .map(|total| total.energy_mwh)
             .sum();

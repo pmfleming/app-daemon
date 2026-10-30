@@ -18,7 +18,7 @@ clap = { version = "4", features = ["derive"] }
 freedesktop-desktop-entry = { version = "0.8.1", default-features = false }
 futures = "0.3"
 notify = "8"
-rustix = { version = "1", features = ["net"] }
+rustix = { version = "1", features = ["net", "fs", "process"] }
 serde = { version = "1", features = ["derive", "rc"] }
 serde_json = "1"
 schemars = "1.2.3"
@@ -28,6 +28,7 @@ shelllist-daemon-core = { path = "../daemon-framework/crates/shelllist-daemon-co
 shelllist-daemon-tokio = { path = "../daemon-framework/crates/shelllist-daemon-tokio" }
 shelllist-hyprland = { path = "../daemon-framework/crates/shelllist-hyprland" }
 tokio = { version = "1", features = ["io-std", "io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
+turso = { version = "=0.8.3", default-features = false }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1", features = ["v4"] }

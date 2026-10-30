@@ -8,7 +8,7 @@ use crate::{
 
 use super::BUCKET_MILLISECONDS;
 
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 pub(super) struct PendingPoint {
     pub(super) timestamp_ms: u64,
     pub(super) end_ms: u64,
@@ -23,7 +23,7 @@ pub(super) struct PendingPoint {
 
 // Totals are summed; power, attribution and coverage are duration-weighted.
 // Live interval fragments and repaired finished buckets share this arithmetic.
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 struct WeightedEnergy {
     energy_mwh: f64,
     battery_percent: f64,
@@ -44,7 +44,7 @@ struct EnergyObservation<'a> {
     confidence: &'a str,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 struct WeightedCompute {
     cpu: f64,
     machine_cpu: f64,
@@ -64,7 +64,7 @@ struct WeightedCompute {
     gpu_memory_allocated: f64,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 struct WeightedStorage {
     read_bytes: u64,
     write_bytes: u64,
@@ -82,7 +82,7 @@ struct WeightedStorage {
     disk_space_permanent: f64,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 struct WeightedNetwork {
     receive_bytes: u64,
     transmit_bytes: u64,

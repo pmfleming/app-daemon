@@ -16,7 +16,7 @@ use tokio::{
 
 use crate::{
     catalog::Catalog,
-    history::{HistoryStore, now_milliseconds, persist_snapshot},
+    history::{HistoryStore, now_milliseconds},
     hyprland::Snapshot,
     model::{
         ApplicationEnergyOverview, ApplicationPage, ApplicationResourceHistory, OperationResult,
@@ -69,7 +69,7 @@ pub struct ApplicationService {
     query_slots: Arc<Semaphore>,
     ownership: Arc<StdMutex<crate::ownership::Ownership>>,
     ownership_refresh: Arc<Mutex<()>>,
-    history: Mutex<HistoryStore>,
+    history: Arc<Mutex<HistoryStore>>,
     // When both are needed, acquire settings before resources. Tokio's fair
     // RwLocks can deadlock even readers when writers queue between acquisitions.
     settings: RwLock<Arc<SettingsStore>>,
@@ -86,12 +86,17 @@ pub struct ApplicationService {
     background_tasks: StdMutex<Vec<tokio::task::JoinHandle<()>>>,
     shutdown_lock: Mutex<()>,
     request_gate: RwLock<()>,
-    history_saves: Arc<Mutex<()>>,
 }
 
 impl ApplicationService {
-    pub fn new() -> Arc<Self> {
-        Self::build(true)
+    pub async fn new() -> anyhow::Result<Arc<Self>> {
+        let history = tokio::task::spawn_blocking(HistoryStore::open_default).await??;
+        Ok(Self::build_with_history(true, history))
+    }
+
+    #[cfg(test)]
+    fn build(trackers: bool) -> Arc<Self> {
+        Self::build_with_history(trackers, HistoryStore::load(None))
     }
 
     /// Frozen synthetic input for transport boundary qualification, without live trackers.
@@ -102,7 +107,7 @@ impl ApplicationService {
         service
     }
 
-    fn build(trackers: bool) -> Arc<Self> {
+    fn build_with_history(trackers: bool, history: HistoryStore) -> Arc<Self> {
         let (state_changes, _) = broadcast::channel(32);
         let (operation_changes, _) = broadcast::channel(64);
         let (resume_sender, resume_events) = watch::channel(0);
@@ -114,7 +119,7 @@ impl ApplicationService {
             query_slots: Arc::new(Semaphore::new(2)),
             ownership: Arc::default(),
             ownership_refresh: Arc::default(),
-            history: Mutex::new(HistoryStore::load_default()),
+            history: Arc::new(Mutex::new(history)),
             settings: RwLock::new(Arc::new(SettingsStore::load_default())),
             settings_updates: Mutex::new(()),
             state_changes,
@@ -129,7 +134,6 @@ impl ApplicationService {
             background_tasks: StdMutex::new(Vec::new()),
             shutdown_lock: Mutex::new(()),
             request_gate: RwLock::new(()),
-            history_saves: Arc::new(Mutex::new(())),
         });
         if trackers && tokio::runtime::Handle::try_current().is_ok() {
             let tasks = vec![
@@ -345,15 +349,20 @@ impl ApplicationService {
         params: ResourceHistoryParams,
     ) -> anyhow::Result<ApplicationResourceHistory> {
         self.mark_resource_demand();
-        let page = self.history.lock().await.query_window(
-            &params.target_id,
-            params.since_ms,
-            params.until_ms,
-            params.cursor.as_deref(),
-            params.limit,
-        )?;
+        let mut history = Arc::clone(&self.history).lock_owned().await;
+        let (target_id, page) = tokio::task::spawn_blocking(move || {
+            let page = history.query_window(
+                &params.target_id,
+                params.since_ms,
+                params.until_ms,
+                params.cursor.as_deref(),
+                params.limit,
+            )?;
+            Ok::<_, anyhow::Error>((params.target_id, page))
+        })
+        .await??;
         Ok(ApplicationResourceHistory {
-            target_id: params.target_id,
+            target_id,
             summary: page.summary,
             points: page.points,
             has_more: page.has_more,
@@ -361,18 +370,23 @@ impl ApplicationService {
         })
     }
 
-    pub async fn energy_overview(&self, params: EnergyOverviewParams) -> ApplicationEnergyOverview {
+    pub async fn energy_overview(
+        &self,
+        params: EnergyOverviewParams,
+    ) -> anyhow::Result<ApplicationEnergyOverview> {
         self.mark_resource_demand();
         let until_ms = now_milliseconds();
         let since_ms = params.since_ms.min(until_ms);
-        let totals = self.history.lock().await.energy_totals(since_ms, until_ms);
-        energy_labels::overview(
+        let mut history = Arc::clone(&self.history).lock_owned().await;
+        let totals = tokio::task::spawn_blocking(move || history.energy_totals(since_ms, until_ms))
+            .await??;
+        Ok(energy_labels::overview(
             totals,
             &*self.catalog.read().await,
             since_ms,
             until_ms,
             params.limit,
-        )
+        ))
     }
 
     fn mark_resource_demand(&self) {
@@ -401,18 +415,10 @@ impl ApplicationService {
     }
 
     async fn persist_history(&self, final_save: bool, message: &'static str) {
-        // Transfer the guard to the writer: cancelling the awaiting future must
-        // not release serialization while an older blocking write still runs.
-        let save = Arc::clone(&self.history_saves).lock_owned().await;
-        let Some(snapshot) = self.history.lock().await.snapshot(final_save) else {
-            return;
-        };
-        match tokio::task::spawn_blocking(move || {
-            let _save = save;
-            persist_snapshot(snapshot)
-        })
-        .await
-        {
+        // The worker owns serialization even if its async caller is cancelled.
+        // Queries, sampling, maintenance and final saves share this one gate.
+        let mut history = Arc::clone(&self.history).lock_owned().await;
+        match tokio::task::spawn_blocking(move || history.flush(final_save)).await {
             Ok(Ok(())) => {}
             Ok(Err(error)) => tracing::warn!(%error, "{message}"),
             Err(error) => tracing::warn!(%error, "resource history persistence task failed"),
@@ -607,20 +613,35 @@ async fn sample_resources(service: &ApplicationService, sampler: &mut ResourceSa
         sample_milliseconds,
         "application resources sampled"
     );
-    let mut history = service.history.lock().await;
-    for (target_id, pids) in snapshot.target_roots() {
-        let usage = snapshot.usage_for_target(target_id, pids.iter().copied());
-        history.record(
-            target_id,
+    let snapshot = Arc::new(snapshot);
+    let history_snapshot = Arc::clone(&snapshot);
+    let mut history = Arc::clone(&service.history).lock_owned().await;
+    let recorded = tokio::task::spawn_blocking(move || {
+        let samples: Vec<_> = history_snapshot
+            .target_roots()
+            .iter()
+            .map(|(id, pids)| {
+                (
+                    id.as_str(),
+                    history_snapshot.usage_for_target(id, pids.iter().copied()),
+                )
+            })
+            .collect();
+        history.record_batch(
             now_milliseconds(),
-            snapshot.interval_seconds(),
-            &usage,
-        );
+            history_snapshot.interval_seconds(),
+            samples.iter().map(|(id, usage)| (*id, usage)),
+        )
+    })
+    .await;
+    match recorded {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => tracing::warn!(%error, "resource history sample could not be committed"),
+        Err(error) => tracing::warn!(%error, "resource history worker failed"),
     }
-    drop(history);
     let mut resources = service.resources.write().await;
     let changed = resources.runtime_revision() != snapshot.runtime_revision();
-    *resources = Arc::new(snapshot);
+    *resources = snapshot;
     drop(resources);
     if changed {
         service.publish_state().await;

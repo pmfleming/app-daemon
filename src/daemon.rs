@@ -298,7 +298,7 @@ fn revision_changes(
 }
 
 pub async fn run() -> Result<()> {
-    let applications = ApplicationService::new();
+    let applications = ApplicationService::new().await?;
     let shutdown_applications = Arc::clone(&applications);
     let subscriptions = Arc::new(OwnedTaskRegistry::default());
     let daemon = AppDaemon {

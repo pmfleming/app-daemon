@@ -1,190 +1,438 @@
 use super::{
-    BUCKET_MILLISECONDS, ENERGY_RETENTION_MILLISECONDS, EnergyHistoryPoint, HistoryFile,
-    HistoryStore, RETENTION_MILLISECONDS, now_milliseconds, persist_snapshot, summary,
+    BUCKET_MILLISECONDS, ENERGY_BUCKET_MILLISECONDS, ENERGY_RETENTION_MILLISECONDS, HistoryStore,
+    RETENTION_MILLISECONDS, block_on, database::Fault, now_milliseconds, summary,
 };
-use crate::model::{ResourceHistoryPoint, ResourceUsage};
-use std::sync::Arc;
+use crate::model::{
+    HistoricalResourceUsage, ResourceAvailability, ResourceHistoryPoint, ResourceUsage,
+};
 
-// Deterministic shape; wall time only keeps all 24,000 buckets inside retention.
-fn fixture() -> HistoryStore {
-    let mut store = HistoryStore::load(None);
-    let end = now_milliseconds() / BUCKET_MILLISECONDS * BUCKET_MILLISECONDS;
-    for app in 0..100 {
-        store.insert_points(
-            format!("fixture-{app}"),
-            (0..240).map(|i| ResourceHistoryPoint {
-                timestamp_ms: end - (240 - i) * BUCKET_MILLISECONDS,
-                duration_ms: BUCKET_MILLISECONDS,
-                resources: crate::model::HistoricalResourceUsage {
-                    availability: Some(crate::model::ResourceAvailability {
-                        cpu: true,
-                        memory: true,
-                        ..Default::default()
-                    }),
-                    coverage: 1.0,
-                    sample_count: 3,
-                    ..Default::default()
-                },
+fn point(timestamp_ms: u64) -> ResourceHistoryPoint {
+    ResourceHistoryPoint {
+        timestamp_ms,
+        duration_ms: BUCKET_MILLISECONDS,
+        resources: HistoricalResourceUsage {
+            availability: Some(ResourceAvailability {
+                cpu: true,
+                memory: true,
+                ..Default::default()
             }),
-        );
+            coverage: 1.0,
+            sample_count: 3,
+            ..Default::default()
+        },
     }
-    store
+}
+
+fn usage() -> ResourceUsage {
+    let mut usage = ResourceUsage::default();
+    usage.energy.energy_mwh = 1.0;
+    usage.energy.energy_source = "rapl".into();
+    usage.energy.energy_confidence = "high".into();
+    usage
 }
 
 #[test]
-fn compact_storage_ignores_legacy_maps_and_projects_only_responses() -> anyhow::Result<()> {
-    let mut store = fixture();
-    let snapshot = store.snapshot(false).unwrap();
-    let mut json = serde_json::to_value(&snapshot.file)?;
-    let point = &mut json["applications"]["fixture-0"][0];
-    assert!(point.get("metric_availability").is_none());
-    // A stale legacy projection must not override the canonical availability flags.
-    point["metric_availability"] = serde_json::json!({"cpu_percent": false});
-    let loaded: HistoryFile = serde_json::from_value(json)?;
-    assert!(
-        loaded
-            .applications
-            .values()
-            .flatten()
-            .all(|p| p.resources.metric_availability.is_empty())
+fn append_is_incremental_idle_flush_does_not_write_and_restart_does_not_load_points()
+-> anyhow::Result<()> {
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("history.db");
+    let mut store = HistoryStore::open(&path)?;
+    let end = now_milliseconds() / BUCKET_MILLISECONDS * BUCKET_MILLISECONDS;
+    store.insert_points(
+        "app".into(),
+        (0..1000).map(|i| point(end - (1000 - i) * BUCKET_MILLISECONDS)),
+    )?;
+    let before = block_on(store.database.integer("SELECT total_changes()"))?;
+    store.insert_points("app".into(), [point(end)])?;
+    assert_eq!(
+        block_on(store.database.integer("SELECT total_changes()"))? - before,
+        1
     );
-    let response = store.query_window("fixture-0", None, None, None, 1)?;
-    assert!(response.points[0].resources.metric_availability.0["cpu_percent"]);
-    assert!(!response.points[0].resources.metric_availability.0["gpu_percent"]);
-    assert_eq!(response.points[0].resources.metric_availability.0.len(), 48);
-    assert!(
-        store
-            .points
-            .values()
-            .flatten()
-            .all(|p| p.resources.metric_availability.is_empty())
+    let before = block_on(store.database.integer("SELECT total_changes()"))?;
+    store.flush(false)?;
+    store.flush(false)?;
+    assert_eq!(
+        block_on(store.database.integer("SELECT total_changes()"))?,
+        before
     );
-    let old: ResourceHistoryPoint = serde_json::from_value(serde_json::json!({
-        "timestamp_ms": 1, "duration_ms": 1, "coverage": 1.0,
-        "metric_availability": {"gpu_percent": true}
-    }))?;
-    let old = summary::normalize(old);
-    assert!(old.resources.metric_availability.0["cpu_percent"]);
-    assert!(!old.resources.metric_availability.0["gpu_percent"]);
+    let page = store.query_window("app", None, Some(end), None, 1)?;
+    assert!(page.has_more);
+    assert_eq!(page.points[0].resources.metric_availability.0.len(), 48);
+    let cursor = page.next_cursor;
+    drop(store); // Completed buckets were committed without a periodic/final save.
+    let mut reopened = HistoryStore::open(&path)?;
+    assert!(reopened.pending.resources.is_empty() && reopened.pending.energy.is_empty());
+    assert_eq!(
+        block_on(
+            reopened
+                .database
+                .integer("SELECT COUNT(*) FROM resource_points")
+        )?,
+        1001
+    );
+    let next = reopened.query_window("app", None, Some(end), cursor.as_deref(), 1)?;
+    assert!(next.points[0].timestamp_ms > page.points[0].timestamp_ms);
+    assert_eq!(next.summary, page.summary);
     Ok(())
 }
 
 #[test]
-fn snapshots_share_finished_buckets_but_mutations_do_not_change_the_snapshot() {
-    let mut store = fixture();
-    let snapshot = store.snapshot(false).unwrap();
-    let old = snapshot.file.applications["fixture-0"][0].clone();
-    assert!(Arc::ptr_eq(&old, &store.points["fixture-0"][0]));
-    let mut replacement = (*old).clone();
-    replacement.resources.compute.cpu_percent = 90.0;
-    store.insert_points("fixture-0".into(), [replacement]);
-    assert!(!Arc::ptr_eq(&old, &store.points["fixture-0"][0]));
-    assert_eq!(old.resources.compute.cpu_percent, 0.0);
-    assert!(Arc::ptr_eq(
-        &snapshot.file.applications["fixture-0"][1],
-        &store.points["fixture-0"][1]
-    ));
-    store.insert_energy_points(
-        "app".into(),
-        [EnergyHistoryPoint {
-            timestamp_ms: now_milliseconds(),
-            energy_mwh: 1.0,
-            ..Default::default()
-        }],
-    );
-    let snapshot = store.snapshot(false).unwrap();
-    let old = snapshot.file.energy_applications["app"][0].clone();
-    store.insert_energy_points("app".into(), [(*old).clone()]);
-    assert_eq!(old.energy_mwh, 1.0);
-    assert_eq!(store.energy_points["app"][0].energy_mwh, 2.0);
-}
-
-#[test]
-fn saves_track_successful_generations_and_flush_pending_on_shutdown() -> anyhow::Result<()> {
+fn transaction_rollback_preserves_pending_and_retry_does_not_double_count() -> anyhow::Result<()> {
     let dir = tempfile::tempdir()?;
-    let path = dir.path().join("state");
-    let mut store = HistoryStore::load(Some(path.clone()));
-    let first = store.snapshot(false).unwrap();
-    // Keep the whole sample inside one future bucket, independent of wall-clock phase.
-    let t = (now_milliseconds() / BUCKET_MILLISECONDS + 4) * BUCKET_MILLISECONDS + 1000;
-    store.record("app", t, 1.0, &ResourceUsage::default());
-    persist_snapshot(first)?;
-    assert!(
-        store.snapshot(false).is_none(),
-        "pending data is not yet persisted state"
-    );
-    let final_save = store.snapshot(true).unwrap();
-    store.record("other", t + 15_000, 1.0, &ResourceUsage::default());
-    store.flush_expired(u64::MAX);
-    persist_snapshot(final_save)?;
-    assert!(
-        store.snapshot(false).is_some(),
-        "an older save must not clear newer data"
-    );
-    persist_snapshot(store.snapshot(false).unwrap())?;
-    assert!(store.snapshot(false).is_none());
-    let mut loaded = HistoryStore::load(Some(path.clone()));
+    let path = dir.path().join("history.db");
+    let mut store = HistoryStore::open(&path)?;
+    let t = (now_milliseconds() / ENERGY_BUCKET_MILLISECONDS + 2) * ENERGY_BUCKET_MILLISECONDS;
+    store.record("app", t + 1000, 1.0, &usage())?;
+    store.database.fault = Some(Fault::Write);
+    assert!(store.flush(true).is_err());
+    assert_eq!(store.pending.resources.len(), 1);
+    assert_eq!(store.pending.energy.len(), 1);
     assert_eq!(
-        loaded
-            .query_window("other", None, None, None, 10)?
+        block_on(
+            store
+                .database
+                .integer("SELECT COUNT(*) FROM resource_points")
+        )?,
+        0
+    );
+    assert_eq!(
+        block_on(store.database.integer("SELECT COUNT(*) FROM energy_points"))?,
+        0
+    );
+    assert_eq!(
+        block_on(store.database.integer("SELECT COUNT(*) FROM cursor_epochs"))?,
+        0
+    );
+    store.flush(true)?;
+    store.flush(true)?;
+    drop(store);
+    let mut store = HistoryStore::open(&path)?;
+    assert_eq!(
+        store
+            .query_window("app", None, None, None, 10)?
             .points
             .len(),
         1
     );
-    // A failed replacement does not mark the generation saved.
-    store.prune(t + ENERGY_RETENTION_MILLISECONDS + RETENTION_MILLISECONDS);
-    std::fs::remove_file(&path)?;
-    std::fs::create_dir(&path)?;
-    assert!(persist_snapshot(store.snapshot(false).unwrap()).is_err());
-    assert!(store.snapshot(false).is_some());
-    std::fs::remove_dir(&path)?;
-    persist_snapshot(store.snapshot(false).unwrap())?;
-    assert!(store.snapshot(true).is_none());
+    assert_eq!(store.energy_totals(t, t + 60_000)?[0].energy_mwh, 1.0);
     Ok(())
 }
 
 #[test]
-#[ignore = "release-only isolated persistence probe; no live state"]
-fn profile_streamed_history_save() -> anyhow::Result<()> {
-    let dir = tempfile::tempdir()?;
-    let mut store = fixture();
-    store.path = Some(dir.path().join("history"));
-    let started = std::time::Instant::now();
-    persist_snapshot(store.snapshot(false).unwrap())?;
-    eprintln!(
-        "streamed_save_ms={:.3} bytes={} {}",
-        started.elapsed().as_secs_f64() * 1000.0,
-        store.path.as_ref().unwrap().metadata()?.len(),
-        std::fs::read_to_string("/proc/self/status")?
-            .lines()
-            .find(|l| l.starts_with("VmHWM:"))
-            .unwrap()
-    );
-    for _ in 0..3 {
-        assert!(store.snapshot(false).is_none());
+fn uncertain_commit_and_failed_rollback_fence_further_reads_and_writes() -> anyhow::Result<()> {
+    for fault in [Fault::Commit, Fault::Rollback] {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("history.db");
+        let mut store = HistoryStore::open(&path)?;
+        let t = (now_milliseconds() / 60_000 + 2) * 60_000;
+        store.record("app", t + 1000, 1.0, &usage())?;
+        store.database.fault = Some(fault);
+        assert!(store.flush(true).is_err());
+        assert!(
+            store
+                .flush(true)
+                .unwrap_err()
+                .to_string()
+                .contains("fenced")
+        );
+        assert!(store.query_window("app", None, None, None, 10).is_err());
+        assert!(store.energy_totals(t, t + 60_000).is_err());
+        assert!(store.record("app", t + 2000, 1.0, &usage()).is_err());
+        drop(store);
+        let mut store = HistoryStore::open(&path)?;
+        let points = store.query_window("app", None, None, None, 10)?.points;
+        assert_eq!(points.len(), usize::from(fault == Fault::Commit));
+        if fault == Fault::Commit {
+            assert_eq!(store.energy_totals(t, t + 60_000)?[0].energy_mwh, 1.0);
+        }
     }
     Ok(())
 }
 
 #[test]
-#[ignore = "release-only isolated persistence probe; no live state"]
-fn profile_history_persistence() {
-    let mut store = fixture();
-    let start = std::time::Instant::now();
-    let snapshot = store.snapshot(false).unwrap();
-    let snapshot_time = start.elapsed();
-    let start = std::time::Instant::now();
-    let bytes = serde_json::to_vec(&snapshot.file).unwrap();
-    eprintln!(
-        "buckets=24000 snapshot_ms={:.3} encode_ms={:.3} bytes={} rss={}",
-        snapshot_time.as_secs_f64() * 1000.0,
-        start.elapsed().as_secs_f64() * 1000.0,
-        bytes.len(),
-        std::fs::read_to_string("/proc/self/status")
-            .unwrap()
-            .lines()
-            .find(|line| line.starts_with("VmRSS:"))
-            .unwrap()
+fn retention_deletes_resource_and_energy_ranges_inclusively_at_boundary() -> anyhow::Result<()> {
+    let mut store = HistoryStore::load(None);
+    let now = now_milliseconds();
+    // Avoid automatic retention while installing boundary fixtures.
+    store.database.last_prune = Some(now);
+    store.insert_points(
+        "app".into(),
+        [
+            point(now - RETENTION_MILLISECONDS - 1),
+            point(now - RETENTION_MILLISECONDS),
+        ],
+    )?;
+    block_on(
+        store.database.apply(
+            super::FinishedBuckets {
+                energy: [-1_i64, 0, 1]
+                    .into_iter()
+                    .map(|offset| {
+                        (
+                            "app".into(),
+                            super::EnergyHistoryPoint {
+                                timestamp_ms: (now - ENERGY_RETENTION_MILLISECONDS)
+                                    .checked_add_signed(offset)
+                                    .unwrap(),
+                                energy_mwh: 1.0,
+                                energy_source: "rapl".into(),
+                                energy_confidence: "high".into(),
+                            },
+                        )
+                    })
+                    .collect(),
+                ..Default::default()
+            },
+            now,
+            false,
+        ),
+    )?;
+    store.prune(now)?;
+    assert_eq!(
+        block_on(
+            store
+                .database
+                .integer("SELECT COUNT(*) FROM resource_points")
+        )?,
+        1
     );
-    std::hint::black_box((store, snapshot, bytes));
+    assert_eq!(
+        block_on(store.database.integer("SELECT COUNT(*) FROM energy_points"))?,
+        2
+    );
+    assert_eq!(
+        block_on(store.database.integer("SELECT COUNT(*) FROM cursor_epochs"))?,
+        1
+    );
+    store.prune(now + 2)?;
+    assert_eq!(
+        block_on(
+            store
+                .database
+                .integer("SELECT COUNT(*) FROM resource_points")
+        )?,
+        0
+    );
+    assert_eq!(
+        block_on(store.database.integer("SELECT COUNT(*) FROM energy_points"))?,
+        0
+    );
+    assert_eq!(
+        block_on(store.database.integer("SELECT COUNT(*) FROM cursor_epochs"))?,
+        0
+    );
+    Ok(())
+}
+
+#[test]
+fn sql_summaries_match_reference_without_decoding_unpaged_payloads() -> anyhow::Result<()> {
+    let mut store = HistoryStore::load(None);
+    let t = now_milliseconds() / 15_000 * 15_000;
+    let points: Vec<_> = (0..100)
+        .map(|i| {
+            let mut p = point(t - (100 - i) * 15_000);
+            p.resources.compute.cpu_percent_of_machine = (i % 7) as f64;
+            p.resources.peaks.cpu_percent_of_machine = 10.0;
+            p.resources.availability.as_mut().unwrap().cpu = i % 3 != 0;
+            p
+        })
+        .collect();
+    store.insert_points("app".into(), points.clone())?;
+    let epoch = block_on(store.database.epoch("app"))?;
+    for (start, end) in [
+        (t - 1_500_000, t),
+        (t - 1_499_500, t - 900_001),
+        (t - 400_000, t - 400_000),
+    ] {
+        let selected: Vec<_> = points
+            .iter()
+            .filter(|p| {
+                p.timestamp_ms >= start
+                    && (p.timestamp_ms <= end || p.timestamp_ms - p.duration_ms < end)
+            })
+            .collect();
+        let expected = summary::summarize(selected, start, end, &epoch);
+        let mut actual = store
+            .query_window("app", Some(start), Some(end), None, 1)?
+            .summary;
+        // SQL's weighted sum and the reference's online mean differ by a few ULPs.
+        for (name, stats) in &mut actual.metrics {
+            if let (Some(actual), Some(expected)) = (stats.mean, expected.metrics[name].mean) {
+                assert!((actual - expected).abs() <= 1e-10);
+                stats.mean = Some(expected);
+            }
+        }
+        assert_eq!(actual, expected);
+    }
+    // The summary uses typed columns, not 100 JSON decodes. A bad payload outside
+    // this page does not erase history; fetching that row reports the corruption.
+    block_on(store.database.connection.execute(
+        "UPDATE resource_points SET payload='bad json' WHERE target_id='app' AND timestamp_ms=?",
+        [super::storage::timestamp(points[99].timestamp_ms)?],
+    ))?;
+    assert!(store.query_window("app", None, None, None, 1).is_ok());
+    assert!(
+        store
+            .query_window("app", Some(points[99].timestamp_ms), None, None, 1)
+            .is_err()
+    );
+    assert_eq!(
+        block_on(
+            store
+                .database
+                .integer("SELECT COUNT(*) FROM resource_points")
+        )?,
+        100
+    );
+    Ok(())
+}
+
+#[test]
+fn range_queries_use_indexes() -> anyhow::Result<()> {
+    let store = HistoryStore::load(None);
+    for (sql, expected) in [
+        (
+            "EXPLAIN QUERY PLAN SELECT payload FROM resource_points WHERE target_id='app' AND timestamp_ms>=1 AND timestamp_ms<=100 ORDER BY timestamp_ms LIMIT 11",
+            "INDEX",
+        ),
+        (
+            "EXPLAIN QUERY PLAN DELETE FROM resource_points WHERE timestamp_ms<100",
+            "resource_retention",
+        ),
+        (
+            "EXPLAIN QUERY PLAN DELETE FROM energy_points WHERE timestamp_ms<100",
+            "energy_retention",
+        ),
+    ] {
+        let details = block_on(async {
+            let mut rows = store.database.connection.query(sql, ()).await?;
+            let mut details = String::new();
+            while let Some(row) = rows.next().await? {
+                details.push_str(&row.get::<String>(3)?);
+            }
+            anyhow::Ok(details)
+        })?;
+        assert!(details.contains(expected), "{details}");
+        assert!(!details.contains("SCAN resource_points"), "{details}");
+    }
+    Ok(())
+}
+
+#[test]
+fn unsafe_incompatible_and_corrupt_stores_fail_closed_and_legacy_json_is_untouched()
+-> anyhow::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir()?;
+    let legacy = dir.path().join("resource-history-v1.json");
+    std::fs::write(&legacy, b"old even if corrupt")?;
+    let path = dir.path().join("resource-history-turso-v1.db");
+    let store = HistoryStore::open(&path)?;
+    assert!(HistoryStore::open(&path).is_err(), "only one owner");
+    assert_eq!(path.metadata()?.permissions().mode() & 0o777, 0o600);
+    assert_eq!(dir.path().metadata()?.permissions().mode() & 0o777, 0o700);
+    drop(store);
+    assert_eq!(std::fs::read(&legacy)?, b"old even if corrupt");
+    let link = dir.path().join("link.db");
+    std::os::unix::fs::symlink(&path, &link)?;
+    assert!(HistoryStore::open(&link).is_err());
+    let empty = dir.path().join("empty.db");
+    std::fs::write(&empty, b"")?;
+    assert!(HistoryStore::open(&empty).is_err());
+    assert_eq!(empty.metadata()?.len(), 0);
+    let bad = dir.path().join("bad.db");
+    let bad_bytes = vec![b'x'; 4096];
+    std::fs::write(&bad, &bad_bytes)?;
+    assert!(HistoryStore::open(&bad).is_err());
+    assert_eq!(std::fs::read(&bad)?, bad_bytes);
+    let store = HistoryStore::open(&path)?;
+    block_on(
+        store
+            .database
+            .connection
+            .execute("PRAGMA user_version=99", ()),
+    )?;
+    drop(store);
+    assert!(HistoryStore::open(&path).is_err());
+    Ok(())
+}
+
+#[test]
+fn process_exit_recovers_committed_wal_without_final_save() -> anyhow::Result<()> {
+    const CHILD: &str = "APP_DAEMON_HISTORY_CRASH_FIXTURE";
+    if let Some(path) = std::env::var_os(CHILD) {
+        let mut store = HistoryStore::open(std::path::Path::new(&path))?;
+        let t = now_milliseconds() / 60_000 * 60_000 - 60_000;
+        store.record("app", t + 15_000, 1.0, &usage())?;
+        store.record("app", t + 16_000, 1.0, &usage())?;
+        // Deliberately skip Rust destructors, final flush and checkpoint.
+        std::process::exit(0);
+    }
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("history.db");
+    let status = std::process::Command::new(std::env::current_exe()?)
+        .args([
+            "--exact",
+            "history::persistence_tests::process_exit_recovers_committed_wal_without_final_save",
+            "--test-threads=1",
+        ])
+        .env(CHILD, &path)
+        .status()?;
+    assert!(status.success());
+    assert!(dir.path().join("history.db-wal").metadata()?.len() > 0);
+    let mut store = HistoryStore::open(&path)?;
+    assert_eq!(
+        store
+            .query_window("app", None, None, None, 10)?
+            .points
+            .len(),
+        1
+    );
+    assert_eq!(
+        block_on(store.database.integer("SELECT COUNT(*) FROM energy_points"))?,
+        0
+    );
+    assert!(store.pending.resources.is_empty());
+    Ok(())
+}
+
+#[test]
+#[ignore = "isolated release storage probe; no live state"]
+fn profile_turso_history() -> anyhow::Result<()> {
+    let dir = tempfile::tempdir()?;
+    let mut store = HistoryStore::open(&dir.path().join("history.db"))?;
+    let end = now_milliseconds() / 15_000 * 15_000;
+    let started = std::time::Instant::now();
+    for app in 0..10 {
+        store.insert_points(
+            format!("app-{app}"),
+            (0..3500).map(|i| point(end - (3500 - i) * 15_000)),
+        )?;
+    }
+    let seed = started.elapsed();
+    let started = std::time::Instant::now();
+    let before = block_on(store.database.integer("SELECT total_changes()"))?;
+    block_on(
+        store.database.apply(
+            super::FinishedBuckets {
+                resources: (0..10)
+                    .map(|app| (format!("app-{app}"), point(end)))
+                    .collect(),
+                ..Default::default()
+            },
+            now_milliseconds(),
+            false,
+        ),
+    )?;
+    let append = started.elapsed();
+    let started = std::time::Instant::now();
+    let page = store.query_window("app-0", None, Some(end), None, 100)?;
+    eprintln!(
+        "rows=35000 seed_ms={:.3} append_10_ms={:.3} changed_rows={} query_ms={:.3} page_rows={}",
+        seed.as_secs_f64() * 1000.0,
+        append.as_secs_f64() * 1000.0,
+        block_on(store.database.integer("SELECT total_changes()"))? - before,
+        started.elapsed().as_secs_f64() * 1000.0,
+        page.points.len()
+    );
+    Ok(())
 }

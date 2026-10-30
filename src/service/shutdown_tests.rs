@@ -1,7 +1,4 @@
-use super::{
-    ApplicationService, Arc, Duration, HistoryStore, Ordering, now_milliseconds, persist_snapshot,
-    time,
-};
+use super::{ApplicationService, Arc, Duration, HistoryStore, Ordering, now_milliseconds, time};
 use crate::model::ResourceUsage;
 use tokio::sync::oneshot;
 
@@ -17,19 +14,18 @@ async fn shutdown_drains_sampling_and_serializes_final_save_after_older_writers(
         .history
         .lock()
         .await
-        .record("app", t, 1.0, &ResourceUsage::default());
-    let old = service.history.lock().await.snapshot(true).unwrap();
-    let old_writer = Arc::clone(&service.history_saves).lock_owned().await;
+        .record("app", t, 1.0, &ResourceUsage::default())?;
+    let mut old_writer = Arc::clone(&service.history).lock_owned().await;
     let (sample_done, release_sample) = oneshot::channel();
     let sampler_service = Arc::clone(&service);
     let sampler = tokio::spawn(async move {
         let _ = release_sample.await;
-        sampler_service.history.lock().await.record(
-            "app",
-            t + 15_000,
-            1.0,
-            &ResourceUsage::default(),
-        );
+        sampler_service
+            .history
+            .lock()
+            .await
+            .record("app", t + 15_000, 1.0, &ResourceUsage::default())
+            .unwrap();
     });
     service.background_tasks.lock().unwrap().push(sampler);
     let stopping = Arc::clone(&service);
@@ -45,9 +41,10 @@ async fn shutdown_drains_sampling_and_serializes_final_save_after_older_writers(
     assert!(!shutdown.is_finished());
     sample_done.send(()).unwrap();
     // An older write finishes while shutdown is waiting for serialization.
-    persist_snapshot(old)?;
+    old_writer.flush(false)?;
     drop(old_writer);
     time::timeout(Duration::from_secs(2), shutdown).await??;
+    *service.history.lock().await = HistoryStore::load(None);
     let mut loaded = HistoryStore::load(Some(path));
     assert_eq!(
         loaded
@@ -69,6 +66,52 @@ async fn shutdown_drains_sampling_and_serializes_final_save_after_older_writers(
         api.dispatch_owned("applications.query", serde_json::json!({}), None)
             .await["error"]["code"],
         "daemon-unavailable"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn cancelled_history_caller_does_not_release_the_running_worker() -> anyhow::Result<()> {
+    let service = ApplicationService::build(false);
+    let t = now_milliseconds() / 15_000 * 15_000 + 60_000;
+    service
+        .history
+        .lock()
+        .await
+        .record("app", t + 1000, 1.0, &ResourceUsage::default())?;
+    let mut history = Arc::clone(&service.history).lock_owned().await;
+    let (started, ready) = oneshot::channel();
+    let (release, blocked) = std::sync::mpsc::channel();
+    let caller = tokio::spawn(async move {
+        tokio::task::spawn_blocking(move || {
+            started.send(()).unwrap();
+            blocked.recv().unwrap();
+            history.flush(true)
+        })
+        .await
+        .unwrap()
+    });
+    ready.await?;
+    caller.abort();
+    assert!(caller.await.unwrap_err().is_cancelled());
+    assert!(service.history.try_lock().is_err());
+    let stopping = Arc::clone(&service);
+    let final_save = tokio::spawn(async move {
+        stopping.save_history_final().await;
+    });
+    tokio::task::yield_now().await;
+    assert!(!final_save.is_finished());
+    release.send(())?;
+    time::timeout(Duration::from_secs(5), final_save).await??;
+    assert_eq!(
+        service
+            .history
+            .lock()
+            .await
+            .query_window("app", None, None, None, 10)?
+            .points
+            .len(),
+        1
     );
     Ok(())
 }

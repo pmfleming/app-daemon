@@ -1,6 +1,6 @@
 use super::{
     ENERGY_BUCKET_MILLISECONDS, HistoryStore, RETENTION_MILLISECONDS, ResourceUsage,
-    now_milliseconds, persist_snapshot,
+    now_milliseconds,
 };
 
 fn usage(cpu: f64, energy: f64) -> ResourceUsage {
@@ -38,7 +38,8 @@ fn indexed_windows_match_linear_selection_including_late_overlaps() -> anyhow::R
     })
     .collect();
     let mut store = HistoryStore::load(None);
-    store.insert_points("app".into(), points.iter().cloned());
+    store.insert_points("app".into(), points.iter().cloned())?;
+    let epoch = super::block_on(store.database.epoch("app"))?;
     for (since, until, after, limit) in [
         (0, 2500, None, 1),
         (2000, 4500, Some(1000), 2),
@@ -47,7 +48,7 @@ fn indexed_windows_match_linear_selection_including_late_overlaps() -> anyhow::R
         (0, 5000, None, 0),
     ] {
         let cursor = after
-            .map(|after| super::encode_cursor("app", base + after, &store.cursor_epochs["app"]))
+            .map(|after| super::encode_cursor("app", base + after, &epoch))
             .transpose()?;
         let page = store.query_window(
             "app",
@@ -91,20 +92,6 @@ fn indexed_windows_match_linear_selection_including_late_overlaps() -> anyhow::R
             observed
         );
     }
-    let points = (0..4096).map(std::sync::Arc::new).collect();
-    let comparisons = std::cell::Cell::new(0);
-    assert_eq!(
-        super::retained_from(Some(&points), |value| {
-            comparisons.set(comparisons.get() + 1);
-            *value < 4000
-        })
-        .next(),
-        Some(&4000)
-    );
-    assert!(
-        comparisons.get() <= 14,
-        "selection must seek, not scan the prefix"
-    );
     Ok(())
 }
 
@@ -141,11 +128,11 @@ fn cursor_lifecycle_survives_restart_but_rejects_expiry_rewrites_and_backfills()
         t - RETENTION_MILLISECONDS + 600_000,
         1.0,
         &usage(10.0, 1.0),
-    );
+    )?;
     let oldest = store.query_window("app", None, None, None, 1)?;
     let old_cursor = oldest.next_cursor.as_deref().unwrap();
     let cutoff = oldest.points[0].timestamp_ms + RETENTION_MILLISECONDS;
-    store.record("app", t + 1000, 1.0, &usage(10.0, 1.0));
+    store.record("app", t + 1000, 1.0, &usage(10.0, 1.0))?;
     let recent = store.query_window("app", None, None, Some(old_cursor), 1)?;
     assert_eq!(recent.points.len(), 1, "normal appends preserve cursors");
     assert_eq!(
@@ -160,13 +147,13 @@ fn cursor_lifecycle_survives_restart_but_rejects_expiry_rewrites_and_backfills()
             .query_window("other-app", None, None, Some(old_cursor), 1)
             .is_err()
     );
-    store.prune(cutoff);
+    store.prune(cutoff)?;
     assert!(
         store
             .query_window("app", None, None, Some(old_cursor), 1)
             .is_ok()
     );
-    store.prune(cutoff + 1);
+    store.prune(cutoff + 1)?;
     assert!(
         store
             .query_window("app", None, None, Some(old_cursor), 1)
@@ -178,7 +165,8 @@ fn cursor_lifecycle_survives_restart_but_rejects_expiry_rewrites_and_backfills()
     let incremental = store.query_window("app", None, None, cursor.as_deref(), 1)?;
     assert!(incremental.points.is_empty());
     assert_eq!(incremental.next_cursor, cursor);
-    persist_snapshot(store.snapshot(false).unwrap())?;
+    store.flush(false)?;
+    drop(store);
 
     let mut restarted = HistoryStore::load(Some(path.clone()));
     assert!(
@@ -193,8 +181,8 @@ fn cursor_lifecycle_survives_restart_but_rejects_expiry_rewrites_and_backfills()
             .is_empty(),
         "normal restart preserves retained cursors"
     );
-    restarted.record("app", t + 3000, 2.0, &usage(40.0, 2.0));
-    restarted.snapshot(true);
+    restarted.record("app", t + 3000, 2.0, &usage(40.0, 2.0))?;
+    restarted.flush(true)?;
     assert!(
         restarted
             .query_window("app", None, None, cursor.as_deref(), 1)
@@ -211,11 +199,12 @@ fn cursor_lifecycle_survives_restart_but_rejects_expiry_rewrites_and_backfills()
     assert_eq!(point.resources.peaks.cpu_percent, 40.0);
     assert_eq!(point.resources.energy_mwh, 3.0);
     assert_eq!(
-        restarted.energy_totals(t, now_milliseconds())[0].energy_mwh,
+        restarted.energy_totals(t, now_milliseconds())?[0].energy_mwh,
         3.0
     );
-    restarted.record("app", t + 6000, 1.0, &usage(20.0, 1.0));
-    persist_snapshot(restarted.snapshot(true).unwrap())?;
+    restarted.record("app", t + 6000, 1.0, &usage(20.0, 1.0))?;
+    restarted.flush(true)?;
+    drop(restarted);
     let mut restarted = HistoryStore::load(Some(path));
     let gap = restarted.query_window("app", Some(t + 3000), Some(t + 5000), None, 10)?;
     assert_eq!(gap.summary.metrics["cpu_percent_of_machine"].observed_ms, 0);
@@ -240,7 +229,7 @@ fn cursor_lifecycle_survives_restart_but_rejects_expiry_rewrites_and_backfills()
     let cursor = restarted
         .query_window("app", None, None, None, 10)?
         .next_cursor;
-    restarted.record("app", t - 30_000, 1.0, &usage(20.0, 1.0));
+    restarted.record("app", t - 30_000, 1.0, &usage(20.0, 1.0))?;
     assert!(
         restarted
             .query_window("app", None, None, cursor.as_deref(), 10)

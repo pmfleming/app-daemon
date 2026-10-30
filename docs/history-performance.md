@@ -1,5 +1,10 @@
 # History persistence performance
 
+The measurements below describe the **retired JSON implementation**. Current
+history uses [Turso storage](history-storage.md), not snapshots or whole-file
+saves. The isolated replacement probe is `cargo test --release --locked
+profile_turso_history -- --ignored --nocapture`.
+
 ## Compact availability (2026-10-22)
 
 Historical buckets retain the nine capability flags, not a 48-key heap map.

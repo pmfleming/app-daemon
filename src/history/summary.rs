@@ -78,6 +78,7 @@ const METRICS: &[(&str, MetricReader)] = &[
     }),
 ];
 
+#[cfg(test)]
 pub(super) fn summarize<'a>(
     points: impl IntoIterator<Item = &'a ResourceHistoryPoint>,
     start: u64,
@@ -166,6 +167,7 @@ impl crate::model::MetricSummary {
         self
     }
 
+    #[cfg(test)]
     fn observe(&mut self, (valid, value, peak): (bool, f64, f64), weight: u64, window_ms: u64) {
         if !observable(valid, value, weight) {
             return;
@@ -182,6 +184,108 @@ impl crate::model::MetricSummary {
         self.available = true;
         self.coverage = (self.observed_ms as f64 / window_ms as f64).min(1.0);
     }
+}
+
+// Materialize only the eight summary metrics, alongside the opaque full point.
+// SQL computes statistics without decoding every resource payload on each page.
+pub(super) fn sql_column_names() -> Vec<String> {
+    (0..METRICS.len())
+        .flat_map(|i| [format!("m{i}_value"), format!("m{i}_peak")])
+        .collect()
+}
+
+pub(super) fn sql_columns() -> String {
+    sql_column_names()
+        .into_iter()
+        .map(|name| format!("{name} REAL"))
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+pub(super) fn sql_values(point: &ResourceHistoryPoint) -> Vec<turso::Value> {
+    let available = availability(point);
+    let mut values = vec![
+        energy_confidence(&point.resources, &available, 1).map_or(turso::Value::Null, |value| {
+            turso::Value::Integer(i64::from(value))
+        }),
+    ];
+    for (_, read) in METRICS {
+        let (valid, value, peak) = read(&point.resources, &available);
+        if observable(valid, value, 1) {
+            values.push(turso::Value::Real(value));
+            values.push(turso::Value::Real(if peak.is_finite() && peak >= 0.0 {
+                peak.max(value)
+            } else {
+                value
+            }));
+        } else {
+            values.extend([turso::Value::Null, turso::Value::Null]);
+        }
+    }
+    values
+}
+
+pub(super) async fn sql_summary(
+    connection: &turso::Connection,
+    target: &str,
+    lower: u64,
+    start: u64,
+    end: u64,
+    epoch: &str,
+) -> anyhow::Result<HistorySummary> {
+    use anyhow::Context;
+    let aggregates = (0..METRICS.len())
+        .map(|i| {
+            format!(
+                "COALESCE(SUM(CASE WHEN m{i}_value IS NOT NULL THEN weight ELSE 0 END),0), \
+         SUM(m{i}_value * weight), MAX(CASE WHEN weight > 0 THEN m{i}_peak END)"
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    let row = connection.query(format!(
+        "SELECT COUNT(*), COALESCE(MAX(timestamp_ms),0), MIN(CASE WHEN weight > 0 THEN energy_confidence END), {aggregates} \
+         FROM (SELECT *, MAX(0, MIN(timestamp_ms,?3) - MAX(start_ms,?2)) AS weight \
+         FROM resource_points WHERE target_id=?1 AND timestamp_ms>=?4 AND (timestamp_ms<=?3 OR start_ms<?3))"
+    ), turso::params![target, super::storage::timestamp(start)?, super::storage::timestamp(end)?, super::storage::timestamp(lower)?])
+        .await?.next().await?.context("missing history summary")?;
+    let count: i64 = row.get(0)?;
+    let last: i64 = row.get(1)?;
+    let confidence: Option<i64> = row.get(2)?;
+    let window_ms = end.saturating_sub(start).max(1);
+    let mut metrics = std::collections::HashMap::new();
+    for (i, (name, _)) in METRICS.iter().enumerate() {
+        let observed: i64 = row.get(3 + i * 3)?;
+        let total: Option<f64> = row.get(4 + i * 3)?;
+        let peak: Option<f64> = row.get(5 + i * 3)?;
+        let stats = MetricSummary {
+            available: observed > 0,
+            mean: if observed > 0 {
+                total.map(|sum| sum / observed as f64)
+            } else {
+                None
+            },
+            peak,
+            observed_ms: observed.try_into()?,
+            coverage: (observed as f64 / window_ms as f64).min(1.0),
+            ..Default::default()
+        };
+        metrics.insert((*name).to_owned(), stats.with_total(name));
+    }
+    Ok(HistorySummary {
+        window_start_ms: start,
+        window_end_ms: end,
+        revision: format!("{epoch}:{last}:{count}"),
+        weighting: "observed-duration".into(),
+        energy_confidence: match confidence {
+            Some(0) => "low",
+            Some(2) => "medium",
+            Some(3) => "high",
+            _ => "unknown",
+        }
+        .into(),
+        metrics: metrics.into_iter().collect(),
+    })
 }
 
 #[cfg(test)]

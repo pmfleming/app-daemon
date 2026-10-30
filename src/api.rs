@@ -83,7 +83,7 @@ impl ApiService {
         self.applications
             .resource_history(params)
             .await
-            .map_err(|error| (ErrorCode::ValidationError, error.to_string()))
+            .map_err(history_error)
     }
 
     pub(crate) async fn energy_overview(
@@ -91,7 +91,10 @@ impl ApiService {
         params: EnergyOverviewParams,
         _owner: Option<String>,
     ) -> Result<ApplicationEnergyOverview, ApiError> {
-        Ok(self.applications.energy_overview(params).await)
+        self.applications
+            .energy_overview(params)
+            .await
+            .map_err(history_error)
     }
 
     pub(crate) async fn refresh(
@@ -156,6 +159,15 @@ impl ApiService {
 }
 
 pub(crate) type ApiError = (ErrorCode, String);
+
+fn history_error(error: anyhow::Error) -> ApiError {
+    let code = if error.is::<crate::history::InvalidHistoryQuery>() {
+        ErrorCode::ValidationError
+    } else {
+        ErrorCode::DaemonUnavailable
+    };
+    (code, format!("{error:#}"))
+}
 
 pub(crate) fn decode<T: DeserializeOwned>(value: Value) -> Result<T, ApiError> {
     serde_json::from_value(value).map_err(|error| (ErrorCode::ValidationError, error.to_string()))

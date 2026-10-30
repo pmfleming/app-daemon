@@ -136,7 +136,7 @@ fn windowless_apps_are_discovered_published_and_added_to_history() -> anyhow::Re
             now_milliseconds() - 30_000,
             snapshot.interval_seconds(),
             &snapshot.usage_for_target(id, roots.iter().copied()),
-        );
+        )?;
     }
     let points = history
         .query_window("org.example.App.desktop", None, None, None, 100)?

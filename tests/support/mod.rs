@@ -246,10 +246,21 @@ impl Session {
             timeout(DEADLINE, self.daemon.wait()).await??.success(),
             "daemon shutdown failed"
         );
-        let file: Value = serde_json::from_slice(&fs::read(
-            self.state_path("app-daemon/resource-history-v1.json"),
-        )?)?;
-        anyhow::ensure!(file["version"] == 1, "final history snapshot missing");
+        let path = self.state_path("app-daemon/resource-history-turso-v1.db");
+        anyhow::ensure!(path.is_file(), "history database missing after shutdown");
+        let database = turso::Builder::new_local(path.to_str().context("history path")?)
+            .with_io(turso::IoBackend::Syscall)
+            .build()
+            .await?;
+        let connection = database.connect()?;
+        let version = connection
+            .query("PRAGMA user_version", ())
+            .await?
+            .next()
+            .await?
+            .context("history schema missing")?
+            .get::<i64>(0)?;
+        anyhow::ensure!(version == 1, "unexpected history schema");
         Ok(())
     }
 }
