@@ -264,6 +264,63 @@ fn sql_summaries_match_reference_without_decoding_unpaged_payloads() -> anyhow::
         }
         assert_eq!(actual, expected);
     }
+    // Keep explicit energy expectations on the production typed-SQL path.
+    // Nonfinite JSON numbers cannot round-trip as f64; summaries do not decode them.
+    {
+        let sql_energy_summary = |points: &[&ResourceHistoryPoint],
+                                  start,
+                                  end|
+         -> anyhow::Result<summary::HistorySummary> {
+            let mut store = HistoryStore::load(None);
+            store.insert_points("energy".into(), points.iter().copied().cloned())?;
+            block_on(summary::sql_summary(
+                &store.database.connection,
+                "energy",
+                start,
+                start,
+                end,
+                "test",
+            ))
+        };
+        let mut first = point(t + 1000);
+        first.duration_ms = 1000;
+        first.resources.availability.as_mut().unwrap().energy = true;
+        first.resources.energy_source = "rapl".into();
+        first.resources.energy_confidence = "high".into();
+        first.resources.average_power_watts = 3.6;
+        let mut second = first.clone();
+        second.timestamp_ms = t + 3000;
+        second.resources.energy_confidence = "low".into();
+        let summary = sql_energy_summary(&[&first, &second], t + 500, t + 2500)?;
+        assert_eq!(
+            summary.metrics["average_power_watts"].observed_total,
+            Some(1.0)
+        );
+        assert_eq!(
+            summary.metrics["average_power_watts"].total_unit.as_deref(),
+            Some("mWh")
+        );
+        assert_eq!(summary.energy_confidence, "low");
+        second.resources.energy_source = "battery".into();
+        let summary = sql_energy_summary(&[&first, &second], t + 500, t + 2500)?;
+        assert_eq!(
+            summary.metrics["average_power_watts"].observed_total,
+            Some(0.5)
+        );
+        assert_eq!(summary.energy_confidence, "high");
+        for power in [f64::NAN, f64::INFINITY, -1.0] {
+            first.resources.average_power_watts = power;
+            let summary = sql_energy_summary(&[&first], t, t + 1000)?;
+            assert_eq!(summary.energy_confidence, "unknown");
+            assert_eq!(summary.metrics["average_power_watts"].observed_total, None);
+        }
+        first.resources.average_power_watts = 0.0;
+        assert_eq!(
+            sql_energy_summary(&[&first], t, t + 1000)?.metrics["average_power_watts"]
+                .observed_total,
+            Some(0.0)
+        );
+    }
     // The summary uses typed columns, not 100 JSON decodes. A bad payload outside
     // this page does not erase history; fetching that row reports the corruption.
     block_on(store.database.connection.execute(
