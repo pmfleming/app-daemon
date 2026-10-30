@@ -75,6 +75,17 @@ fn disk_cache_retains_completed_sizes_retries_failures_and_discards_removed_targ
         "failed refreshes must back off too"
     );
     assert!(cache.read(&provider, [], later).is_empty());
+    let many = (0..1024)
+        .rev()
+        .map(|i| format!("{i:04}"))
+        .collect::<Vec<_>>();
+    cache.read(&provider, &many, later);
+    assert_eq!(requests.try_iter().collect::<Vec<_>>(), ["0000", "0001"]);
+    cache.read(&provider, &many, later);
+    assert!(
+        requests.try_recv().is_err(),
+        "running requests still occupy capacity"
+    );
 }
 
 #[test]

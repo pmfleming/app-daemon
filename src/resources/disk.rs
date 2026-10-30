@@ -63,6 +63,10 @@ impl DiskWorkers {
         in_flight: &mut HashSet<String>,
         now: Instant,
     ) {
+        let capacity = WORKERS.saturating_sub(in_flight.len());
+        if capacity == 0 {
+            return;
+        }
         let mut due = targets
             .iter()
             .copied()
@@ -73,11 +77,12 @@ impl DiskWorkers {
                     .is_none_or(|sample| now >= sample.next_refresh)
             })
             .collect::<Vec<_>>();
+        if due.len() > capacity {
+            due.select_nth_unstable(capacity);
+            due.truncate(capacity);
+        }
         due.sort_unstable();
-        for target in due
-            .into_iter()
-            .take(WORKERS.saturating_sub(in_flight.len()))
-        {
+        for target in due {
             if self.requests.try_send(target.clone()).is_ok() {
                 in_flight.insert(target.clone());
             }
