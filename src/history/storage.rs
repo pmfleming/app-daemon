@@ -1,10 +1,10 @@
 use super::{
-    Database, ENERGY_RETENTION_MILLISECONDS, FinishedBuckets, HistoryPage, PendingEnergy,
+    ENERGY_RETENTION_MILLISECONDS, FinishedBuckets, HistoryPage, PendingEnergy,
     RETENTION_MILLISECONDS, ResourceHistoryPoint, aggregate, decode_cursor, encode_cursor, invalid,
     new_cursor_epoch, summary,
 };
 use anyhow::{Context, Result, ensure};
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::LazyLock};
 use turso::{Value, params};
 
 pub(super) fn timestamp(value: u64) -> Result<i64> {
@@ -13,7 +13,7 @@ pub(super) fn timestamp(value: u64) -> Result<i64> {
         .context("history timestamp exceeds signed 64-bit milliseconds")
 }
 
-impl Database {
+impl super::database::Database {
     pub(super) async fn apply(
         &mut self,
         finished: FinishedBuckets,
@@ -95,7 +95,24 @@ impl Database {
             point = aggregate::PendingPoint::merge_finished(&previous, point);
         }
         point.resources.metric_availability = crate::projection::MetricAvailability::empty();
-        let names = summary::sql_column_names();
+        // This shape depends only on the fixed schema, never on row values.
+        static UPSERT: LazyLock<String> = LazyLock::new(|| {
+            let names = summary::sql_column_names();
+            let columns = format!(
+                "target_id,timestamp_ms,start_ms,payload,energy_confidence,{}",
+                names.join(",")
+            );
+            let placeholders = vec!["?"; 5 + names.len()].join(",");
+            let updates = ["start_ms", "payload", "energy_confidence"]
+                .into_iter()
+                .chain(names.iter().map(String::as_str))
+                .map(|name| format!("{name}=excluded.{name}"))
+                .collect::<Vec<_>>()
+                .join(",");
+            format!(
+                "INSERT INTO resource_points({columns}) VALUES ({placeholders}) ON CONFLICT(target_id,timestamp_ms) DO UPDATE SET {updates}"
+            )
+        });
         let mut values = vec![
             Value::Text(id.to_owned()),
             Value::Integer(timestamp(point.timestamp_ms)?),
@@ -105,19 +122,7 @@ impl Database {
             Value::Text(serde_json::to_string(&point)?),
         ];
         values.extend(summary::sql_values(&point));
-        let placeholders = vec!["?"; values.len()].join(",");
-        let columns = format!(
-            "target_id,timestamp_ms,start_ms,payload,energy_confidence,{}",
-            names.join(",")
-        );
-        let updates = ["start_ms", "payload", "energy_confidence"]
-            .into_iter()
-            .map(str::to_owned)
-            .chain(names)
-            .map(|name| format!("{name}=excluded.{name}"))
-            .collect::<Vec<_>>()
-            .join(",");
-        self.connection.execute(format!("INSERT INTO resource_points({columns}) VALUES ({placeholders}) ON CONFLICT(target_id,timestamp_ms) DO UPDATE SET {updates}"), values).await?;
+        self.connection.execute(UPSERT.as_str(), values).await?;
         if rewrite {
             self.connection.execute("INSERT INTO cursor_epochs(target_id,epoch) VALUES (?,?) ON CONFLICT(target_id) DO UPDATE SET epoch=excluded.epoch", params![id, new_cursor_epoch()]).await?;
         } else {

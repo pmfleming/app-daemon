@@ -1,6 +1,7 @@
 //! Canonical statistics over a selected window, independent of response pagination.
 use crate::model::{HistoricalResourceUsage, ResourceAvailability, ResourceHistoryPoint};
 pub use crate::model::{HistorySummary, MetricSummary};
+use std::{collections::BTreeMap, sync::LazyLock};
 
 pub(super) fn availability(point: &ResourceHistoryPoint) -> ResourceAvailability {
     point
@@ -234,26 +235,41 @@ pub(super) async fn sql_summary(
     epoch: &str,
 ) -> anyhow::Result<HistorySummary> {
     use anyhow::Context;
-    let aggregates = (0..METRICS.len())
-        .map(|i| {
-            format!(
-                "COALESCE(SUM(CASE WHEN m{i}_value IS NOT NULL THEN weight ELSE 0 END),0), \
-         SUM(m{i}_value * weight), MAX(CASE WHEN weight > 0 THEN m{i}_peak END)"
-            )
-        })
-        .collect::<Vec<_>>()
-        .join(",");
-    let row = connection.query(format!(
-        "SELECT COUNT(*), COALESCE(MAX(timestamp_ms),0), MIN(CASE WHEN weight > 0 THEN energy_confidence END), {aggregates} \
-         FROM (SELECT *, MAX(0, MIN(timestamp_ms,?3) - MAX(start_ms,?2)) AS weight \
-         FROM resource_points WHERE target_id=?1 AND timestamp_ms>=?4 AND (timestamp_ms<=?3 OR start_ms<?3))"
-    ), turso::params![target, super::storage::timestamp(start)?, super::storage::timestamp(end)?, super::storage::timestamp(lower)?])
-        .await?.next().await?.context("missing history summary")?;
+    static SQL: LazyLock<String> = LazyLock::new(|| {
+        let aggregates = (0..METRICS.len())
+            .map(|i| {
+                format!(
+                    "COALESCE(SUM(CASE WHEN m{i}_value IS NOT NULL THEN weight ELSE 0 END),0), \
+             SUM(m{i}_value * weight), MAX(CASE WHEN weight > 0 THEN m{i}_peak END)"
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        format!(
+            "SELECT COUNT(*), COALESCE(MAX(timestamp_ms),0), MIN(CASE WHEN weight > 0 THEN energy_confidence END), {aggregates} \
+                 FROM (SELECT *, MAX(0, MIN(timestamp_ms,?3) - MAX(start_ms,?2)) AS weight \
+                 FROM resource_points WHERE target_id=?1 AND timestamp_ms>=?4 AND (timestamp_ms<=?3 OR start_ms<?3))"
+        )
+    });
+    let row = connection
+        .query(
+            SQL.as_str(),
+            turso::params![
+                target,
+                super::storage::timestamp(start)?,
+                super::storage::timestamp(end)?,
+                super::storage::timestamp(lower)?
+            ],
+        )
+        .await?
+        .next()
+        .await?
+        .context("missing history summary")?;
     let count: i64 = row.get(0)?;
     let last: i64 = row.get(1)?;
     let confidence: Option<i64> = row.get(2)?;
     let window_ms = end.saturating_sub(start).max(1);
-    let mut metrics = std::collections::HashMap::new();
+    let mut metrics = BTreeMap::new();
     for (i, (name, _)) in METRICS.iter().enumerate() {
         let observed: i64 = row.get(3 + i * 3)?;
         let total: Option<f64> = row.get(4 + i * 3)?;
@@ -284,7 +300,7 @@ pub(super) async fn sql_summary(
             _ => "unknown",
         }
         .into(),
-        metrics: metrics.into_iter().collect(),
+        metrics,
     })
 }
 
