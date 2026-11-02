@@ -128,7 +128,15 @@ impl PreparedAction {
                 }
                 return Ok(self);
             }
-            let context = super::workspaces::capture().await?;
+            let Some(context) = super::workspaces::capture().await? else {
+                anyhow::ensure!(
+                    self.params.launch_target == LaunchTarget::Default
+                        && (self.params.action == ApplicationAction::DesktopAction
+                            || !settings.is_some_and(|s| s.new_workspace)),
+                    "matching workspace owner required for this launch target"
+                );
+                return Ok(self);
+            };
             self.params.workspace_id = super::workspaces::destination(
                 self.params.launch_target.clone(),
                 settings,

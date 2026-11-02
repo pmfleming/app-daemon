@@ -9,6 +9,30 @@ use shelllist_daemon_core::{
 };
 use std::{collections::BTreeMap, path::PathBuf, time::Duration};
 
+#[derive(Debug)]
+struct UnsupportedWorkspaceProtocol;
+impl std::fmt::Display for UnsupportedWorkspaceProtocol {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("workspace owner lacks lifecycle protocol")
+    }
+}
+impl std::error::Error for UnsupportedWorkspaceProtocol {}
+
+fn decode_reply(value: Value) -> Result<Value> {
+    if value["ok"] == false && value["error"]["code"] == "unsupported-method" {
+        return Err(UnsupportedWorkspaceProtocol.into());
+    }
+    ensure!(
+        value["ok"] == true,
+        "workspace owner rejected request: {}",
+        value["error"]
+    );
+    value["data"]
+        .get("workspace_operation")
+        .cloned()
+        .context("workspace owner returned malformed lifecycle reply")
+}
+
 pub(super) async fn call(method: &str, params: impl Serialize) -> Result<Value> {
     tokio::time::timeout(Duration::from_secs(10), async {
         let connection = zbus::Connection::session().await?;
@@ -22,28 +46,21 @@ pub(super) async fn call(method: &str, params: impl Serialize) -> Result<Value> 
         let reply: String = proxy
             .call("Call", &(method, serde_json::to_string(&params)?))
             .await?;
-        let value: Value = serde_json::from_str(&reply)?;
-        ensure!(
-            value["ok"] == true,
-            "workspace owner rejected request: {}",
-            value["error"]
-        );
-        value["data"]
-            .get("workspace_operation")
-            .cloned()
-            .context("workspace owner lacks lifecycle protocol")
+        decode_reply(serde_json::from_str(&reply)?)
     })
     .await
     .context("workspace owner outcome unknown; do not replay effects")?
 }
 
-pub(super) async fn capture() -> Result<Context> {
-    let response = call("workspace.context", json!({})).await?;
-    ensure!(
-        response["version"] == wire::VERSION,
-        "unsupported workspace protocol"
-    );
-    Ok(serde_json::from_value(response["context"].clone())?)
+pub(super) async fn capture() -> Result<Option<Context>> {
+    let response = match call("workspace.context", json!({})).await {
+        Err(error) if error.is::<UnsupportedWorkspaceProtocol>() => return Ok(None),
+        result => result?,
+    };
+    if response["version"] != wire::VERSION {
+        return Ok(None);
+    }
+    Ok(Some(serde_json::from_value(response["context"].clone())?))
 }
 
 pub(super) fn destination(
@@ -294,6 +311,23 @@ impl LaunchJournal {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_explicit_unsupported_reply_permits_legacy_compatibility() {
+        let unsupported =
+            decode_reply(json!({"ok":false,"error":{"code":"unsupported-method"}})).unwrap_err();
+        assert!(unsupported.is::<UnsupportedWorkspaceProtocol>());
+        for reply in [
+            json!({"ok":false,"error":{"code":"outcome-unknown"}}),
+            json!({"ok":true,"data":{}}),
+        ] {
+            assert!(
+                !decode_reply(reply)
+                    .unwrap_err()
+                    .is::<UnsupportedWorkspaceProtocol>()
+            );
+        }
+    }
 
     fn journal(path: PathBuf) -> LaunchJournal {
         let loaded = Journal::read(&path, "test-session").unwrap();
