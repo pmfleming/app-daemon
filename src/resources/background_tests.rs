@@ -111,7 +111,7 @@ fn windowless_apps_are_discovered_published_and_added_to_history() -> anyhow::Re
         &catalog,
         &Snapshot::default(),
         &snapshot,
-        &SettingsStore::load(None),
+        &SettingsStore::default(),
         &QueryParams {
             query: String::new(),
             category: String::new(),

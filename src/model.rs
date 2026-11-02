@@ -224,6 +224,7 @@ pub struct ApplicationRuntime {
 
 #[derive(Debug, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ApplicationSummary {
+    pub software: Option<crate::software::Record>,
     #[serde(flatten)]
     pub identity: ApplicationIdentity,
     // Target-scoped action precondition; intentionally distinct from the page revision.

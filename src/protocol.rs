@@ -13,9 +13,15 @@ pub mod stream {
     pub const APPLICATIONS: &str = "applications.changed";
     pub const WINDOWS: &str = "windows.changed";
     pub const OPERATION: &str = "applications.operation";
+    pub const CATALOG: &str = "applications.catalog.changed";
 }
 
-pub const STREAMS: &[&str] = &[stream::APPLICATIONS, stream::WINDOWS, stream::OPERATION];
+pub const STREAMS: &[&str] = &[
+    stream::APPLICATIONS,
+    stream::WINDOWS,
+    stream::OPERATION,
+    stream::CATALOG,
+];
 
 pub fn contract_fixture() -> serde_json::Result<Value> {
     let mut fixture =
@@ -67,7 +73,7 @@ pub fn event_contract_fixture() -> Value {
             .into_value(),
         );
     }
-    for stream in [stream::APPLICATIONS, stream::WINDOWS] {
+    for stream in [stream::APPLICATIONS, stream::WINDOWS, stream::CATALOG] {
         fixture.insert(
             stream.into(),
             crate::daemon::events::changed(stream, "subscription-example", u64::MAX - 42)

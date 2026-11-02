@@ -3,7 +3,7 @@ use std::{
     future::Future,
     sync::{
         Arc, Mutex as StdMutex,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -33,6 +33,7 @@ mod energy_labels;
 mod identity;
 mod operations;
 pub(crate) mod query;
+mod software;
 mod watcher;
 mod workspaces;
 use operations::OperationRegistry;
@@ -73,8 +74,10 @@ pub struct ApplicationService {
     history: Arc<Mutex<HistoryStore>>,
     // When both are needed, acquire settings before resources. Tokio's fair
     // RwLocks can deadlock even readers when writers queue between acquisitions.
-    settings: RwLock<Arc<SettingsStore>>,
-    settings_updates: Mutex<()>,
+    settings: Arc<RwLock<Arc<SettingsStore>>>,
+    settings_updates: Arc<Mutex<()>>,
+    software: Arc<Mutex<Option<crate::software::Cache>>>,
+    software_revision: Arc<AtomicU64>,
     state_changes: broadcast::Sender<StateRevision>,
     operation_changes: broadcast::Sender<OperationResult>,
     operations: Mutex<OperationRegistry>,
@@ -93,7 +96,38 @@ pub struct ApplicationService {
 impl ApplicationService {
     pub async fn new() -> anyhow::Result<Arc<Self>> {
         let history = tokio::task::spawn_blocking(HistoryStore::open_default).await??;
-        Ok(Self::build_with_history(true, history))
+        let (cache, settings, catalog) = tokio::task::spawn_blocking(|| {
+            let path = shelllist_daemon_core::resolve_xdg_path(
+                shelllist_daemon_core::XdgRoot::State,
+                "app-daemon",
+                std::path::Path::new("software-catalog-turso-v1.db"),
+            )
+            .ok_or_else(|| anyhow::anyhow!("application catalog state directory unavailable"))?;
+            let store = crate::software::store::Store::open(&path)?;
+            let settings = store.settings()?;
+            let observations = store.observations()?;
+            let worker = std::env::var_os("APP_DAEMON_UPDATE_WORKER")
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|| "/run/current-system/sw/bin/update-worker".into());
+            Ok::<_, anyhow::Error>((
+                crate::software::Cache {
+                    store,
+                    observations,
+                    attempted: None,
+                    worker,
+                },
+                settings,
+                Catalog::load(),
+            ))
+        })
+        .await??;
+        Ok(Self::build_with_catalog(
+            true,
+            history,
+            Some(cache),
+            settings,
+            catalog,
+        ))
     }
 
     #[cfg(test)]
@@ -109,21 +143,39 @@ impl ApplicationService {
         service
     }
 
+    #[cfg(test)]
     fn build_with_history(trackers: bool, history: HistoryStore) -> Arc<Self> {
+        Self::build_with_catalog(
+            trackers,
+            history,
+            None,
+            SettingsStore::default(),
+            Catalog::default(),
+        )
+    }
+    fn build_with_catalog(
+        trackers: bool,
+        history: HistoryStore,
+        software: Option<crate::software::Cache>,
+        settings: SettingsStore,
+        catalog: Catalog,
+    ) -> Arc<Self> {
         let (state_changes, _) = broadcast::channel(32);
         let (operation_changes, _) = broadcast::channel(64);
         let (resume_sender, resume_events) = watch::channel(0);
         let (stop, _) = watch::channel(false);
         let service = Arc::new(Self {
-            catalog: RwLock::new(Arc::new(Catalog::default())),
+            catalog: RwLock::new(Arc::new(catalog)),
             windows: RwLock::new(Arc::new(Snapshot::default())),
             resources: RwLock::new(Arc::new(ResourceSnapshot::default())),
             query_slots: Arc::new(Semaphore::new(2)),
             ownership: Arc::default(),
             ownership_refresh: Arc::default(),
             history: Arc::new(Mutex::new(history)),
-            settings: RwLock::new(Arc::new(SettingsStore::load_default())),
-            settings_updates: Mutex::new(()),
+            settings: Arc::new(RwLock::new(Arc::new(settings))),
+            settings_updates: Arc::new(Mutex::new(())),
+            software: Arc::new(Mutex::new(software)),
+            software_revision: Arc::new(AtomicU64::new(0)),
             state_changes,
             operation_changes,
             operations: Mutex::new(OperationRegistry::default()),
@@ -149,6 +201,10 @@ impl ApplicationService {
                     service.stop.subscribe(),
                 )),
                 tokio::spawn(track_resources(Arc::downgrade(&service))),
+                tokio::spawn(until_shutdown(
+                    software::track(Arc::downgrade(&service)),
+                    service.stop.subscribe(),
+                )),
             ];
             *service
                 .background_tasks
@@ -199,7 +255,8 @@ impl ApplicationService {
 
     pub async fn revisions(&self) -> StateRevision {
         StateRevision {
-            catalog: self.catalog.read().await.revision,
+            catalog: self.catalog.read().await.revision
+                ^ self.software_revision.load(Ordering::Acquire),
             windows: self.windows.read().await.revision,
             settings: self.settings.read().await.revision,
             runtime: self.resources.read().await.runtime_revision()
@@ -216,7 +273,7 @@ impl ApplicationService {
             &windows,
             settings.revision,
             self.resources.read().await.runtime_revision() ^ self.ownership_snapshot().revision(),
-        )
+        ) ^ self.software_revision.load(Ordering::Acquire)
     }
 
     pub fn subscribe_state(&self) -> broadcast::Receiver<StateRevision> {
@@ -299,18 +356,19 @@ impl ApplicationService {
 
     pub async fn query(&self, params: QueryParams) -> anyhow::Result<ApplicationPage> {
         self.mark_resource_demand();
+        // Keep identity/category fields and their persisted software record on
+        // the same immutable view even if settings change during this query.
+        let (software, catalog, settings) = self.software_view(false).await?;
         let slot = Arc::clone(&self.query_slots).acquire_owned().await?;
         let windows = Arc::clone(&*self.windows.read().await);
-        let catalog = Arc::clone(&*self.catalog.read().await);
         let ownership = self.ownership_snapshot();
-        let settings = Arc::clone(&*self.settings.read().await);
         let resources = Arc::clone(&*self.resources.read().await);
         // Procfs ownership fallback, ranking and resource projection can be costly.
         // Immutable snapshots release all state locks before entering the worker.
         Ok(tokio::task::spawn_blocking(move || {
             let _slot = slot;
             let grouped = group_windows(&catalog, &windows, &ownership);
-            page(
+            let mut page = page(
                 &catalog,
                 &windows,
                 &resources,
@@ -318,7 +376,16 @@ impl ApplicationService {
                 &params,
                 grouped,
                 ownership.revision(),
-            )
+            );
+            page.revision ^= software.revision;
+            for app in &mut page.applications {
+                app.software = software
+                    .entries
+                    .iter()
+                    .find(|r| r.id == app.identity.id)
+                    .cloned();
+            }
+            page
         })
         .await?)
     }
@@ -341,18 +408,14 @@ impl ApplicationService {
             self.catalog.read().await.by_id(&params.target_id).is_some(),
             "application is no longer available"
         );
-        let _update = self.settings_updates.lock().await;
+        let update = Arc::clone(&self.settings_updates).lock_owned().await;
         let (next, settings) = self.settings.read().await.prepare_patch(
             params.target_id,
             params.category,
             params.new_workspace,
         )?;
-        let next = tokio::task::spawn_blocking(move || {
-            next.persist()?;
-            Ok::<_, std::io::Error>(next)
-        })
-        .await??;
-        *self.settings.write().await = Arc::new(next);
+        self.persist_software_settings(Arc::new(next), update)
+            .await?;
         self.publish_state().await;
         Ok(settings)
     }
@@ -484,7 +547,7 @@ impl ApplicationService {
             windows,
             settings.revision,
             self.resources.read().await.runtime_revision() ^ ownership.revision(),
-        );
+        ) ^ self.software_revision.load(Ordering::Acquire);
         if expected != target && expected != global {
             return Err(StaleState.into());
         }

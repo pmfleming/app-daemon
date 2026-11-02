@@ -39,7 +39,7 @@ pub(crate) fn run(iterations: usize) -> anyhow::Result<Vec<Measurement>> {
         ..Default::default()
     };
     let resources = ResourceSnapshot::default();
-    let settings = SettingsStore::load(None);
+    let settings = SettingsStore::default();
     // Pre-resolve ownership: page latency excludes procfs/compositor calls.
     let grouped: HashMap<_, _> = windows
         .clients

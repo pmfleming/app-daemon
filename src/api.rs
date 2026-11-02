@@ -31,6 +31,16 @@ pub struct ApiService {
 }
 
 impl ApiService {
+    pub(crate) async fn catalog(
+        &self,
+        params: crate::software::CatalogParams,
+        _owner: Option<String>,
+    ) -> Result<crate::software::Snapshot, ApiError> {
+        self.applications
+            .software_catalog(params.refresh)
+            .await
+            .map_err(|e| (ErrorCode::DaemonUnavailable, format!("{e:#}")))
+    }
     pub fn new(applications: Arc<ApplicationService>) -> Self {
         Self { applications }
     }

@@ -8,6 +8,9 @@ use crate::model::{
 #[derive(Serialize)]
 #[serde(untagged)]
 pub enum Reply {
+    Catalog {
+        catalog: crate::software::Snapshot,
+    },
     Applications {
         applications: ApplicationPage,
     },

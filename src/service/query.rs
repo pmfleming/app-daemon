@@ -294,6 +294,7 @@ impl<'a> Candidate<'a> {
             resources.usage_for_application(&self.id, self.clients.iter().map(|window| window.pid));
         let instances = instances(&self.id, &self.clients, resources);
         ApplicationSummary {
+            software: None,
             desktop_actions: self
                 .entry
                 .map(|entry| entry.actions.clone())
@@ -485,7 +486,7 @@ mod tests {
 
     #[test]
     fn top_k_matches_full_sort_with_owned_ids_case_ties_and_clamped_limits() {
-        let settings = SettingsStore::load(None);
+        let settings = SettingsStore::default();
         let candidates = || {
             (0..1006)
                 .rev()

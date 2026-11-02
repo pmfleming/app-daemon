@@ -40,6 +40,7 @@ fn page() -> ApplicationPage {
         has_more: false,
         hyprland_available: true,
         applications: vec![ApplicationSummary {
+            software: None,
             identity: ApplicationIdentity {
                 id: "Alpha".into(),
                 kind: "desktop-application".into(),
@@ -74,6 +75,18 @@ fn page() -> ApplicationPage {
 pub(super) fn replies() -> Value {
     let mut fixture = serde_json::Map::new();
     for (method, reply) in [
+        (
+            Method::Catalog.name(),
+            methods::Catalog::reply(crate::software::Snapshot {
+                revision: 1,
+                observed_at: 400,
+                inventory_available: true,
+                inventory_total: 0,
+                inventory_included: 0,
+                error: None,
+                entries: vec![],
+            }),
+        ),
         (Method::Query.name(), methods::Query::reply(page())),
         (Method::Refresh.name(), methods::Refresh::reply(page())),
         (Method::Revision.name(), methods::Revision::reply(41)),

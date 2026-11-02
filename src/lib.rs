@@ -19,3 +19,4 @@ pub mod protocol;
 pub mod resources;
 pub mod service;
 pub mod settings;
+pub mod software;

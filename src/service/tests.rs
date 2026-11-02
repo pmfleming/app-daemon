@@ -110,7 +110,7 @@ fn query_ranks_window_metadata_before_hydrating_only_selected_rows() {
         available: true,
         ..Default::default()
     };
-    let (settings, _) = SettingsStore::load(None)
+    let (settings, _) = SettingsStore::default()
         .prepare_update("editor.desktop".into(), "code".into())
         .unwrap();
     let (settings, _) = settings

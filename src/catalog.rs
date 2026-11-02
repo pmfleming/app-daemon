@@ -28,6 +28,12 @@ pub struct CatalogEntry {
 }
 
 impl CatalogEntry {
+    pub(crate) fn store_path(&self) -> Option<String> {
+        let path = std::fs::canonicalize(&self.entry.path).ok()?;
+        let relative = path.strip_prefix("/nix/store").ok()?;
+        let output = relative.components().next()?.as_os_str().to_str()?;
+        Some(format!("/nix/store/{output}"))
+    }
     pub fn launch_command(&self) -> anyhow::Result<Vec<String>> {
         self.entry.parse_exec().map_err(anyhow::Error::from)
     }

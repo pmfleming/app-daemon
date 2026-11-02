@@ -128,6 +128,10 @@ impl Session {
             .env("HOME", root.path())
             .env("PATH", root.path().join("bin"))
             .env("XDG_DATA_DIRS", root.path().join("empty"))
+            .env(
+                "APP_DAEMON_UPDATE_WORKER",
+                "/nonexistent/fixture-update-worker",
+            )
             .env("HYPRLAND_INSTANCE_SIGNATURE", "fixture")
             // Preserve the legacy standalone-launch qualification as rollback
             // coverage. workspace_journey exercises the coordinated Rust owner.

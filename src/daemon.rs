@@ -194,7 +194,7 @@ impl AppDaemon {
     -> zbus::Result<()>;
 }
 
-fn selected_streams(streams: &[String]) -> Result<(bool, bool, bool), &str> {
+fn selected_streams(streams: &[String]) -> Result<(bool, bool, bool, bool), &str> {
     if let Some(stream) = streams
         .iter()
         .find(|stream| !protocol::STREAMS.contains(&stream.as_str()))
@@ -211,6 +211,9 @@ fn selected_streams(streams: &[String]) -> Result<(bool, bool, bool), &str> {
         streams
             .iter()
             .any(|value| value == protocol::stream::OPERATION),
+        streams
+            .iter()
+            .any(|value| value == protocol::stream::CATALOG),
     ))
 }
 
@@ -220,7 +223,7 @@ async fn forward_events(
     mut operations: broadcast::Receiver<crate::model::OperationResult>,
     emitter: EventEmitter<'static>,
     subscription_id: String,
-    selected: (bool, bool, bool),
+    selected: (bool, bool, bool, bool),
     owner: Option<String>,
 ) {
     let mut previous = applications.revisions().await;
@@ -228,6 +231,7 @@ async fn forward_events(
         (protocol::stream::APPLICATIONS, selected.0),
         (protocol::stream::WINDOWS, selected.1),
         (protocol::stream::OPERATION, selected.2),
+        (protocol::stream::CATALOG, selected.3),
     ] {
         if enabled {
             events::emit(
@@ -274,11 +278,17 @@ async fn forward_events(
 }
 
 fn revision_changes(
-    selected: (bool, bool, bool),
+    selected: (bool, bool, bool, bool),
     previous: StateRevision,
     current: StateRevision,
 ) -> impl Iterator<Item = (&'static str, u64)> {
     [
+        (
+            selected.3
+                && (current.catalog != previous.catalog || current.settings != previous.settings),
+            protocol::stream::CATALOG,
+            current.catalog ^ current.settings,
+        ),
         (
             selected.0
                 && (current.catalog != previous.catalog

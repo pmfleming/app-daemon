@@ -26,6 +26,225 @@
   "registry": {
     "methods": [
       {
+        "name": "applications.catalog",
+        "params_example": {
+          "refresh": false
+        },
+        "params_schema": {
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "additionalProperties": false,
+          "properties": {
+            "refresh": {
+              "default": false,
+              "type": "boolean"
+            }
+          },
+          "title": "CatalogParams",
+          "type": "object"
+        },
+        "policy": {
+          "ack_budget_ms": 30000,
+          "conflict_domain": "applications",
+          "execution": "read",
+          "max_in_flight": 16,
+          "max_owner_in_flight": 8,
+          "request_bytes": 1048576,
+          "result_bytes": 16777216,
+          "sensitivity": "sensitive-read"
+        },
+        "response_key": "catalog",
+        "result_schema": {
+          "$defs": {
+            "Installation": {
+              "properties": {
+                "active_version": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "declared_version": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "package_name": {
+                  "type": "string"
+                },
+                "release": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/$defs/Release"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "scope": {
+                  "type": "string"
+                },
+                "stale": {
+                  "type": "boolean"
+                },
+                "store_path": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "version_origin": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "stale",
+                "scope",
+                "package_name",
+                "store_path",
+                "declared_version",
+                "active_version",
+                "version_origin",
+                "release"
+              ],
+              "type": "object"
+            },
+            "Record": {
+              "properties": {
+                "category": {
+                  "type": "string"
+                },
+                "icon": {
+                  "type": "string"
+                },
+                "id": {
+                  "type": "string"
+                },
+                "installations": {
+                  "items": {
+                    "$ref": "#/$defs/Installation"
+                  },
+                  "type": "array"
+                },
+                "kind": {
+                  "type": "string"
+                },
+                "name": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "id",
+                "name",
+                "icon",
+                "kind",
+                "category",
+                "installations"
+              ],
+              "type": "object"
+            },
+            "Release": {
+              "properties": {
+                "attempted_at": {
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
+                "checked_at": {
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
+                "error": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "source": {
+                  "type": "string"
+                },
+                "stale": {
+                  "type": "boolean"
+                },
+                "version": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                }
+              },
+              "required": [
+                "version",
+                "source",
+                "checked_at",
+                "attempted_at",
+                "stale",
+                "error"
+              ],
+              "type": "object"
+            }
+          },
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "properties": {
+            "entries": {
+              "items": {
+                "$ref": "#/$defs/Record"
+              },
+              "type": "array"
+            },
+            "error": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "inventory_available": {
+              "type": "boolean"
+            },
+            "inventory_included": {
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "inventory_total": {
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "observed_at": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "revision": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "revision",
+            "observed_at",
+            "inventory_available",
+            "inventory_total",
+            "inventory_included",
+            "error",
+            "entries"
+          ],
+          "title": "Snapshot",
+          "type": "object"
+        },
+        "stream": "applications.catalog.changed"
+      },
+      {
         "name": "applications.query",
         "params_example": {
           "category": "",
@@ -494,6 +713,16 @@
                   "format": "int64",
                   "type": "integer"
                 },
+                "software": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/$defs/Record"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
                 "startup_class": {
                   "type": "string"
                 },
@@ -521,6 +750,7 @@
                 }
               },
               "required": [
+                "software",
                 "id",
                 "kind",
                 "name",
@@ -614,6 +844,142 @@
                 "id",
                 "name",
                 "icon"
+              ],
+              "type": "object"
+            },
+            "Installation": {
+              "properties": {
+                "active_version": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "declared_version": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "package_name": {
+                  "type": "string"
+                },
+                "release": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/$defs/Release"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "scope": {
+                  "type": "string"
+                },
+                "stale": {
+                  "type": "boolean"
+                },
+                "store_path": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "version_origin": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "stale",
+                "scope",
+                "package_name",
+                "store_path",
+                "declared_version",
+                "active_version",
+                "version_origin",
+                "release"
+              ],
+              "type": "object"
+            },
+            "Record": {
+              "properties": {
+                "category": {
+                  "type": "string"
+                },
+                "icon": {
+                  "type": "string"
+                },
+                "id": {
+                  "type": "string"
+                },
+                "installations": {
+                  "items": {
+                    "$ref": "#/$defs/Installation"
+                  },
+                  "type": "array"
+                },
+                "kind": {
+                  "type": "string"
+                },
+                "name": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "id",
+                "name",
+                "icon",
+                "kind",
+                "category",
+                "installations"
+              ],
+              "type": "object"
+            },
+            "Release": {
+              "properties": {
+                "attempted_at": {
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
+                "checked_at": {
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
+                "error": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "source": {
+                  "type": "string"
+                },
+                "stale": {
+                  "type": "boolean"
+                },
+                "version": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                }
+              },
+              "required": [
+                "version",
+                "source",
+                "checked_at",
+                "attempted_at",
+                "stale",
+                "error"
               ],
               "type": "object"
             },
@@ -2566,6 +2932,16 @@
                   "format": "int64",
                   "type": "integer"
                 },
+                "software": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/$defs/Record"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
                 "startup_class": {
                   "type": "string"
                 },
@@ -2593,6 +2969,7 @@
                 }
               },
               "required": [
+                "software",
                 "id",
                 "kind",
                 "name",
@@ -2686,6 +3063,142 @@
                 "id",
                 "name",
                 "icon"
+              ],
+              "type": "object"
+            },
+            "Installation": {
+              "properties": {
+                "active_version": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "declared_version": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "package_name": {
+                  "type": "string"
+                },
+                "release": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/$defs/Release"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "scope": {
+                  "type": "string"
+                },
+                "stale": {
+                  "type": "boolean"
+                },
+                "store_path": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "version_origin": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "stale",
+                "scope",
+                "package_name",
+                "store_path",
+                "declared_version",
+                "active_version",
+                "version_origin",
+                "release"
+              ],
+              "type": "object"
+            },
+            "Record": {
+              "properties": {
+                "category": {
+                  "type": "string"
+                },
+                "icon": {
+                  "type": "string"
+                },
+                "id": {
+                  "type": "string"
+                },
+                "installations": {
+                  "items": {
+                    "$ref": "#/$defs/Installation"
+                  },
+                  "type": "array"
+                },
+                "kind": {
+                  "type": "string"
+                },
+                "name": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "id",
+                "name",
+                "icon",
+                "kind",
+                "category",
+                "installations"
+              ],
+              "type": "object"
+            },
+            "Release": {
+              "properties": {
+                "attempted_at": {
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
+                "checked_at": {
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
+                "error": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "source": {
+                  "type": "string"
+                },
+                "stale": {
+                  "type": "boolean"
+                },
+                "version": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                }
+              },
+              "required": [
+                "version",
+                "source",
+                "checked_at",
+                "attempted_at",
+                "stale",
+                "error"
               ],
               "type": "object"
             },
@@ -4694,6 +5207,66 @@
         ],
         "name": "applications.operation",
         "semantics": "transitions"
+      },
+      {
+        "events": [
+          {
+            "data_schema": {
+              "$schema": "https://json-schema.org/draft/2020-12/schema",
+              "properties": {
+                "catalog_revision": {
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "runtime_revision": {
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "settings_revision": {
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "window_revision": {
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "catalog_revision",
+                "window_revision",
+                "settings_revision",
+                "runtime_revision"
+              ],
+              "title": "SubscribedData",
+              "type": "object"
+            },
+            "name": "subscribed"
+          },
+          {
+            "data_schema": {
+              "$schema": "https://json-schema.org/draft/2020-12/schema",
+              "properties": {
+                "revision": {
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "revision"
+              ],
+              "title": "ChangedData",
+              "type": "object"
+            },
+            "name": "changed"
+          }
+        ],
+        "name": "applications.catalog.changed",
+        "semantics": "invalidation"
       }
     ]
   },

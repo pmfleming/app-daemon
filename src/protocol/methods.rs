@@ -42,6 +42,11 @@ const OPERATION: MethodPolicy = MethodPolicy {
 shelllist_daemon_core::declare_methods! {
     api: ApiService, error: ApiError, reply: Reply,
     decode: decode, unsupported: |name| (ErrorCode::UnsupportedMethod, format!("Unsupported app-api method: {name}"));
+    Catalog {
+        name: "applications.catalog", params: crate::software::CatalogParams, result: crate::software::Snapshot, handler: catalog,
+        reply: |catalog| Reply::Catalog { catalog }, response_key: "catalog",
+        policy: READ, stream: stream::CATALOG, example: crate::software::CatalogParams::default(),
+    }
     Query {
         name: "applications.query", params: QueryParams, result: ApplicationPage, handler: query,
         reply: |applications| Reply::Applications { applications }, response_key: "applications",
