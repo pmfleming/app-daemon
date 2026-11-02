@@ -318,6 +318,7 @@ pub async fn run() -> Result<()> {
         .build()
         .await
         .context("start app-daemon D-Bus service")?;
+    shutdown_applications.recover_launches().await;
     tracing::info!(
         bus_name = BUS_NAME,
         object_path = OBJECT_PATH,

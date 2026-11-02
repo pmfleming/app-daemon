@@ -43,6 +43,7 @@ pub struct Settings {
     pub target_id: String,
     pub category: String,
     pub workspace_id: Option<String>,
+    pub new_workspace: bool,
 }
 
 #[derive(Serialize)]

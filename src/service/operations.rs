@@ -112,6 +112,20 @@ impl super::ApplicationService {
         params: ExecuteParams,
         owner: Option<String>,
     ) -> anyhow::Result<OperationResult> {
+        let request = serde_json::to_value(&params)?;
+        if let Some(key) = &params.request_id {
+            anyhow::ensure!(
+                key.len() <= 118 && shelllist_daemon_core::workspace_wire::valid_request_id(key),
+                "invalid launch request key"
+            );
+            if let Some(result) = self.launch_journal.lock().await.lookup(
+                &format!("operation-{key}"),
+                owner.as_deref(),
+                Some(&request),
+            )? {
+                return Ok(result);
+            }
+        }
         let action = self.prepare_action(params).await?;
         let accepted = action.accepted();
         let service = Arc::clone(self);
@@ -120,6 +134,13 @@ impl super::ApplicationService {
             !self.stopping.load(Ordering::Acquire),
             "application service is shutting down"
         );
+        if action.durable() {
+            self.launch_journal
+                .lock()
+                .await
+                .admit(owner.clone(), request, accepted.clone())
+                .await?;
+        }
         operations.spawn(owner, accepted, move |result| async move {
             service.run_operation(action, result).await;
         })
@@ -140,12 +161,17 @@ impl super::ApplicationService {
                 result.message = error.to_string();
             }
         }
+        let _ = self.launch_journal.lock().await.update(&result).await;
         if let Some(result) = self.operations.lock().await.finish(result) {
             let _ = self.operation_changes.send(result);
         }
     }
 
     pub(super) async fn publish_running(&self, result: OperationResult) -> bool {
+        if let Err(error) = self.launch_journal.lock().await.update(&result).await {
+            tracing::error!(%error, "cannot persist launch progress");
+            return false;
+        }
         let mut operations = self.operations.lock().await;
         let Some(result) = operations.running(result) else {
             return false;
@@ -169,7 +195,22 @@ impl super::ApplicationService {
         operation_id: &str,
         owner: Option<&str>,
     ) -> Option<OperationResult> {
-        self.operations.lock().await.status(operation_id, owner)
+        let active = self.operations.lock().await.status(operation_id, owner);
+        if active.is_some() {
+            return active;
+        }
+        self.launch_journal
+            .lock()
+            .await
+            .lookup(operation_id, owner, None)
+            .ok()
+            .flatten()
+    }
+
+    pub(crate) async fn recover_launches(&self) {
+        if let Err(error) = self.launch_journal.lock().await.recover().await {
+            tracing::warn!(%error, "launch recovery unavailable; no effects replayed");
+        }
     }
 
     pub async fn cancel_owner_operations(&self, owner: &str) {
@@ -216,6 +257,8 @@ mod tests {
                 desktop_action_id: None,
                 expected_revision: None,
                 workspace_id: None,
+                launch_target: Default::default(),
+                request_id: None,
             },
             status,
             status.into(),

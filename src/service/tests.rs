@@ -162,7 +162,7 @@ fn query_ranks_window_metadata_before_hydrating_only_selected_rows() {
                 "id":"editor.desktop", "kind":"desktop-application", "name":"Editor",
                 "generic_name":"Document editor", "comment":"Edit café", "icon":"editor-icon",
                 "keywords":["Writer","Note"], "categories":["Development"], "category":"code",
-                "default_workspace_id":"3", "startup_class":"EditWindow"
+                "default_workspace_id":"3", "startup_class":"EditWindow", "new_workspace":false
             })
         );
         assert_eq!(
@@ -210,5 +210,7 @@ pub(super) fn close_missing(expected_revision: Option<u64>) -> ExecuteParams {
         desktop_action_id: None,
         expected_revision,
         workspace_id: None,
+        launch_target: Default::default(),
+        request_id: None,
     }
 }

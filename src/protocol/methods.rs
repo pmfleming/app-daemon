@@ -75,7 +75,7 @@ shelllist_daemon_core::declare_methods! {
         name: "applications.execute", params: ExecuteParams, result: OperationResult, handler: execute,
         reply: |operation| Reply::Operation { operation }, response_key: "operation",
         policy: OPERATION, stream: stream::OPERATION,
-        example: ExecuteParams { target_id: "org.example.App.desktop".into(), action: ApplicationAction::Activate, window_id: None, desktop_action_id: None, expected_revision: Some(1), workspace_id: Some("2".into()) },
+        example: ExecuteParams { target_id: "org.example.App.desktop".into(), action: ApplicationAction::Activate, window_id: None, desktop_action_id: None, expected_revision: Some(1), workspace_id: Some("2".into()), launch_target: Default::default(), request_id: None },
     }
     OperationStatus {
         name: "applications.operation.status", params: OperationStatusParams, result: OperationResult, handler: operation_status,
@@ -87,6 +87,6 @@ shelllist_daemon_core::declare_methods! {
         name: "applications.settings.update", params: UpdateSettingsParams, result: Settings, handler: update_settings,
         reply: |settings| Reply::Settings { settings }, response_key: "settings",
         policy: EFFECT, stream: stream::APPLICATIONS,
-        example: UpdateSettingsParams { target_id: "org.example.App.desktop".into(), category: "code".into() },
+        example: UpdateSettingsParams { target_id: "org.example.App.desktop".into(), category: Some(Some("code".into())), new_workspace: None },
     }
 }

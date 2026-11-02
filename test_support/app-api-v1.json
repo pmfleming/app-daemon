@@ -418,6 +418,10 @@
                   "format": "double",
                   "type": "number"
                 },
+                "new_workspace": {
+                  "default": false,
+                  "type": "boolean"
+                },
                 "open_file_disk_bytes": {
                   "default": 0,
                   "description": "Allocated size of unique regular files currently held open.",
@@ -527,6 +531,7 @@
                 "categories",
                 "category",
                 "default_workspace_id",
+                "new_workspace",
                 "startup_class",
                 "revision",
                 "running",
@@ -2485,6 +2490,10 @@
                   "format": "double",
                   "type": "number"
                 },
+                "new_workspace": {
+                  "default": false,
+                  "type": "boolean"
+                },
                 "open_file_disk_bytes": {
                   "default": 0,
                   "description": "Allocated size of unique regular files currently held open.",
@@ -2594,6 +2603,7 @@
                 "categories",
                 "category",
                 "default_workspace_id",
+                "new_workspace",
                 "startup_class",
                 "revision",
                 "running",
@@ -3230,6 +3240,8 @@
           "action": "activate",
           "desktop_action_id": null,
           "expected_revision": 1,
+          "launch_target": "default",
+          "request_id": null,
           "target_id": "org.example.App.desktop",
           "window_id": null,
           "workspace_id": "2"
@@ -3245,6 +3257,14 @@
                 "close-window",
                 "move-to-workspace",
                 "desktop-action"
+              ],
+              "type": "string"
+            },
+            "LaunchTarget": {
+              "enum": [
+                "default",
+                "current",
+                "new"
               ],
               "type": "string"
             }
@@ -3267,6 +3287,17 @@
               "minimum": 0,
               "type": [
                 "integer",
+                "null"
+              ]
+            },
+            "launch_target": {
+              "$ref": "#/$defs/LaunchTarget",
+              "default": "default"
+            },
+            "request_id": {
+              "default": null,
+              "type": [
+                "string",
                 "null"
               ]
             },
@@ -3632,15 +3663,23 @@
           "$schema": "https://json-schema.org/draft/2020-12/schema",
           "properties": {
             "category": {
-              "type": "string"
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "new_workspace": {
+              "type": [
+                "boolean",
+                "null"
+              ]
             },
             "target_id": {
               "type": "string"
             }
           },
           "required": [
-            "target_id",
-            "category"
+            "target_id"
           ],
           "title": "UpdateSettingsParams",
           "type": "object"
@@ -3662,6 +3701,9 @@
             "category": {
               "type": "string"
             },
+            "new_workspace": {
+              "type": "boolean"
+            },
             "target_id": {
               "type": "string"
             },
@@ -3675,7 +3717,8 @@
           "required": [
             "target_id",
             "category",
-            "workspace_id"
+            "workspace_id",
+            "new_workspace"
           ],
           "title": "Settings",
           "type": "object"

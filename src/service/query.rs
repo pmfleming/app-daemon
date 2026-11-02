@@ -235,8 +235,8 @@ impl<'a> Candidate<'a> {
     fn category(&self) -> &str {
         self.entry.map_or("shell", |entry| {
             self.preferences
+                .filter(|value| value.category_set)
                 .map(|value| value.category.as_str())
-                .filter(|category| !category.is_empty())
                 .unwrap_or_else(|| inferred_category(&entry.categories))
         })
     }
@@ -277,6 +277,10 @@ impl<'a> Candidate<'a> {
                 .map(|entry| entry.categories.clone())
                 .unwrap_or_default(),
             category: self.category().into(),
+            new_workspace: self
+                .entry
+                .and(self.preferences)
+                .is_some_and(|value| value.new_workspace),
             default_workspace_id: self
                 .entry
                 .and(self.preferences)

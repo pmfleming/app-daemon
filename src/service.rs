@@ -34,6 +34,7 @@ mod identity;
 mod operations;
 pub(crate) mod query;
 mod watcher;
+mod workspaces;
 use operations::OperationRegistry;
 
 pub use action::{ApplicationAction, ExecuteParams};
@@ -77,6 +78,7 @@ pub struct ApplicationService {
     state_changes: broadcast::Sender<StateRevision>,
     operation_changes: broadcast::Sender<OperationResult>,
     operations: Mutex<OperationRegistry>,
+    launch_journal: Mutex<workspaces::LaunchJournal>,
     launch_locks: StdMutex<HashMap<String, std::sync::Weak<Mutex<()>>>>,
     resource_sampling: StdMutex<ResourceSamplingPolicy>,
     resource_demand_changed: Notify,
@@ -125,6 +127,7 @@ impl ApplicationService {
             state_changes,
             operation_changes,
             operations: Mutex::new(OperationRegistry::default()),
+            launch_journal: Mutex::new(workspaces::LaunchJournal::default()),
             launch_locks: StdMutex::new(HashMap::new()),
             resource_sampling: StdMutex::new(ResourceSamplingPolicy::default()),
             resource_demand_changed: Notify::new(),
@@ -324,16 +327,26 @@ impl ApplicationService {
         &self,
         params: UpdateSettingsParams,
     ) -> anyhow::Result<ApplicationSettings> {
+        if params.new_workspace.is_some() {
+            anyhow::ensure!(
+                self.catalog
+                    .read()
+                    .await
+                    .by_id(&params.target_id)
+                    .is_some_and(|entry| !entry.launch_only),
+                "new workspace preference requires a desktop application"
+            );
+        }
         anyhow::ensure!(
             self.catalog.read().await.by_id(&params.target_id).is_some(),
             "application is no longer available"
         );
         let _update = self.settings_updates.lock().await;
-        let (next, settings) = self
-            .settings
-            .read()
-            .await
-            .prepare_update(params.target_id, params.category)?;
+        let (next, settings) = self.settings.read().await.prepare_patch(
+            params.target_id,
+            params.category,
+            params.new_workspace,
+        )?;
         let next = tokio::task::spawn_blocking(move || {
             next.persist()?;
             Ok::<_, std::io::Error>(next)
@@ -436,14 +449,14 @@ impl ApplicationService {
         let settings = self.settings.read().await;
         self.validate_action_revision(&params, &catalog, &windows, &settings)
             .await?;
-        let preferred_workspace = settings
-            .for_application(&params.target_id)
+        let preferences = settings.for_application(&params.target_id).cloned();
+        drop(settings);
+        let preferred_workspace = preferences
+            .as_ref()
             .and_then(|value| value.workspace_id.as_deref());
-        Ok(action::PreparedAction::new(
-            catalog,
-            params,
-            preferred_workspace,
-        ))
+        action::PreparedAction::new(catalog, params, preferred_workspace)
+            .capture(preferences.as_ref())
+            .await
     }
 
     async fn validate_action_revision(
@@ -651,7 +664,20 @@ async fn sample_resources(service: &ApplicationService, sampler: &mut ResourceSa
 #[derive(Debug, Deserialize, Serialize, schemars::JsonSchema)]
 pub struct UpdateSettingsParams {
     pub target_id: String,
-    pub category: String,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "category_patch"
+    )]
+    pub category: Option<Option<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub new_workspace: Option<bool>,
+}
+
+fn category_patch<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<Option<String>>, D::Error> {
+    Option::<String>::deserialize(deserializer).map(Some)
 }
 
 #[derive(Debug, Deserialize, Serialize, schemars::JsonSchema)]

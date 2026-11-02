@@ -119,6 +119,7 @@ impl ApiService {
                 target_id,
                 category: settings.category,
                 workspace_id: settings.workspace_id,
+                new_workspace: settings.new_workspace,
             })
             .map_err(|error| (ErrorCode::ValidationError, error.to_string()))
     }

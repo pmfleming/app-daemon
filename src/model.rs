@@ -207,6 +207,8 @@ pub struct ApplicationIdentity {
     pub category: String,
     /// Preferred Hyprland workspace for newly launched windows.
     pub default_workspace_id: Option<String>,
+    #[serde(default)]
+    pub new_workspace: bool,
     pub startup_class: String,
 }
 

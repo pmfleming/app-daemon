@@ -45,6 +45,10 @@ pub struct ExecuteParams {
     pub expected_revision: Option<u64>,
     #[serde(default)]
     pub workspace_id: Option<String>,
+    #[serde(default)]
+    pub launch_target: shelllist_daemon_core::workspace_wire::LaunchTarget,
+    #[serde(default)]
+    pub request_id: Option<String>,
 }
 
 // Preparation borrows a consistent settings view before admission. No launcher
@@ -52,6 +56,7 @@ pub struct ExecuteParams {
 pub(super) struct PreparedAction {
     catalog: Arc<Catalog>,
     params: ExecuteParams,
+    context: Option<shelllist_daemon_core::workspace_wire::Context>,
 }
 
 impl PreparedAction {
@@ -69,7 +74,49 @@ impl PreparedAction {
         {
             params.workspace_id = Some(workspace.into());
         }
-        Self { catalog, params }
+        Self {
+            catalog,
+            params,
+            context: None,
+        }
+    }
+
+    pub(super) async fn capture(
+        mut self,
+        settings: Option<&crate::settings::ApplicationSettings>,
+    ) -> anyhow::Result<Self> {
+        use shelllist_daemon_core::workspace_wire::LaunchTarget;
+        let launchable = matches!(
+            self.params.action,
+            ApplicationAction::Activate
+                | ApplicationAction::Launch
+                | ApplicationAction::DesktopAction
+        );
+        let regular = self
+            .catalog
+            .by_id(&self.params.target_id)
+            .is_some_and(|entry| !entry.launch_only);
+        anyhow::ensure!(
+            self.params.launch_target == LaunchTarget::Default
+                || (regular && self.params.action == ApplicationAction::Launch),
+            "workspace override requires a desktop application launch"
+        );
+        if launchable && regular {
+            let context = super::workspaces::capture().await?;
+            self.params.workspace_id = super::workspaces::destination(
+                self.params.launch_target.clone(),
+                settings,
+                &context,
+                self.params.action == ApplicationAction::DesktopAction,
+            )
+            .map(|id| id.to_string());
+            self.context = Some(context);
+        }
+        Ok(self)
+    }
+
+    pub(super) fn durable(&self) -> bool {
+        self.context.is_some()
     }
 
     pub(super) fn target_id(&self) -> &str {
@@ -78,7 +125,13 @@ impl PreparedAction {
 
     pub(super) fn accepted(&self) -> OperationResult {
         operation_result(
-            format!("operation-{}", uuid::Uuid::new_v4()),
+            format!(
+                "operation-{}",
+                self.params
+                    .request_id
+                    .clone()
+                    .unwrap_or_else(|| uuid::Uuid::new_v4().to_string())
+            ),
             &self.params,
             "accepted",
             "Operation accepted".into(),
@@ -163,6 +216,7 @@ impl ActionOutcome {
 struct LaunchProgress<'a> {
     service: &'a super::ApplicationService,
     operation_id: &'a str,
+    context: Option<&'a shelllist_daemon_core::workspace_wire::Context>,
 }
 
 impl LaunchProgress<'_> {
@@ -201,7 +255,11 @@ impl PreparedAction {
         service: &super::ApplicationService,
         operation_id: &str,
     ) -> anyhow::Result<ActionOutcome> {
-        let Self { catalog, params } = self;
+        let Self {
+            catalog,
+            params,
+            context,
+        } = self;
         // The caller holds the application's launch lock. Never use a cached window
         // baseline: a preceding launch or compositor event may not have reconciled yet.
         service.refresh_ownership(false).await;
@@ -210,6 +268,7 @@ impl PreparedAction {
         let progress = LaunchProgress {
             service,
             operation_id,
+            context: context.as_ref(),
         };
         let target_id = &params.target_id;
         match params.action {
@@ -281,18 +340,75 @@ async fn launch_on_workspace(
     let entry = catalog
         .by_id(&params.target_id)
         .context("application is no longer available")?;
+    let reservation = if let Some(context) = progress.context {
+        let request = shelllist_daemon_core::workspace_wire::Create {
+            request_id: progress.operation_id.into(),
+            context: context.clone(),
+            purpose: shelllist_daemon_core::workspace_wire::Purpose::Launch,
+            workspace_id: params
+                .workspace_id
+                .as_ref()
+                .map(|id| id.parse())
+                .transpose()?,
+            origin: entry.name.clone(),
+            icon: entry.icon.clone(),
+        };
+        progress
+            .service
+            .launch_journal
+            .lock()
+            .await
+            .reserve(progress.operation_id, request.clone())
+            .await?;
+        let reply = super::workspaces::call("workspace.create", request).await?;
+        Some(super::workspaces::Reservation(serde_json::from_value(
+            reply["lease"].clone(),
+        )?))
+    } else {
+        None
+    };
+    if reservation.is_some() {
+        let baseline = serde_json::json!({"dispatch":"may-start", "windows":windows.clients.iter().map(|w| serde_json::json!({"address":w.address,"pid":w.pid,"workspace":w.workspace.id})).collect::<Vec<_>>(), "roots":existing.roots().collect::<Vec<_>>()});
+        progress
+            .service
+            .launch_journal
+            .lock()
+            .await
+            .handoff(progress.operation_id, baseline)
+            .await?;
+    }
     let mut launch = launch::launch_entry(entry, action).await?;
     launch.include_existing(existing);
+    if reservation.is_some() {
+        // Preserve the receipt even if persistence fails after external handoff.
+        if let Err(error) = progress
+            .service
+            .launch_journal
+            .lock()
+            .await
+            .receipt(progress.operation_id, &launch)
+            .await
+        {
+            return Ok(ActionOutcome::launched(
+                catalog,
+                params,
+                launch,
+                Err(error),
+                windows.available,
+            ));
+        }
+    }
     let launch_only = entry.launch_only;
     if !launch_only {
-        launch.placement = params
-            .workspace_id
+        let workspace = reservation
             .as_ref()
-            .map(|workspace| WorkspacePlacement {
-                workspace_id: workspace.clone(),
-                status: PlacementStatus::Pending,
-                reason: None,
-            });
+            .map(|r| r.0.workspace_id.to_string())
+            .or_else(|| params.workspace_id.clone());
+        launch.placement = workspace.as_ref().map(|workspace| WorkspacePlacement {
+            workspace_id: workspace.clone(),
+            status: PlacementStatus::Pending,
+            reason: None,
+        });
     }
     progress.handed_off(params, &launch).await;
     let result = if launch_only || (!focus && launch.placement.is_none()) {
@@ -305,6 +421,7 @@ async fn launch_on_workspace(
             &mut launch,
             focus,
             progress.service,
+            reservation.as_ref(),
         )
         .await
     };
@@ -379,6 +496,7 @@ async fn place_launched_window(
     launch: &mut LaunchReceipt,
     focus: bool,
     service: &super::ApplicationService,
+    reservation: Option<&super::workspaces::Reservation>,
 ) -> anyhow::Result<bool> {
     if !previous.available {
         return Ok(false);
@@ -399,6 +517,25 @@ async fn place_launched_window(
     else {
         return Ok(false);
     };
+    if let Some(reservation) = reservation {
+        super::workspaces::call(
+            "workspace.placement.apply",
+            shelllist_daemon_core::workspace_wire::Placement {
+                lease: reservation.0.clone(),
+                window: shelllist_daemon_core::workspace_wire::WindowIdentity {
+                    address: window.address.clone(),
+                    pid: window.pid,
+                    workspace_id: window.workspace.id,
+                },
+                follow: focus
+                    || params.launch_target
+                        != shelllist_daemon_core::workspace_wire::LaunchTarget::Default,
+            },
+        )
+        .await?;
+        set_placement(launch, PlacementStatus::Placed, None);
+        return Ok(true);
+    }
     if let Some(workspace) = params.workspace_id.as_deref() {
         hyprland::move_to_workspace(&window.address, workspace).await?;
         verify_placement(&window, workspace, |current| {

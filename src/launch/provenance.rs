@@ -53,7 +53,7 @@ impl Provenance {
         }
     }
 
-    pub(super) fn roots(&self) -> impl Iterator<Item = Identity> + '_ {
+    pub(crate) fn roots(&self) -> impl Iterator<Item = Identity> + '_ {
         self.anchors.iter().filter_map(|(&pid, &start)| {
             (read_process(pid)?.start == start).then_some((pid, start))
         })
