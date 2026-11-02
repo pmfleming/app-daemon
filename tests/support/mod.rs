@@ -129,6 +129,9 @@ impl Session {
             .env("PATH", root.path().join("bin"))
             .env("XDG_DATA_DIRS", root.path().join("empty"))
             .env("HYPRLAND_INSTANCE_SIGNATURE", "fixture")
+            // Preserve the legacy standalone-launch qualification as rollback
+            // coverage. workspace_journey exercises the coordinated Rust owner.
+            .env("SHELLLIST_TEMPORARY_WORKSPACES", "0")
             .env("RUST_LOG", "error")
             .env("TOKIO_WORKER_THREADS", daemon_workers.to_string())
             .stdout(Stdio::null())

@@ -1,7 +1,8 @@
 [Unit]
 Description=Shelllist application catalog and activation service
 PartOf=graphical-session.target
-After=graphical-session.target
+After=graphical-session.target bar-daemon.service
+Wants=bar-daemon.service
 
 [Service]
 Type=simple

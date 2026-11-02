@@ -267,7 +267,9 @@ impl LaunchJournal {
             .load()?
             .records
             .values()
-            .filter(|r| r.result.status == "unknown")
+            // A completed launch can also have lost its final release reply.
+            // Fresh admissions may race startup recovery; leave those alone.
+            .filter(|r| !matches!(r.result.status.as_str(), "accepted" | "running"))
             .filter_map(|r| r.reservation.clone())
             .collect();
         self.save().await?;

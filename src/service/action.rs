@@ -70,7 +70,8 @@ impl PreparedAction {
             ApplicationAction::Activate
                 | ApplicationAction::Launch
                 | ApplicationAction::DesktopAction
-        ) && let Some(workspace) = preferred_workspace
+        ) && params.launch_target == shelllist_daemon_core::workspace_wire::LaunchTarget::Default
+            && let Some(workspace) = preferred_workspace
         {
             params.workspace_id = Some(workspace.into());
         }
@@ -102,6 +103,31 @@ impl PreparedAction {
             "workspace override requires a desktop application launch"
         );
         if launchable && regular {
+            if std::env::var("SHELLLIST_TEMPORARY_WORKSPACES").as_deref() == Ok("0") {
+                anyhow::ensure!(
+                    self.params.launch_target != LaunchTarget::New,
+                    "temporary workspace creation disabled"
+                );
+                if self.params.launch_target == LaunchTarget::Default {
+                    return Ok(self);
+                }
+                let snapshot =
+                    shelllist_hyprland::workspace::snapshot(&shelllist_hyprland::Client::default())
+                        .await?;
+                let current = snapshot
+                    .monitors
+                    .iter()
+                    .find(|m| m.focused)
+                    .context("invoking monitor unavailable")?
+                    .active_workspace
+                    .id;
+                if self.params.launch_target == LaunchTarget::Current
+                    || self.params.workspace_id.is_none()
+                {
+                    self.params.workspace_id = Some(current.to_string());
+                }
+                return Ok(self);
+            }
             let context = super::workspaces::capture().await?;
             self.params.workspace_id = super::workspaces::destination(
                 self.params.launch_target.clone(),
@@ -115,28 +141,8 @@ impl PreparedAction {
         Ok(self)
     }
 
-    pub(super) fn durable(&self) -> bool {
-        self.context.is_some()
-    }
-
     pub(super) fn target_id(&self) -> &str {
         &self.params.target_id
-    }
-
-    pub(super) fn accepted(&self) -> OperationResult {
-        operation_result(
-            format!(
-                "operation-{}",
-                self.params
-                    .request_id
-                    .clone()
-                    .unwrap_or_else(|| uuid::Uuid::new_v4().to_string())
-            ),
-            &self.params,
-            "accepted",
-            "Operation accepted".into(),
-            None,
-        )
     }
 }
 

@@ -113,43 +113,100 @@ impl super::ApplicationService {
         owner: Option<String>,
     ) -> anyhow::Result<OperationResult> {
         let request = serde_json::to_value(&params)?;
+        let launchable = matches!(
+            params.action,
+            super::ApplicationAction::Activate
+                | super::ApplicationAction::Launch
+                | super::ApplicationAction::DesktopAction
+        );
+        let durable = launchable
+            && self
+                .catalog
+                .read()
+                .await
+                .by_id(&params.target_id)
+                .is_some_and(|entry| !entry.launch_only)
+            && std::env::var("SHELLLIST_TEMPORARY_WORKSPACES").as_deref() != Ok("0");
+        let key = params
+            .request_id
+            .clone()
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
         if let Some(key) = &params.request_id {
             anyhow::ensure!(
                 key.len() <= 118 && shelllist_daemon_core::workspace_wire::valid_request_id(key),
                 "invalid launch request key"
             );
-            if let Some(result) = self.launch_journal.lock().await.lookup(
-                &format!("operation-{key}"),
+        }
+        let mut accepted = super::action::operation_result(
+            format!("operation-{key}"),
+            &params,
+            "accepted",
+            "Operation accepted".into(),
+            None,
+        );
+        if launchable
+            && params.request_id.is_some()
+            && let Some(result) = self.launch_journal.lock().await.lookup(
+                &accepted.id,
                 owner.as_deref(),
                 Some(&request),
-            )? {
+            )?
+        {
+            return Ok(result);
+        }
+        if durable {
+            let mut journal = self.launch_journal.lock().await;
+            if let Some(result) = journal.lookup(&accepted.id, owner.as_deref(), Some(&request))? {
                 return Ok(result);
             }
+            journal
+                .admit(owner.clone(), request, accepted.clone())
+                .await?;
         }
-        let action = self.prepare_action(params).await?;
-        let accepted = action.accepted();
+        // The request key exists before asynchronous context/capability work.
+        // Even a lost preparation error is recoverable without replaying launch.
+        let action = match self.prepare_action(params).await {
+            Ok(action) => action,
+            Err(error) if durable => {
+                accepted.status = "failed".into();
+                accepted.message = error.to_string();
+                accepted.revision += 1;
+                self.launch_journal.lock().await.update(&accepted).await?;
+                return Ok(accepted);
+            }
+            Err(error) => return Err(error),
+        };
         let service = Arc::clone(self);
         let mut operations = self.operations.lock().await;
         anyhow::ensure!(
             !self.stopping.load(Ordering::Acquire),
             "application service is shutting down"
         );
-        if action.durable() {
-            self.launch_journal
-                .lock()
-                .await
-                .admit(owner.clone(), request, accepted.clone())
-                .await?;
-        }
-        operations.spawn(owner, accepted, move |result| async move {
+        let result = operations.spawn(owner, accepted.clone(), move |result| async move {
             service.run_operation(action, result).await;
-        })
+        });
+        drop(operations);
+        if let Err(error) = &result
+            && durable
+        {
+            accepted.status = "failed".into();
+            accepted.message = error.to_string();
+            accepted.revision += 1;
+            self.launch_journal.lock().await.update(&accepted).await?;
+        }
+        result
     }
 
     async fn run_operation(&self, action: PreparedAction, mut result: OperationResult) {
         result.status = "running".into();
         result.message = "Operation running".into();
         if !self.publish_running(result.clone()).await {
+            result.status = "failed".into();
+            result.message =
+                "Launch progress could not be persisted; no launch was attempted".into();
+            if let Some(result) = self.operations.lock().await.finish(result) {
+                let _ = self.operation_changes.send(result);
+            }
             return;
         }
         let lock = self.launch_lock(action.target_id());
