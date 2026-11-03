@@ -176,6 +176,46 @@ async fn terminal(bus: &zbus::Connection, id: &str) -> Value {
     panic!("operation did not settle");
 }
 
+async fn wait_for_workspace_strip(
+    bus: &zbus::Connection,
+    workspace: i64,
+    present: bool,
+    active: i64,
+) -> Result<()> {
+    for _ in 0..100 {
+        let state = call(
+            bus,
+            "Bar",
+            "bar.snapshot",
+            json!({"streams":["workspaces.changed"]}),
+        )
+        .await?;
+        let state = &state["snapshot"]["workspaces"];
+        let observed = state["lifecycle"]["monitors"]
+            .as_object()
+            .is_some_and(|monitors| {
+                monitors.values().any(|items| {
+                    items
+                        .as_array()
+                        .is_some_and(|items| items.iter().any(|item| item["id"] == workspace))
+                })
+            });
+        if observed == present
+            && state["monitors"].as_array().is_some_and(|monitors| {
+                monitors
+                    .iter()
+                    .any(|monitor| monitor["active_workspace_id"] == active)
+            })
+        {
+            return Ok(());
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    anyhow::bail!(
+        "workspace {workspace} strip presence did not become {present} with active {active}"
+    );
+}
+
 #[tokio::test]
 #[ignore = "requires WORKSPACE_TEST_PARENT_DISPLAY, WORKSPACE_TEST_BAR, and installed compositor/test client"]
 async fn real_daemons_launch_recover_and_close_on_private_compositor() -> Result<()> {
@@ -403,6 +443,9 @@ async fn real_daemons_launch_recover_and_close_on_private_compositor() -> Result
     );
     let current = workspace::snapshot(&transport).await?;
     let monitor = current.monitors.iter().find(|m| m.focused).unwrap();
+    let manual = created["workspace_operation"]["lease"]["workspace_id"]
+        .as_i64()
+        .unwrap();
     workspace::execute(
         &transport,
         &workspace::focus_local(
@@ -413,6 +456,54 @@ async fn real_daemons_launch_recover_and_close_on_private_compositor() -> Result
         )?,
     )
     .await?;
+    // A manual workspace survives switching away while empty, even if Hyprland
+    // discards its underlying inactive object. Native number-row actions must
+    // still be able to focus it and move the focused application into it.
+    wait_for_workspace_strip(&bus, manual, true, destination).await?;
+    workspace::execute(
+        &transport,
+        &format!("local r=hl.dispatch(hl.dsp.focus({{workspace={manual}}})); assert(r.ok,r.error)"),
+    )
+    .await?;
+    wait_for_workspace_strip(&bus, manual, true, manual).await?;
+    workspace::execute(
+        &transport,
+        &format!(
+            "local r=hl.dispatch(hl.dsp.focus({{workspace={destination}}})); assert(r.ok,r.error)"
+        ),
+    )
+    .await?;
+    workspace::execute(
+        &transport,
+        &format!("local r=hl.dispatch(hl.dsp.window.move({{workspace={manual},follow=true}})); assert(r.ok,r.error)"),
+    ).await?;
+    let moved = workspace::snapshot(&transport).await?;
+    ensure!(
+        moved
+            .windows
+            .iter()
+            .any(|window| window.workspace.id == manual),
+        "native move into manual workspace failed"
+    );
+    wait_for_workspace_strip(&bus, manual, true, manual).await?;
+    workspace::execute(
+        &transport,
+        &format!("local r=hl.dispatch(hl.dsp.window.move({{workspace={destination},follow=true}})); assert(r.ok,r.error)"),
+    ).await?;
+    wait_for_workspace_strip(&bus, manual, true, destination).await?;
+    workspace::execute(
+        &transport,
+        &format!("local r=hl.dispatch(hl.dsp.focus({{workspace={manual}}})); assert(r.ok,r.error)"),
+    )
+    .await?;
+    call(
+        &bus,
+        "Bar",
+        "workspace.command",
+        json!({"command":"close","request_id":"journey-close-manual"}),
+    )
+    .await?;
+    wait_for_workspace_strip(&bus, manual, false, destination).await?;
     call(
         &bus,
         "Bar",
