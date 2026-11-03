@@ -249,10 +249,8 @@ impl Session {
         let pid = Pid::from_raw(self.daemon.id().context("daemon exited early")? as i32)
             .context("daemon pid")?;
         kill_process(pid, Signal::TERM)?;
-        anyhow::ensure!(
-            timeout(DEADLINE, self.daemon.wait()).await??.success(),
-            "daemon shutdown failed"
-        );
+        let status = timeout(DEADLINE, self.daemon.wait()).await??;
+        anyhow::ensure!(status.success(), "daemon shutdown failed: {status}");
         let path = self.state_path("app-daemon/resource-history-turso-v1.db");
         anyhow::ensure!(path.is_file(), "history database missing after shutdown");
         let database = turso::Builder::new_local(path.to_str().context("history path")?)

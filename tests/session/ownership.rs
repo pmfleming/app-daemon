@@ -275,6 +275,17 @@ async fn generated_wayland_identity_is_grouped_placed_and_recovered_after_daemon
 }
 
 #[tokio::test]
+async fn immediate_restart_after_dbus_readiness_shuts_down_cleanly() -> Result<()> {
+    let mut session = Session::start(true).await?;
+    for _ in 0..12 {
+        // No sleeps or recovery barrier: readiness must imply that termination
+        // is handled gracefully, including database flush on every shutdown.
+        session.restart().await?;
+    }
+    session.shutdown().await
+}
+
+#[tokio::test]
 async fn restart_recovery_rejects_stale_unstable_and_malformed_unit_identity() -> Result<()> {
     let mut session = Session::start(true).await?;
     let mut app = tokio::process::Command::new(tool("sleep")?)

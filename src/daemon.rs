@@ -308,6 +308,13 @@ fn revision_changes(
 }
 
 pub async fn run() -> Result<()> {
+    // Register before publishing D-Bus readiness. A client may request shutdown
+    // while launch recovery is still running; retain that signal for cleanup
+    // instead of allowing the default SIGTERM action to kill the process.
+    let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        .context("listen for SIGTERM")?;
+    let mut interrupt = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
+        .context("listen for SIGINT")?;
     let applications = ApplicationService::new().await?;
     let shutdown_applications = Arc::clone(&applications);
     let subscriptions = Arc::new(OwnedTaskRegistry::default());
@@ -339,7 +346,8 @@ pub async fn run() -> Result<()> {
         let _ = stopped.await;
     }));
     let (mut result, joined) = tokio::select! {
-        result = shelllist_daemon_tokio::wait_for_shutdown() => (result, false),
+        _ = terminate.recv() => (Ok(()), false),
+        _ = interrupt.recv() => (Ok(()), false),
         result = &mut listener => (result.context("join app socket listener").and_then(|r| r), true),
     };
     let _ = stop.send(());
