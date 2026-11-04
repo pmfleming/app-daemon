@@ -255,6 +255,7 @@ impl Session {
         anyhow::ensure!(path.is_file(), "history database missing after shutdown");
         let database = turso::Builder::new_local(path.to_str().context("history path")?)
             .with_io(turso::IoBackend::Syscall)
+            .experimental_multiprocess_wal(true)
             .build()
             .await?;
         let connection = database.connect()?;

@@ -89,6 +89,7 @@ impl Store {
         }
         let database = turso::Builder::new_local(path.to_str().context("non-UTF8 catalog path")?)
             .with_io(turso::IoBackend::Syscall)
+            .experimental_multiprocess_wal(true)
             .build()
             .await?;
         let held = file.metadata()?;
