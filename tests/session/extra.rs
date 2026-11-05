@@ -97,7 +97,7 @@ async fn row_actions_ignore_unrelated_activity_but_reject_changed_targets() -> R
     let proxy = session.proxy().await?;
     session
         .compositor
-        .set(r#"[{"address":"0x123","class":"ok","pid":0,"title":"before","focusHistoryID":0}]"#);
+        .set(r#"[{"address":"0x123","class":"ok","workspace":{"id":1,"name":"1"},"pid":0,"title":"before","focusHistoryID":0}]"#);
     let original = call(&proxy, "applications.refresh", json!({})).await?;
     let row_revision = |page: &serde_json::Value| {
         page["data"]["applications"]["applications"]
@@ -109,7 +109,7 @@ async fn row_actions_ignore_unrelated_activity_but_reject_changed_targets() -> R
             .clone()
     };
     let expected = row_revision(&original);
-    session.compositor.set(r#"[{"address":"0x123","class":"ok","pid":0,"title":"after","focusHistoryID":1},{"address":"0x456","class":"fail","pid":0,"focusHistoryID":0}]"#);
+    session.compositor.set(r#"[{"address":"0x123","class":"ok","workspace":{"id":1,"name":"1"},"pid":0,"title":"after","focusHistoryID":1},{"address":"0x456","class":"fail","workspace":{"id":1,"name":"1"},"pid":0,"focusHistoryID":0}]"#);
     let changed = call(&proxy, "applications.refresh", json!({})).await?;
     assert_ne!(
         original["data"]["applications"]["revision"],
@@ -139,7 +139,7 @@ async fn row_actions_ignore_unrelated_activity_but_reject_changed_targets() -> R
     // A newly opened target window must invalidate Close-all's observed scope,
     // even though unrelated window changes above did not invalidate this row.
     session.compositor.set(
-        r#"[{"address":"0x123","class":"ok","pid":0},{"address":"0x789","class":"ok","pid":0}]"#,
+        r#"[{"address":"0x123","class":"ok","workspace":{"id":1,"name":"1"},"pid":0},{"address":"0x789","class":"ok","workspace":{"id":1,"name":"1"},"pid":0}]"#,
     );
     let changed = call(&proxy, "applications.refresh", json!({})).await?;
     assert_ne!(expected, row_revision(&changed));
@@ -182,7 +182,7 @@ async fn compositor_failures_and_reconnects_reconcile_without_host_desktop_acces
     );
     session
         .compositor
-        .set(r#"[{"address":"0x123","class":"ok","pid":0,"title":"fixture-window"},{"address":"0x0","class":"ok"},{"address":"0x456","class":"ok","mapped":false}]"#);
+        .set(r#"[{"address":"0x123","class":"ok","workspace":{"id":1,"name":"1"},"pid":0,"title":"fixture-window"},{"address":"0x0","pid":0,"class":"ok","workspace":{"id":1,"name":"1"}},{"address":"0x456","pid":0,"class":"ok","workspace":{"id":1,"name":"1"},"mapped":false}]"#);
     session.compositor.disconnect();
     tokio::time::timeout(support::DEADLINE, async {
         loop {

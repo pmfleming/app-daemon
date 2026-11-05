@@ -115,7 +115,11 @@ mod tests {
         }
     }
     fn window(address: &str, pid: u32) -> Client {
-        serde_json::from_value(serde_json::json!({"address": address, "pid": pid})).unwrap()
+        Client {
+            address: address.into(),
+            pid,
+            ..Default::default()
+        }
     }
     #[tokio::test]
     async fn observes_only_captured_targets_and_never_confuses_unavailable_with_closed() {

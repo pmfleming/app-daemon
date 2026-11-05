@@ -34,6 +34,7 @@ pub(crate) fn run(iterations: usize) -> anyhow::Result<Vec<Measurement>> {
                 workspace: Workspace::default(),
                 focus_rank: i64::from(index),
                 mapped: true,
+                ..Default::default()
             })
             .collect(),
         ..Default::default()

@@ -103,8 +103,8 @@ fn query_ranks_window_metadata_before_hydrating_only_selected_rows() {
     .unwrap();
     let catalog = Catalog::from_paths(vec![directory.path().into()]);
     let windows: Vec<crate::hyprland::Client> = serde_json::from_value(serde_json::json!([
-        {"address":"0x1", "pid":10, "title":"needle document", "class":"Editor", "focusHistoryID":0},
-        {"address":"0x2", "pid":20, "title":"needle terminal", "class":"Terminal", "focusHistoryID":1}
+        {"address":"0x1", "pid":10, "workspace":{"id":1,"name":"1"}, "title":"needle document", "class":"Editor", "focusHistoryID":0},
+        {"address":"0x2", "pid":20, "workspace":{"id":1,"name":"1"}, "title":"needle terminal", "class":"Terminal", "focusHistoryID":1}
     ])).unwrap();
     let snapshot = Snapshot {
         available: true,

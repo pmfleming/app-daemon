@@ -1,39 +1,4 @@
-use serde::Deserialize;
-
-#[derive(Debug, Clone, Default, Deserialize, Hash)]
-pub struct Workspace {
-    #[serde(default)]
-    pub id: Option<i64>,
-    #[serde(default)]
-    pub name: String,
-}
-
-#[derive(Debug, Clone, Deserialize, Hash)]
-pub struct Client {
-    #[serde(default)]
-    pub address: String,
-    #[serde(default)]
-    pub class: String,
-    #[serde(rename = "initialClass", default)]
-    pub initial_class: String,
-    #[serde(default)]
-    pub title: String,
-    #[serde(default)]
-    pub pid: u32,
-    #[serde(default)]
-    pub workspace: Workspace,
-    #[serde(rename = "focusHistoryID", default = "unfocused")]
-    pub focus_rank: i64,
-    #[serde(default = "mapped")]
-    pub mapped: bool,
-}
-
-const fn unfocused() -> i64 {
-    i64::MAX
-}
-const fn mapped() -> bool {
-    true
-}
+pub use shelllist_hyprland::workspace::{Window as Client, WorkspaceRef as Workspace};
 
 #[derive(Debug, Clone, Default)]
 pub struct Snapshot {
@@ -127,6 +92,25 @@ fn valid_address(address: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::Snapshot;
+
+    #[test]
+    fn shared_models_keep_ranking_filter_bad_addresses_and_reject_missing_identity() {
+        let snapshot = Snapshot::from_response(
+            r#"[
+            {"address":"not-a-selector","pid":1,"workspace":{"id":1}},
+            {"address":"0x123","pid":2,"workspace":{"id":1}},
+            {"address":"0x456","pid":3,"workspace":{"id":1},"focusHistoryID":0},
+            {"address":"0x789","pid":4,"workspace":{"id":1},"mapped":false}
+        ]"#,
+        );
+        assert!(snapshot.available);
+        assert_eq!(snapshot.clients.len(), 2);
+        assert_eq!(snapshot.clients[0].address, "0x456");
+        assert_eq!(snapshot.clients[1].focus_rank, i64::MAX);
+        assert!(
+            !Snapshot::from_response(r#"[{"address":"0x123","workspace":{"id":1}}]"#).available
+        );
+    }
 
     #[test]
     fn special_workspace_without_number_keeps_the_application_available() {
