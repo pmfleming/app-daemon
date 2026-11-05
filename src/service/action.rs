@@ -120,7 +120,9 @@ impl PreparedAction {
                     .find(|m| m.focused)
                     .context("invoking monitor unavailable")?
                     .active_workspace
-                    .id;
+                    .id
+                    .filter(|id| *id > 0)
+                    .context("ordinary workspace required")?;
                 if self.params.launch_target == LaunchTarget::Current
                     || self.params.workspace_id.is_none()
                 {
@@ -539,7 +541,10 @@ async fn place_launched_window(
                 window: shelllist_daemon_core::workspace_wire::WindowIdentity {
                     address: window.address.clone(),
                     pid: window.pid,
-                    workspace_id: window.workspace.id,
+                    workspace_id: window
+                        .workspace
+                        .id
+                        .context("ordinary workspace required for reserved placement")?,
                 },
                 follow: focus
                     || params.launch_target
@@ -618,7 +623,7 @@ async fn verify_placement(
 
 fn workspace_matches(window: &Client, workspace: &str) -> bool {
     if let Ok(id) = workspace.parse::<i64>() {
-        window.workspace.id == id
+        window.workspace.id == Some(id)
     } else {
         window.workspace.name == workspace.strip_prefix("name:").unwrap_or(workspace)
     }

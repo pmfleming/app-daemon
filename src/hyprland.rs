@@ -3,7 +3,7 @@ use serde::Deserialize;
 #[derive(Debug, Clone, Default, Deserialize, Hash)]
 pub struct Workspace {
     #[serde(default)]
-    pub id: i64,
+    pub id: Option<i64>,
     #[serde(default)]
     pub name: String,
 }
@@ -178,4 +178,24 @@ fn valid_address(address: &str) -> bool {
     address.strip_prefix("0x").is_some_and(|value| {
         !value.is_empty() && value.chars().all(|character| character.is_ascii_hexdigit())
     }) && address != "0x0"
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Snapshot;
+
+    #[test]
+    fn special_workspace_without_number_keeps_the_application_available() {
+        let snapshot = Snapshot::from_response(
+            r#"[
+            {"address":"0x123","pid":42,"class":"app","workspace":{"address":"special:probe","type":"special","name":"special:probe"}},
+            {"address":"0x456","pid":43,"class":"app","workspace":{"id":3,"name":"3"}}
+        ]"#,
+        );
+        assert!(snapshot.available);
+        assert_eq!(snapshot.clients.len(), 2);
+        assert_eq!(snapshot.clients[0].workspace.id, None);
+        assert_eq!(snapshot.clients[0].workspace.name, "special:probe");
+        assert_eq!(snapshot.clients[1].workspace.id, Some(3));
+    }
 }

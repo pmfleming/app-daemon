@@ -140,7 +140,11 @@ fn instances(
                 id: hyprland::window_id(&window.address),
                 title: window.title.clone(),
                 class: window.class.clone(),
-                workspace_id: window.workspace.id.to_string(),
+                workspace_id: window
+                    .workspace
+                    .id
+                    .map(|id| id.to_string())
+                    .unwrap_or_else(|| window.workspace.name.clone()),
                 workspace_name: window.workspace.name.clone(),
                 focused: window.focus_rank == 0,
                 focus_rank: window.focus_rank,

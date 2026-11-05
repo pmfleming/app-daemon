@@ -378,7 +378,10 @@ async fn real_daemons_launch_recover_and_close_on_private_compositor() -> Result
     ensure!(destination > 5, "temporary allocation");
     let before = workspace::snapshot(&transport).await?;
     ensure!(
-        before.windows.iter().any(|w| w.workspace.id == destination),
+        before
+            .windows
+            .iter()
+            .any(|w| w.workspace.id == Some(destination)),
         "window not placed"
     );
     // Lost terminal/admission replies resolve to the same operation, without launch.
@@ -450,7 +453,7 @@ async fn real_daemons_launch_recover_and_close_on_private_compositor() -> Result
         &transport,
         &workspace::focus_local(
             &monitor.name,
-            monitor.active_workspace.id,
+            monitor.active_workspace.id.unwrap(),
             destination,
             true,
         )?,
@@ -482,7 +485,7 @@ async fn real_daemons_launch_recover_and_close_on_private_compositor() -> Result
         moved
             .windows
             .iter()
-            .any(|window| window.workspace.id == manual),
+            .any(|window| window.workspace.id == Some(manual)),
         "native move into manual workspace failed"
     );
     wait_for_workspace_strip(&bus, manual, true, manual).await?;
@@ -574,7 +577,7 @@ async fn real_daemons_launch_recover_and_close_on_private_compositor() -> Result
     }
     let after = workspace::snapshot(&transport).await?;
     ensure!(
-        after.windows.len() == 1 && after.windows[0].workspace.id != late_destination,
+        after.windows.len() == 1 && after.windows[0].workspace.id != Some(late_destination),
         "late window revived retired placement"
     );
     ensure!(
