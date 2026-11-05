@@ -16,7 +16,7 @@ pub(super) struct Database {
     _database: turso::Database,
     _file: Option<File>,
     // Released only after the database/connection have been dropped.
-    _ownership: Option<File>,
+    _ownership: Option<Ownership>,
     path: Option<PathBuf>,
     pub(super) last_prune: Option<u64>,
     blocked: bool,
@@ -24,6 +24,42 @@ pub(super) struct Database {
     pub(super) fault: Option<Fault>,
     #[cfg(test)]
     _temporary: Option<tempfile::TempDir>,
+}
+
+struct Ownership(File);
+
+impl Drop for Ownership {
+    fn drop(&mut self) {
+        // Closing alone waits for every duplicated/inherited descriptor. A
+        // concurrent fork may retain one until exec even with CLOEXEC set.
+        // This field drops after the connection/database, so explicitly release
+        // the finished owner's lock before its descriptor is closed.
+        let _ = self.0.unlock();
+    }
+}
+
+#[cfg(test)]
+mod ownership_tests {
+    use super::Database;
+    use futures::executor::block_on;
+
+    #[test]
+    fn dropping_owner_releases_lock_even_with_an_inherited_descriptor() -> anyhow::Result<()> {
+        let root = tempfile::tempdir()?;
+        let path = root.path().join("history.db");
+        let owner = block_on(Database::open(&path))?;
+        // A descriptor duplicated by fork can outlive the parent until exec,
+        // including a CLOEXEC descriptor in a concurrent process-spawn window.
+        let inherited = owner._ownership.as_ref().unwrap().0.try_clone()?;
+        assert!(block_on(Database::open(&path)).is_err());
+        drop(owner);
+        let reopened = block_on(Database::open(&path))?;
+        assert!(block_on(Database::open(&path)).is_err());
+        drop(inherited);
+        assert!(block_on(Database::open(&path)).is_err());
+        drop(reopened);
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -83,6 +119,7 @@ impl Database {
         ownership
             .try_lock()
             .context("history database already owned by another process")?;
+        let ownership = Ownership(ownership);
         let (file, fresh) = match private_file(path, false, true) {
             Ok(file) => (file, true),
             Err(error)
