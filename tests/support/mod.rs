@@ -316,6 +316,7 @@ pub struct MockCompositor {
 
 struct CompositorState {
     response: String,
+    active_workspace: Value,
     commands: Vec<String>,
     move_behavior: (bool, bool),
     reject_focus: bool,
@@ -336,6 +337,8 @@ impl CompositorState {
             && (request.contains("hl.dsp.focus") || request.contains("focuswindow"))
         {
             "fixture rejected focus".into()
+        } else if request == "j/activeworkspace" {
+            self.active_workspace.to_string()
         } else if request == "j/clients" {
             self.response.clone()
         } else if request.contains("hl.dsp.window.move")
@@ -365,6 +368,7 @@ impl MockCompositor {
         let event = UnixListener::bind(path.join(".socket2.sock"))?;
         let state = Arc::new(Mutex::new(CompositorState {
             response: "[]".into(),
+            active_workspace: json!({"id":1,"name":"1","address":"1","type":"normal"}),
             commands: Vec::new(),
             move_behavior: (true, true),
             reject_focus: false,
@@ -407,6 +411,9 @@ impl MockCompositor {
             tasks: vec![command_task, event_task],
         })
     }
+    pub fn active_workspace(&self, workspace: Value) {
+        self.state.lock().unwrap().active_workspace = workspace;
+    }
     pub fn set(&self, response: &str) {
         self.state.lock().unwrap().response = response.to_owned();
         let _ = self.events.send("openwindow>>fixture".into());
@@ -443,7 +450,12 @@ fn apply_move(response: &mut String, request: &str) {
     if let Ok(mut windows) = serde_json::from_str::<Vec<Value>>(response) {
         for window in &mut windows {
             if window["address"] == address {
-                window["workspace"] = json!({"id": workspace.parse::<i64>().unwrap_or(-1), "name": workspace.strip_prefix("name:").unwrap_or(workspace)});
+                window["workspace"] = if let Ok(id) = workspace.parse::<i64>() {
+                    json!({"id":id,"address":workspace,"name":workspace,"type":"normal"})
+                } else {
+                    let address = workspace.strip_prefix("name:").unwrap_or(workspace);
+                    json!({"address":address,"name":address,"type":"normal"})
+                };
             }
         }
         *response = serde_json::to_string(&windows).unwrap();

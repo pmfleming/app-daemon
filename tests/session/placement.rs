@@ -355,3 +355,41 @@ async fn unrelated_same_class_and_ambiguous_windows_are_never_moved() -> Result<
     drop(proxy);
     session.shutdown().await
 }
+
+#[tokio::test]
+async fn explicit_current_launch_routes_to_a_named_workspace_without_a_number() -> Result<()> {
+    let mut session = Session::start(true).await?;
+    let _manager = manager(&session).await?;
+    session
+        .compositor
+        .active_workspace(json!({"address":"ipc-review","name":"display name","type":"normal"}));
+    let proxy = session.proxy().await?;
+    let mut stream = events(&proxy).await?;
+    let accepted = call(
+        &proxy,
+        "applications.execute",
+        json!({"target_id":"ok.desktop","action":"launch","launch_target":"current"}),
+    )
+    .await?;
+    assert_eq!(accepted["ok"], true, "{accepted}");
+    let id = accepted["data"]["operation"]["id"]
+        .as_str()
+        .context("operation id")?;
+    let progress = handoff(&mut stream, id).await?;
+    assert_eq!(progress["placement"]["workspace_id"], "name:ipc-review");
+    session
+        .compositor
+        .set(&json!([window("0x123", "ok", std::process::id(), 9)]).to_string());
+    let result = operation(&mut stream, id, "completed").await?;
+    assert_eq!(result["placement"]["status"], "placed", "{result}");
+    assert!(
+        session
+            .compositor
+            .commands()
+            .iter()
+            .any(|command| command.contains("workspace = \"name:ipc-review\""))
+    );
+    drop(stream);
+    drop(proxy);
+    session.shutdown().await
+}

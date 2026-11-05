@@ -111,23 +111,12 @@ impl PreparedAction {
                 if self.params.launch_target == LaunchTarget::Default {
                     return Ok(self);
                 }
-                let snapshot =
-                    shelllist_hyprland::workspace::snapshot(&shelllist_hyprland::Client::default())
-                        .await?;
-                let current = snapshot
-                    .monitors
-                    .iter()
-                    .find(|m| m.focused)
-                    .context("invoking monitor unavailable")?
-                    .active_workspace
-                    .id
-                    .filter(|id| *id > 0)
-                    .context("ordinary workspace required")?;
-                if self.params.launch_target == LaunchTarget::Current
-                    || self.params.workspace_id.is_none()
-                {
-                    self.params.workspace_id = Some(current.to_string());
-                }
+                self.params.workspace_id = Some(
+                    shelllist_hyprland::Client::default()
+                        .active_workspace()
+                        .await?
+                        .selector()?,
+                );
                 return Ok(self);
             }
             let Some(context) = super::workspaces::capture().await? else {
@@ -625,7 +614,11 @@ fn workspace_matches(window: &Client, workspace: &str) -> bool {
     if let Ok(id) = workspace.parse::<i64>() {
         window.workspace.id == Some(id)
     } else {
-        window.workspace.name == workspace.strip_prefix("name:").unwrap_or(workspace)
+        let address = workspace.strip_prefix("name:").unwrap_or(workspace);
+        window.workspace.address.as_deref().map_or_else(
+            || window.workspace.name == address,
+            |current| current == address,
+        )
     }
 }
 
@@ -749,4 +742,21 @@ fn display_name<'a>(catalog: &'a Catalog, target_id: &'a str) -> &'a str {
         || target_id.strip_prefix("window-group:").unwrap_or(target_id),
         |entry| entry.name.as_str(),
     )
+}
+
+#[cfg(test)]
+mod workspace_tests {
+    use super::*;
+    #[test]
+    fn named_placement_uses_address_even_when_the_display_name_changes() {
+        let capture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../daemon-framework/crates/shelllist-hyprland/tests/fixtures/0.57.1/named.json"
+        ))
+        .unwrap();
+        let mut window: Client = serde_json::from_value(capture["activewindow"].clone()).unwrap();
+        window.workspace.name = "renamed display".into();
+        assert!(workspace_matches(&window, "name:ipc-review"));
+        assert!(!workspace_matches(&window, "name:renamed display"));
+        assert!(!workspace_matches(&window, "0"));
+    }
 }
