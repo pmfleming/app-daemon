@@ -99,74 +99,25 @@ pub(crate) fn window_event_relevant(event: &shelllist_hyprland::CompositorEvent)
 }
 
 pub async fn focus(address: &str) -> anyhow::Result<()> {
-    let selector = address_selector(address)?;
-    let lua = format!("hl.dsp.focus({{ window = '{selector}' }})");
-    dispatch_window(&lua, "focuswindow", &selector, "focus").await
+    shelllist_hyprland::execute(
+        &shelllist_hyprland::Client::default(),
+        &shelllist_hyprland::lua::focus_window(address)?,
+    )
+    .await
 }
-
 pub async fn close(address: &str) -> anyhow::Result<()> {
-    let selector = address_selector(address)?;
-    let lua = format!("hl.dsp.window.close({{ window = '{selector}' }})");
-    dispatch_window(&lua, "closewindow", &selector, "close").await
+    shelllist_hyprland::execute(
+        &shelllist_hyprland::Client::default(),
+        &shelllist_hyprland::lua::close_window(address)?,
+    )
+    .await
 }
-
-async fn dispatch_window(
-    lua: &str,
-    legacy_command: &str,
-    selector: &str,
-    operation: &str,
-) -> anyhow::Result<()> {
-    anyhow::ensure!(
-        dispatch(&["dispatch", lua]).await
-            || dispatch(&["dispatch", legacy_command, selector]).await,
-        "Hyprland rejected the {operation} request"
-    );
-    Ok(())
-}
-
 pub async fn move_to_workspace(address: &str, workspace: &str) -> anyhow::Result<()> {
-    let selector = address_selector(address)?;
-    let workspace = workspace_selector(workspace)?;
-    let lua = format!(
-        "hl.dsp.window.move({{ workspace = '{workspace}', follow = false, window = '{selector}' }})"
-    );
-    if dispatch(&["dispatch", &lua]).await {
-        return Ok(());
-    }
-    let argument = format!("{workspace},{selector}");
-    anyhow::ensure!(
-        dispatch(&["dispatch", "movetoworkspacesilent", &argument]).await,
-        "Hyprland rejected the workspace move request"
-    );
-    Ok(())
-}
-
-fn address_selector(address: &str) -> anyhow::Result<String> {
-    anyhow::ensure!(valid_address(address), "window address is invalid");
-    Ok(format!("address:{address}"))
-}
-
-fn workspace_selector(workspace: &str) -> anyhow::Result<&str> {
-    anyhow::ensure!(
-        !workspace.is_empty()
-            && workspace
-                .chars()
-                .all(|character| character.is_ascii_alphanumeric() || "_-.+:".contains(character)),
-        "workspace is invalid"
-    );
-    Ok(workspace)
-}
-
-async fn dispatch(arguments: &[&str]) -> bool {
-    dispatch_with(&shelllist_hyprland::Client::default(), arguments).await
-}
-
-async fn dispatch_with(client: &shelllist_hyprland::Client, arguments: &[&str]) -> bool {
-    // A stale session must not redirect window mutations to another compositor.
-    client
-        .request_exact(&arguments.join(" "))
-        .await
-        .is_ok_and(|response| shelllist_hyprland::ack(&response).is_ok())
+    shelllist_hyprland::execute(
+        &shelllist_hyprland::Client::default(),
+        &shelllist_hyprland::lua::move_window(address, workspace)?,
+    )
+    .await
 }
 
 fn valid_address(address: &str) -> bool {

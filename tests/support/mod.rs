@@ -323,6 +323,15 @@ struct CompositorState {
 
 impl CompositorState {
     fn respond(&mut self, request: String) -> String {
+        if request == "j/status" {
+            return r#"{"configProvider":"lua"}"#.into();
+        }
+        if request == "j/version" {
+            return r#"{"version":"0.57.1"}"#.into();
+        }
+        if request.starts_with("eval assert(type(") {
+            return "ok".into();
+        }
         let output = if self.reject_focus
             && (request.contains("hl.dsp.focus") || request.contains("focuswindow"))
         {
@@ -417,11 +426,11 @@ impl MockCompositor {
 }
 
 fn apply_move(response: &mut String, request: &str) {
-    let Some(workspace) = request
-        .split("workspace = '")
-        .nth(1)
-        .and_then(|value| value.split('\'').next())
-    else {
+    let Some(workspace) = request.split("workspace = ").nth(1).and_then(|value| {
+        value
+            .get(1..)
+            .and_then(|tail| tail.split(value.chars().next()?).next())
+    }) else {
         return;
     };
     let Some(address) = request

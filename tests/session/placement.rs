@@ -304,7 +304,7 @@ async fn placement_requires_confirmation_without_losing_successful_launch_receip
         };
         assert!(
             message.as_str().unwrap().contains(if action == "activate" {
-                "rejected the focus"
+                "rejected"
             } else if apply {
                 "Moved"
             } else if accept {

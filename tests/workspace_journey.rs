@@ -465,21 +465,20 @@ async fn real_daemons_launch_recover_and_close_on_private_compositor() -> Result
     wait_for_workspace_strip(&bus, manual, true, destination).await?;
     workspace::execute(
         &transport,
-        &format!("local r=hl.dispatch(hl.dsp.focus({{workspace={manual}}})); assert(r.ok,r.error)"),
+        &shelllist_hyprland::lua::focus_workspace(manual, false)?,
     )
     .await?;
     wait_for_workspace_strip(&bus, manual, true, manual).await?;
     workspace::execute(
         &transport,
-        &format!(
-            "local r=hl.dispatch(hl.dsp.focus({{workspace={destination}}})); assert(r.ok,r.error)"
-        ),
+        &shelllist_hyprland::lua::focus_workspace(destination, false)?,
     )
     .await?;
     workspace::execute(
         &transport,
-        &format!("local r=hl.dispatch(hl.dsp.window.move({{workspace={manual},follow=true}})); assert(r.ok,r.error)"),
-    ).await?;
+        &workspace::select_local(&monitor.name, destination, manual, true, true)?,
+    )
+    .await?;
     let moved = workspace::snapshot(&transport).await?;
     ensure!(
         moved
@@ -491,12 +490,13 @@ async fn real_daemons_launch_recover_and_close_on_private_compositor() -> Result
     wait_for_workspace_strip(&bus, manual, true, manual).await?;
     workspace::execute(
         &transport,
-        &format!("local r=hl.dispatch(hl.dsp.window.move({{workspace={destination},follow=true}})); assert(r.ok,r.error)"),
-    ).await?;
+        &workspace::select_local(&monitor.name, manual, destination, true, true)?,
+    )
+    .await?;
     wait_for_workspace_strip(&bus, manual, true, destination).await?;
     workspace::execute(
         &transport,
-        &format!("local r=hl.dispatch(hl.dsp.focus({{workspace={manual}}})); assert(r.ok,r.error)"),
+        &shelllist_hyprland::lua::focus_workspace(manual, false)?,
     )
     .await?;
     call(
