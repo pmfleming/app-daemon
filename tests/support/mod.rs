@@ -320,11 +320,22 @@ struct CompositorState {
     commands: Vec<String>,
     move_behavior: (bool, bool),
     reject_focus: bool,
+    reject_capabilities: bool,
+    capability_checks: Vec<String>,
 }
 
 impl CompositorState {
     fn respond(&mut self, request: String) -> String {
+        if request == "j/status"
+            || request == "j/version"
+            || request.starts_with("eval assert(type(")
+        {
+            self.capability_checks.push(request.clone());
+        }
         if request == "j/status" {
+            if self.reject_capabilities {
+                return r#"{"configProvider":"unsupported"}"#.into();
+            }
             return r#"{"configProvider":"lua"}"#.into();
         }
         if request == "j/version" {
@@ -372,6 +383,8 @@ impl MockCompositor {
             commands: Vec::new(),
             move_behavior: (true, true),
             reject_focus: false,
+            reject_capabilities: false,
+            capability_checks: Vec::new(),
         }));
         let reply = Arc::clone(&state);
         let (events, _) = broadcast::channel::<String>(32);
@@ -423,6 +436,12 @@ impl MockCompositor {
     }
     pub fn commands(&self) -> Vec<String> {
         self.state.lock().unwrap().commands.clone()
+    }
+    pub fn capabilities(&self, available: bool) {
+        self.state.lock().unwrap().reject_capabilities = !available;
+    }
+    pub fn capability_checks(&self) -> Vec<String> {
+        self.state.lock().unwrap().capability_checks.clone()
     }
     pub fn reject_focus(&self) {
         self.state.lock().unwrap().reject_focus = true;

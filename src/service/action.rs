@@ -111,12 +111,8 @@ impl PreparedAction {
                 if self.params.launch_target == LaunchTarget::Default {
                     return Ok(self);
                 }
-                self.params.workspace_id = Some(
-                    shelllist_hyprland::Client::default()
-                        .active_workspace()
-                        .await?
-                        .selector()?,
-                );
+                self.params.workspace_id =
+                    Some(hyprland::ipc().active_workspace().await?.selector()?);
                 return Ok(self);
             }
             let Some(context) = super::workspaces::capture().await? else {

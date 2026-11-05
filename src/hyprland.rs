@@ -1,5 +1,14 @@
 pub use shelllist_hyprland::workspace::{Window as Client, WorkspaceRef as Workspace};
 
+// App-daemon owns one compositor session for its process lifetime. SessionGone
+// exits the process; neither commands nor their capability cache rebind in place.
+static IPC: std::sync::LazyLock<shelllist_hyprland::Client> =
+    std::sync::LazyLock::new(shelllist_hyprland::Client::from_environment);
+
+pub(crate) fn ipc() -> &'static shelllist_hyprland::Client {
+    &IPC
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct Snapshot {
     pub available: bool,
@@ -9,10 +18,7 @@ pub struct Snapshot {
 
 impl Snapshot {
     pub async fn load() -> Self {
-        let Ok(output) = shelllist_hyprland::Client::default()
-            .request("j/clients")
-            .await
-        else {
+        let Ok(output) = ipc().request("j/clients").await else {
             return Self::default();
         };
         Self::from_response(&output)
@@ -64,22 +70,14 @@ pub(crate) fn window_event_relevant(event: &shelllist_hyprland::CompositorEvent)
 }
 
 pub async fn focus(address: &str) -> anyhow::Result<()> {
-    shelllist_hyprland::execute(
-        &shelllist_hyprland::Client::default(),
-        &shelllist_hyprland::lua::focus_window(address)?,
-    )
-    .await
+    shelllist_hyprland::execute(ipc(), &shelllist_hyprland::lua::focus_window(address)?).await
 }
 pub async fn close(address: &str) -> anyhow::Result<()> {
-    shelllist_hyprland::execute(
-        &shelllist_hyprland::Client::default(),
-        &shelllist_hyprland::lua::close_window(address)?,
-    )
-    .await
+    shelllist_hyprland::execute(ipc(), &shelllist_hyprland::lua::close_window(address)?).await
 }
 pub async fn move_to_workspace(address: &str, workspace: &str) -> anyhow::Result<()> {
     shelllist_hyprland::execute(
-        &shelllist_hyprland::Client::default(),
+        ipc(),
         &shelllist_hyprland::lua::move_window(address, workspace)?,
     )
     .await

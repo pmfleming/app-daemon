@@ -235,8 +235,7 @@ impl EventSources {
 
 pub(super) async fn track_state(service: std::sync::Weak<ApplicationService>) {
     let (window_sender, windows) = mpsc::channel(64);
-    let events_task =
-        tokio::spawn(shelllist_hyprland::Client::default().watch_events(window_sender));
+    let events_task = tokio::spawn(crate::hyprland::ipc().clone().watch_events(window_sender));
     let _events = shelllist_daemon_tokio::AbortOnDrop(events_task.abort_handle());
     let (catalog_sender, catalog) = mpsc::channel(64);
     let Some(initial) = service.upgrade() else {

@@ -212,3 +212,54 @@ async fn compositor_replacement_exits_nonzero_and_drains_history() -> anyhow::Re
     let mut session = crate::support::Session::start(true).await?;
     session.replace_compositor_session().await
 }
+
+#[tokio::test]
+async fn mutation_capabilities_retry_failure_cache_success_and_reset_on_process_restart()
+-> Result<()> {
+    let mut session = Session::start(true).await?;
+    session
+        .compositor
+        .set(r#"[{"address":"0x123","class":"ok","workspace":{"id":1},"pid":0}]"#);
+    let proxy = session.proxy().await?;
+    let mut stream = events(&proxy).await?;
+    for (available, expected) in [(false, "failed"), (true, "completed"), (true, "completed")] {
+        session.compositor.capabilities(available);
+        let accepted = call(
+            &proxy,
+            "applications.execute",
+            json!({"target_id":"ok.desktop","action":"focus-window","window_id":"window-123"}),
+        )
+        .await?;
+        assert_eq!(accepted["ok"], true, "{accepted}");
+        let id = accepted["data"]["operation"]["id"]
+            .as_str()
+            .context("operation id")?;
+        operation(&mut stream, id, expected).await?;
+    }
+    let checks = session.compositor.capability_checks();
+    assert_eq!(checks.iter().filter(|c| *c == "j/status").count(), 2);
+    assert_eq!(checks.iter().filter(|c| *c == "j/version").count(), 1);
+    assert_eq!(checks.iter().filter(|c| c.starts_with("eval ")).count(), 1);
+    drop(stream);
+    drop(proxy);
+    session.restart().await?;
+    let proxy = session.proxy().await?;
+    let mut stream = events(&proxy).await?;
+    let accepted = call(
+        &proxy,
+        "applications.execute",
+        json!({"target_id":"ok.desktop","action":"focus-window","window_id":"window-123"}),
+    )
+    .await?;
+    let id = accepted["data"]["operation"]["id"]
+        .as_str()
+        .context("operation id")?;
+    operation(&mut stream, id, "completed").await?;
+    assert_eq!(
+        session.compositor.capability_checks().len(),
+        checks.len() + 3
+    );
+    drop(stream);
+    drop(proxy);
+    session.shutdown().await
+}
