@@ -1,0 +1,135 @@
+App-daemon RQLens refactor review, 2026-11-05
+Repository: /home/laufan/Projects/app-daemon; starting HEAD 62b78e9.
+
+Scope and reproducibility
+- Clean starting checkout. Only this daemon changed; no framework, QML, API,
+  transport, lockfile or launch/lease/retry policy changes; no live service actions.
+- Reviewed README.md, rqlens.toml, quality/README.md, quality/regression.toml,
+  scripts/check-quality.sh and the source/test inventory. No AGENTS.md applies
+  in this repository or its ancestors. Do not create ignored docs/ material.
+- Raw immutable initial baseline: target/rqlens-refactor-review/before/.
+  A changed analyzer executable was detected by SHA-256 after the first pair.
+  Comparable static baseline: before-current-instrument/, recaptured with the
+  final analyzer against the exact original Rust sources, then final sources
+  restored. Original before coverage uses the same Rust/LLVM/scope as after.
+  Final current artifacts: after/. Provisional iterations are not final evidence.
+- Static producers: hotspots, locality, leverage, clones, reliability,
+  test-quality, escape-hatches. Same rqlens.toml options; copied configs change
+  only the absolute project_root and isolated output_dir. No source exclusions
+  added: all 83 authored Rust files, including tests and benchmarks.
+- Production metrics/LOC exclude dedicated tests, fixtures used only for tests,
+  benchmark files and cfg(test) items. Production protocol fixture code remains
+  included. Physical LOC includes comments and blank lines. Classification and
+  coverage extraction: target/rqlens-refactor-review/summarize.py; saved original
+  source text: before/sources.json. LLVM production line view uses JSON segments
+  with the same source masks, rather than claiming RQLens test-quality is coverage.
+
+Ranked findings and implementation
+1. software::compose: production cognitive maximum 15, cyclomatic 12, function
+   effort 244120. Temporary matched-ID strings/vector, fallible relookup and a
+   full installation clone for every match. Package now owns installation
+   derivation; matched records are borrowed directly and the first takes ownership.
+   For n matches: zero temporary ID clones, n-1 installation clones instead of n.
+   Global staleness is merged into optional release evidence without nested guards.
+2. software persistence: cloned every record merely to clear metadata entries;
+   refresh decoded the catalog twice. Metadata now copies scalar fields and only
+   the optional error string; refresh returns either the existing stored snapshot
+   or the just-committed new value. SQL-owned string parameters remain explicit
+   clones: replacing them with &str would only hide the same Turso allocation.
+3. Repeated database-count and private-bus acceptance setup obscured assertions.
+   Shared test helpers retain all distinct checks and strengthen acceptance to
+   require both ok and accepted lifecycle status. Combined restart/rollback/retry
+   scenarios reuse one fixture. No ignored tests or safety assertions removed.
+4. Added worker-ingestion tests for valid output, exact 2 MiB, one byte over,
+   malformed JSON, schema rejection, nonzero exit and relative executable paths;
+   catalog matrices add shared identities/deduplication, observation-order stable
+   revisions, release precedence/fallback/default staleness and retained diagnostics.
+5. Remaining hotspots: history query_window (cyclomatic 23, effort 165200),
+   software store open (31, 126729), history finish (cognitive 14), durable operation
+   admission (21, 124416); the large opt-in workspace journey remains the test
+   effort/cognitive maximum. Security-sensitive private_file duplication remains
+   in history/software stores. No compiler/search proof justified speculative
+   dead-code deletion; no public API removed or lint/unsafe escape added.
+
+Comparable measurements (observed syntax; 83 files)
+                                           Before             After
+Production function cognitive sum/max       726 / 15           723 / 14
+Production function cyclomatic sum/max      1753 / 31          1753 / 31
+Production function effort sum/max      6205771 / 244120   6153104 / 165200
+Compose alone cognitive/cyclomatic/effort   15/12/244120        9/6/150291
+Compose + new Package method               15/12/244120       11/11/184588
+All-code cognitive/cyclomatic sums          1080 / 2999        1087 / 3026
+All-code function effort sum                 15011094           15096053
+Software file Halstead effort                 830041             890997
+Software store file Halstead effort           979347            1039522
+Locality mean / catalog module           98.2560 / 94.00    98.2470 / 93.25
+Leverage mean                                28.0723            28.4337
+Leverage software / store / settings         60/30/90          70/40/100
+Duplicated lines / percentage               991 / 5.15%        882 / 4.59%
+Clone records (token / AST)                    76 / 3             65 / 3
+Explicit production clone/cloned sites          120                119
+Explicit test / benchmark clone sites         99 / 5             99 / 5
+Reliability production / test findings       15 / 221           13 / 201
+Escape-hatch findings                             8                  7
+Production / test / benchmark physical LOC 12044/8304/277    12038/8295/277
+Total authored Rust physical LOC              20625              20610
+Registered tests / ignored tests               99/10              99/10
+Test-quality findings / assertionless tests    23/13              23/13
+LLVM library line coverage             6420/10001 64.19%  6437/9990 64.43%
+LLVM library region coverage                    61.62%             61.90%
+Segment-derived production line view   5047/8144 61.97%   5059/8130 62.23%
+Software production line view            173/201 86.07%     187/189 98.94%
+Store production line view               230/240 95.83%     230/240 95.83%
+Service/software production line view      64/79 81.01%       62/77 80.52%
+
+The smaller code/test size is modest (-6 production, -9 test, -15 Rust lines).
+Production cyclomatic totals are flat. Locality, all-code complexity/effort and
+software/store file effort regress: this is not an improvement on every metric.
+New edge tests and shared setup alter test fan-in; an extracted method changes
+function effort aggregation, so both combined-function and file effort are shown.
+Duplicate-code lines are not allocation counts. The ownership savings above are
+structural evidence, not measured allocator/throughput results.
+
+
+Commands (all run from this repository)
+  export CARGO_BUILD_JOBS=2 CARGO_TARGET_DIR=$PWD/target
+  nix develop /home/laufan/Projects/rust-quality-lens --command <command>
+  RQL=/home/laufan/Projects/rust-quality-lens/target/debug/rqlens
+  for p in hotspots locality leverage clones reliability test-quality escape-hatches;
+    do $RQL measure "$p" --config target/rqlens-refactor-review/<side>.toml; done
+  cargo test --locked --all-features -- --list
+  export LLVM_COV=$(command -v llvm-cov) LLVM_PROFDATA=$(command -v llvm-profdata)
+  cargo llvm-cov --locked --lib --json --output-path target/rqlens-refactor-review/<side>/coverage.json
+  cargo test --locked --all-features
+  cargo clippy --locked --all-targets --all-features -- -D warnings
+  cargo fmt --package app-daemon -- --check
+  python3 target/rqlens-refactor-review/recapture-baseline.py
+  python3 target/rqlens-refactor-review/summarize.py before-current-instrument
+  python3 target/rqlens-refactor-review/summarize.py after
+  git diff --check
+
+Verification and limitations
+- Final all-feature suite: 67 library + 22 private-session integration tests pass,
+  zero failures; 10 existing ignored tests/helpers remain. The history crash
+  subprocess also passes. Fmt, all-target/all-feature Clippy (-D warnings), and
+  diff whitespace checks pass. Matching --lib coverage runs: 67 passed, 3 ignored
+  in each. Full integration execution is separate from the scoped coverage run.
+- Instrument: rqlens 0.1.0, complexity model v2, Halstead v1, risk model v4;
+  Rust/Cargo 1.95.0, LLVM 21.1.8, cargo-llvm-cov 0.8.5, rust-analyzer 2026-06-01.
+  Final analyzer SHA-256:
+  a9a7f6ac89b7f3a060d26a3b179b6fbed5f9338b8eb4815f93a5beecc0da53a3
+  Each static side has one consistent input fingerprint; executable hashes match.
+- RQLens remains partial: unexpanded declare_methods! prevents generated-item
+  inventory, and 8 architecture references remain unresolved (99.14% resolved).
+  Architecture scores are observed estimates, not complete semantic proof.
+  No strict complete-evidence gate, branch/MC/DC, mutation or live desktop/systemd
+  validation is claimed. Existing assertionless/ignored findings are unchanged.
+- Concurrent framework owner changes affected shelllist-hyprland address.rs,
+  events.rs and lib.rs. Initial/final per-file SHA-256s are in before/framework.json,
+  after/framework.json and framework-changes.json; Cargo.lock is unchanged.
+  The focused catalog improvements do not depend on these IPC changes, but the
+  full-suite/aggregate coverage comparison is not an isolated dependency experiment.
+- Important remaining gaps: worker timeout, malformed identity/count permutations,
+  catalog path/file-race errors, generated protocol inventory and larger history/
+  action orchestration. No verification blocker remains; partial analysis and the
+  ten fixture-dependent ignored tests limit the evidence.

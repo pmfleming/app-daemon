@@ -491,6 +491,18 @@ impl Drop for MockCompositor {
 pub async fn call(proxy: &Proxy<'_>, method: &str, params: Value) -> Result<Value> {
     raw_call(proxy, method, &params.to_string()).await
 }
+
+pub async fn accept(proxy: &Proxy<'_>, params: Value) -> Result<String> {
+    let response = call(proxy, "applications.execute", params).await?;
+    anyhow::ensure!(
+        response["ok"] == true && response["data"]["operation"]["status"] == "accepted",
+        "launch was not accepted: {response}"
+    );
+    response["data"]["operation"]["id"]
+        .as_str()
+        .map(str::to_owned)
+        .context("accepted operation ID")
+}
 pub async fn raw_call(proxy: &Proxy<'_>, method: &str, params: &str) -> Result<Value> {
     let response: String = timeout(DEADLINE, proxy.call("Call", &(method, params))).await??;
     Ok(serde_json::from_str(&response)?)

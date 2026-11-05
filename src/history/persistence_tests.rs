@@ -31,6 +31,14 @@ fn usage() -> ResourceUsage {
     usage
 }
 
+fn row_count(store: &HistoryStore, table: &str) -> anyhow::Result<i64> {
+    block_on(
+        store
+            .database
+            .integer(&format!("SELECT COUNT(*) FROM {table}")),
+    )
+}
+
 #[test]
 fn append_is_incremental_idle_flush_does_not_write_and_restart_does_not_load_points()
 -> anyhow::Result<()> {
@@ -87,22 +95,9 @@ fn transaction_rollback_preserves_pending_and_retry_does_not_double_count() -> a
     assert!(store.flush(true).is_err());
     assert_eq!(store.pending.resources.len(), 1);
     assert_eq!(store.pending.energy.len(), 1);
-    assert_eq!(
-        block_on(
-            store
-                .database
-                .integer("SELECT COUNT(*) FROM resource_points")
-        )?,
-        0
-    );
-    assert_eq!(
-        block_on(store.database.integer("SELECT COUNT(*) FROM energy_points"))?,
-        0
-    );
-    assert_eq!(
-        block_on(store.database.integer("SELECT COUNT(*) FROM cursor_epochs"))?,
-        0
-    );
+    assert_eq!(row_count(&store, "resource_points")?, 0);
+    assert_eq!(row_count(&store, "energy_points")?, 0);
+    assert_eq!(row_count(&store, "cursor_epochs")?, 0);
     store.flush(true)?;
     store.flush(true)?;
     drop(store);
@@ -188,39 +183,13 @@ fn retention_deletes_resource_and_energy_ranges_inclusively_at_boundary() -> any
         ),
     )?;
     store.prune(now)?;
-    assert_eq!(
-        block_on(
-            store
-                .database
-                .integer("SELECT COUNT(*) FROM resource_points")
-        )?,
-        1
-    );
-    assert_eq!(
-        block_on(store.database.integer("SELECT COUNT(*) FROM energy_points"))?,
-        2
-    );
-    assert_eq!(
-        block_on(store.database.integer("SELECT COUNT(*) FROM cursor_epochs"))?,
-        1
-    );
+    assert_eq!(row_count(&store, "resource_points")?, 1);
+    assert_eq!(row_count(&store, "energy_points")?, 2);
+    assert_eq!(row_count(&store, "cursor_epochs")?, 1);
     store.prune(now + 2)?;
-    assert_eq!(
-        block_on(
-            store
-                .database
-                .integer("SELECT COUNT(*) FROM resource_points")
-        )?,
-        0
-    );
-    assert_eq!(
-        block_on(store.database.integer("SELECT COUNT(*) FROM energy_points"))?,
-        0
-    );
-    assert_eq!(
-        block_on(store.database.integer("SELECT COUNT(*) FROM cursor_epochs"))?,
-        0
-    );
+    assert_eq!(row_count(&store, "resource_points")?, 0);
+    assert_eq!(row_count(&store, "energy_points")?, 0);
+    assert_eq!(row_count(&store, "cursor_epochs")?, 0);
     Ok(())
 }
 
@@ -333,14 +302,7 @@ fn sql_summaries_match_reference_without_decoding_unpaged_payloads() -> anyhow::
             .query_window("app", Some(points[99].timestamp_ms), None, None, 1)
             .is_err()
     );
-    assert_eq!(
-        block_on(
-            store
-                .database
-                .integer("SELECT COUNT(*) FROM resource_points")
-        )?,
-        100
-    );
+    assert_eq!(row_count(&store, "resource_points")?, 100);
     Ok(())
 }
 
@@ -444,10 +406,7 @@ fn process_exit_recovers_committed_wal_without_final_save() -> anyhow::Result<()
             .len(),
         1
     );
-    assert_eq!(
-        block_on(store.database.integer("SELECT COUNT(*) FROM energy_points"))?,
-        0
-    );
+    assert_eq!(row_count(&store, "energy_points")?, 0);
     assert!(store.pending.resources.is_empty());
     Ok(())
 }

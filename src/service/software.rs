@@ -31,16 +31,17 @@ impl ApplicationService {
             cache.attempted = Some(Instant::now());
         }
         let (snapshot, catalog, settings) = tokio::task::spawn_blocking(move || {
-            let cache = held.as_mut().unwrap();
+            let cache = held
+                .as_mut()
+                .ok_or_else(|| anyhow::anyhow!("software cache missing"))?;
             let next = software::compose(&catalog, &settings, &cache.observations);
-            let current = cache.store.snapshot()?;
-            if current.as_ref().is_none_or(|s| s.revision != next.revision) {
-                cache.store.replace(&next, None, &cache.observations)?;
-            }
-            let snapshot = cache
-                .store
-                .snapshot()?
-                .ok_or_else(|| anyhow::anyhow!("catalog snapshot missing"))?;
+            let snapshot = match cache.store.snapshot()? {
+                Some(current) if current.revision == next.revision => current,
+                _ => {
+                    cache.store.replace(&next, None, &cache.observations)?;
+                    next
+                }
+            };
             Ok::<_, anyhow::Error>((snapshot, catalog, settings))
         })
         .await??;

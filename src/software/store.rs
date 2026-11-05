@@ -289,7 +289,7 @@ impl Store {
                     self.connection.execute("INSERT INTO applications(id,kind,category,sort_name,payload) VALUES (?1,?2,?3,?4,?5)",
                         turso::params![record.id.clone(), record.kind.clone(), record.category.clone(), record.name.to_lowercase(), serde_json::to_string(record)?]).await?;
                 }
-                let mut metadata = snapshot.clone(); metadata.entries.clear();
+                let metadata = Snapshot { entries: Vec::new(), error: snapshot.error.clone(), ..*snapshot };
                 self.connection.execute("INSERT INTO snapshot(id,payload) VALUES (1,?1) ON CONFLICT(id) DO UPDATE SET payload=excluded.payload", [serde_json::to_string(&metadata)?]).await?;
                 self.connection.execute("INSERT INTO worker_observation(id,payload) VALUES (1,?1) ON CONFLICT(id) DO UPDATE SET payload=excluded.payload", [serde_json::to_string(observations)?]).await?;
                 if let Some(settings) = settings {

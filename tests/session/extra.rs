@@ -1,4 +1,4 @@
-use super::support::{self, Session, call, events, operation};
+use super::support::{self, Session, accept, call, events, operation};
 use anyhow::{Context, Result};
 use serde_json::json;
 
@@ -56,20 +56,12 @@ async fn metadata_only_refresh_replaces_launch_behavior_and_rejects_old_revision
         ("launch", "--\nupdated-command\n--flag\n"),
         ("desktop-action", "--\nupdated-action\n--inspect\n"),
     ] {
-        let accepted = call(
+        let id = accept(
             &proxy,
-            "applications.execute",
             json!({"target_id":"ok.desktop", "action":action, "desktop_action_id":"inspect"}),
         )
         .await?;
-        operation(
-            &mut stream,
-            accepted["data"]["operation"]["id"]
-                .as_str()
-                .context("operation id")?,
-            "completed",
-        )
-        .await?;
+        operation(&mut stream, &id, "completed").await?;
         assert_eq!(
             std::fs::read_to_string(session.state_path("terminal-arguments"))?,
             expected
@@ -125,16 +117,8 @@ async fn row_actions_ignore_unrelated_activity_but_reject_changed_targets() -> R
         "legacy page tokens stay strict"
     );
     let mut stream = events(&proxy).await?;
-    let accepted = call(&proxy, "applications.execute", params.clone()).await?;
-    assert_eq!(accepted["ok"], true, "{accepted}");
-    operation(
-        &mut stream,
-        accepted["data"]["operation"]["id"]
-            .as_str()
-            .context("operation id")?,
-        "completed",
-    )
-    .await?;
+    let id = accept(&proxy, params.clone()).await?;
+    operation(&mut stream, &id, "completed").await?;
 
     // A newly opened target window must invalidate Close-all's observed scope,
     // even though unrelated window changes above did not invalidate this row.
@@ -224,17 +208,12 @@ async fn mutation_capabilities_retry_failure_cache_success_and_reset_on_process_
     let mut stream = events(&proxy).await?;
     for (available, expected) in [(false, "failed"), (true, "completed"), (true, "completed")] {
         session.compositor.capabilities(available);
-        let accepted = call(
+        let id = accept(
             &proxy,
-            "applications.execute",
             json!({"target_id":"ok.desktop","action":"focus-window","window_id":"window-123"}),
         )
         .await?;
-        assert_eq!(accepted["ok"], true, "{accepted}");
-        let id = accepted["data"]["operation"]["id"]
-            .as_str()
-            .context("operation id")?;
-        operation(&mut stream, id, expected).await?;
+        operation(&mut stream, &id, expected).await?;
     }
     let checks = session.compositor.capability_checks();
     assert_eq!(checks.iter().filter(|c| *c == "j/status").count(), 2);
@@ -245,16 +224,12 @@ async fn mutation_capabilities_retry_failure_cache_success_and_reset_on_process_
     session.restart().await?;
     let proxy = session.proxy().await?;
     let mut stream = events(&proxy).await?;
-    let accepted = call(
+    let id = accept(
         &proxy,
-        "applications.execute",
         json!({"target_id":"ok.desktop","action":"focus-window","window_id":"window-123"}),
     )
     .await?;
-    let id = accepted["data"]["operation"]["id"]
-        .as_str()
-        .context("operation id")?;
-    operation(&mut stream, id, "completed").await?;
+    operation(&mut stream, &id, "completed").await?;
     assert_eq!(
         session.compositor.capability_checks().len(),
         checks.len() + 3

@@ -164,6 +164,53 @@ pub(crate) struct Cache {
     pub worker: std::path::PathBuf,
 }
 
+impl Package {
+    fn installation(&self, observations: &Observations) -> Installation {
+        let tool = self
+            .vendor_tool
+            .as_deref()
+            .and_then(|id| observations.tools.iter().find(|t| t["tool"] == id));
+        let active = tool
+            .and_then(|t| t["installed_version"].as_str())
+            .map(str::to_owned);
+        let release = tool
+            .and_then(|t| {
+                let source = t["latest_release"]["source"].as_str()?;
+                let version = t["latest_version"].as_str()?;
+                let checked_at = t["last_successful_check"].as_u64()?;
+                Some(Release {
+                    version: Some(version.into()),
+                    source: source.into(),
+                    checked_at: Some(checked_at),
+                    attempted_at: t["last_attempt"].as_u64().or(Some(checked_at)),
+                    stale: t["stale"].as_bool().unwrap_or(true),
+                    // Installation/build failures do not invalidate successful release observations.
+                    error: None,
+                })
+            })
+            .or_else(|| self.release.clone())
+            .map(|mut release| {
+                release.stale |= observations.stale;
+                release
+            });
+        Installation {
+            stale: observations.stale,
+            scope: self.scope.clone(),
+            package_name: self.name.clone(),
+            store_path: self.store_path.clone(),
+            declared_version: self.version.clone(),
+            version_origin: if active.is_some() {
+                "active-profile"
+            } else {
+                "generation"
+            }
+            .into(),
+            active_version: active,
+            release,
+        }
+    }
+}
+
 pub(crate) fn compose(
     catalog: &Catalog,
     settings: &SettingsStore,
@@ -172,7 +219,7 @@ pub(crate) fn compose(
     let owners: BTreeMap<_, _> = catalog
         .entries
         .iter()
-        .map(|entry| (&entry.id, entry.store_path()))
+        .map(|entry| (entry.id.as_str(), entry.store_path()))
         .collect();
     let mut records: BTreeMap<String, Record> = catalog
         .entries
@@ -192,64 +239,25 @@ pub(crate) fn compose(
         })
         .collect();
     for package in &observations.applications.packages {
-        let tool = package
-            .vendor_tool
-            .as_deref()
-            .and_then(|id| observations.tools.iter().find(|t| t["tool"] == id));
-        let active = tool
-            .and_then(|t| t["installed_version"].as_str())
-            .map(str::to_owned);
-        let mut release = tool
-            .and_then(|t| {
-                let source = t["latest_release"]["source"].as_str()?;
-                let version = t["latest_version"].as_str()?;
-                let checked_at = t["last_successful_check"].as_u64()?;
-                Some(Release {
-                    version: Some(version.into()),
-                    source: source.into(),
-                    checked_at: Some(checked_at),
-                    attempted_at: t["last_attempt"].as_u64().or(Some(checked_at)),
-                    stale: t["stale"].as_bool().unwrap_or(true),
-                    // Installation/build failures do not invalidate successful release observations.
-                    error: None,
-                })
-            })
-            .or_else(|| package.release.clone());
-        if observations.stale
-            && let Some(release) = &mut release
-        {
-            release.stale = true;
-        }
-        let installation = Installation {
-            stale: observations.stale,
-            scope: package.scope.clone(),
-            package_name: package.name.clone(),
-            store_path: package.store_path.clone(),
-            declared_version: package.version.clone(),
-            version_origin: if active.is_some() {
-                "active-profile"
-            } else {
-                "generation"
-            }
-            .into(),
-            active_version: active,
-            release,
-        };
+        let installation = package.installation(observations);
         // An explicit reviewed desktop ID wins. Otherwise match the exact store
         // output owning the desktop file. Never infer identity from display names.
-        let matches: Vec<_> = catalog
-            .entries
-            .iter()
-            .filter(|entry| {
-                package.desktop_ids.contains(&entry.id)
+        let mut matches = records.iter_mut().filter(|(id, _)| {
+            owners.get(id.as_str()).is_some_and(|path| {
+                package.desktop_ids.contains(*id)
                     || package
                         .store_path
-                        .as_deref()
-                        .is_some_and(|path| owners[&entry.id].as_deref() == Some(path))
+                        .as_ref()
+                        .is_some_and(|value| path.as_ref() == Some(value))
             })
-            .map(|entry| entry.id.clone())
-            .collect();
-        if matches.is_empty() {
+        });
+        if let Some((_, first)) = matches.next() {
+            // Only additional desktop identities need a copy of the installation.
+            for (_, record) in matches {
+                record.installations.push(installation.clone());
+            }
+            first.installations.push(installation);
+        } else {
             let id = format!("package:{}", package.name);
             records
                 .entry(id.clone())
@@ -263,31 +271,16 @@ pub(crate) fn compose(
                 })
                 .installations
                 .push(installation);
-        } else {
-            for id in matches {
-                records
-                    .get_mut(&id)
-                    .unwrap()
-                    .installations
-                    .push(installation.clone());
-            }
         }
     }
     let mut entries: Vec<_> = records.into_values().collect();
     for record in &mut entries {
         record.installations.sort_by(|a, b| {
-            (
-                &a.scope,
-                &a.package_name,
-                &a.store_path,
-                &a.declared_version,
-            )
-                .cmp(&(
-                    &b.scope,
-                    &b.package_name,
-                    &b.store_path,
-                    &b.declared_version,
-                ))
+            a.scope
+                .cmp(&b.scope)
+                .then_with(|| a.package_name.cmp(&b.package_name))
+                .then_with(|| a.store_path.cmp(&b.store_path))
+                .then_with(|| a.declared_version.cmp(&b.declared_version))
         });
         record.installations.dedup();
     }

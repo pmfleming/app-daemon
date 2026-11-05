@@ -15,7 +15,7 @@ mod support;
 use anyhow::{Context, Result};
 use app_daemon::api::{BUS_NAME, INTERFACE, OBJECT_PATH};
 use serde_json::json;
-use support::{Session, call, cancel, events, operation, raw_call, running, stopped};
+use support::{Session, accept, call, cancel, events, operation, raw_call, running, stopped};
 
 #[tokio::test]
 async fn dbus_requests_are_validated_and_connection_owned_results_are_recoverable() -> Result<()> {
@@ -87,15 +87,7 @@ async fn dbus_requests_are_validated_and_connection_owned_results_are_recoverabl
         ("ok.desktop", "launch", "completed"),
         ("missing.desktop", "close", "failed"),
     ] {
-        let accepted = call(
-            &proxy,
-            "applications.execute",
-            json!({"target_id":target, "action":action}),
-        )
-        .await?;
-        let id = accepted["data"]["operation"]["id"]
-            .as_str()
-            .context("accepted id")?;
+        let id = accept(&proxy, json!({"target_id":target, "action":action})).await?;
         let status = tokio::time::timeout(support::DEADLINE, async {
             loop {
                 let status = call(
@@ -136,19 +128,14 @@ async fn uwsm_handoffs_report_receipts_failures_timeouts_and_owned_cancellation(
         ("ok.desktop", "launch", "ok.desktop"),
         ("ok.desktop", "desktop-action", "ok.desktop:inspect"),
     ] {
-        let accepted = call(
+        let id = accept(
             &proxy,
-            "applications.execute",
             json!({
                 "target_id": target, "action": action, "desktop_action_id": "inspect"
             }),
         )
         .await?;
-        let id = accepted["data"]["operation"]["id"]
-            .as_str()
-            .context("accepted operation")?;
-        assert_eq!(accepted["data"]["operation"]["status"], "accepted");
-        let completed = operation(&mut stream, id, "completed").await?;
+        let completed = operation(&mut stream, &id, "completed").await?;
         assert_eq!(completed["launch_backend"], "uwsm-app");
         assert_eq!(completed["launch_scope"], "app-graphical.slice");
         let args = std::fs::read_to_string(session.state_path("arguments"))?;
@@ -166,16 +153,8 @@ async fn uwsm_handoffs_report_receipts_failures_timeouts_and_owned_cancellation(
         ("fail.desktop", "fixture launch rejected"),
         ("slow.desktop", "timed out"),
     ] {
-        let accepted = call(
-            &proxy,
-            "applications.execute",
-            json!({"target_id": target, "action": "launch"}),
-        )
-        .await?;
-        let id = accepted["data"]["operation"]["id"]
-            .as_str()
-            .context("accepted failure")?;
-        let failed = operation(&mut stream, id, "failed").await?;
+        let id = accept(&proxy, json!({"target_id": target, "action": "launch"})).await?;
+        let failed = operation(&mut stream, &id, "failed").await?;
         assert!(
             failed["message"]
                 .as_str()
@@ -186,39 +165,33 @@ async fn uwsm_handoffs_report_receipts_failures_timeouts_and_owned_cancellation(
     }
     stopped(session.pid("handoff.pid").await?).await?;
     std::fs::remove_file(session.state_path("handoff.pid"))?;
-    let accepted = call(
+    let id = accept(
         &proxy,
-        "applications.execute",
         json!({"target_id":"slow.desktop","action":"launch"}),
     )
     .await?;
-    let id = accepted["data"]["operation"]["id"]
-        .as_str()
-        .context("cancellable operation")?;
     let pid = session.pid("handoff.pid").await?;
     let other = session.other_connection().await?;
     let stranger = zbus::Proxy::new(&other, BUS_NAME, OBJECT_PATH, INTERFACE).await?;
     assert_eq!(
-        cancel(&stranger, id).await?["error"]["code"],
+        cancel(&stranger, &id).await?["error"]["code"],
         "request-not-found"
     );
     assert!(running(pid));
-    assert_eq!(cancel(&proxy, id).await?["data"]["kind"], "operation");
-    operation(&mut stream, id, "cancelled").await?;
+    assert_eq!(cancel(&proxy, &id).await?["data"]["kind"], "operation");
+    operation(&mut stream, &id, "cancelled").await?;
     stopped(pid).await?;
     assert_eq!(
-        cancel(&proxy, id).await?["error"]["code"],
+        cancel(&proxy, &id).await?["error"]["code"],
         "request-not-found"
     );
     // Shutdown must terminate a still-pending handoff, not just explicit cancellations.
     std::fs::remove_file(session.state_path("handoff.pid"))?;
-    let accepted = call(
+    accept(
         &proxy,
-        "applications.execute",
         json!({"target_id":"slow.desktop", "action":"launch"}),
     )
     .await?;
-    assert_eq!(accepted["ok"], true);
     let pending = session.pid("handoff.pid").await?;
     drop(proxy);
     session.shutdown().await?;
@@ -230,33 +203,17 @@ async fn fallback_handoff_reports_failures_and_survives_daemon_shutdown() -> Res
     let mut session = Session::start(false).await?;
     let proxy = session.proxy().await?;
     let mut stream = events(&proxy).await?;
-    let accepted = call(
-        &proxy,
-        "applications.execute",
-        json!({"target_id":"ok.desktop","action":"launch"}),
-    )
-    .await?;
-    let id = accepted["data"]["operation"]["id"]
-        .as_str()
-        .context("direct operation")?;
-    let completed = operation(&mut stream, id, "completed").await?;
+    let id = accept(&proxy, json!({"target_id":"ok.desktop","action":"launch"})).await?;
+    let completed = operation(&mut stream, &id, "completed").await?;
     assert_eq!(completed["launch_backend"], "systemd-run");
     let args = std::fs::read_to_string(session.state_path("arguments"))?;
     assert!(args.lines().any(|arg| arg == "--scope"));
-    let rejected = call(
+    let id = accept(
         &proxy,
-        "applications.execute",
         json!({"target_id":"fail.desktop", "action":"launch"}),
     )
     .await?;
-    let failure = operation(
-        &mut stream,
-        rejected["data"]["operation"]["id"]
-            .as_str()
-            .context("rejected id")?,
-        "failed",
-    )
-    .await?;
+    let failure = operation(&mut stream, &id, "failed").await?;
     assert!(
         failure["message"]
             .as_str()
