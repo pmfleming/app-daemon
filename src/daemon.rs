@@ -348,6 +348,7 @@ pub async fn run() -> Result<()> {
     let (mut result, joined) = tokio::select! {
         _ = terminate.recv() => (Ok(()), false),
         _ = interrupt.recv() => (Ok(()), false),
+        error = shutdown_applications.compositor_failure() => (Err(error), false),
         result = &mut listener => (result.context("join app socket listener").and_then(|r| r), true),
     };
     let _ = stop.send(());

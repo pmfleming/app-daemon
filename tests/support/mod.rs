@@ -251,6 +251,21 @@ impl Session {
         kill_process(pid, Signal::TERM)?;
         let status = timeout(DEADLINE, self.daemon.wait()).await??;
         anyhow::ensure!(status.success(), "daemon shutdown failed: {status}");
+        self.validate_history_after_shutdown().await
+    }
+
+    pub async fn replace_compositor_session(&mut self) -> Result<()> {
+        fs::rename(
+            self.root.path().join("run/hypr/fixture"),
+            self.root.path().join("run/hypr/replacement"),
+        )?;
+        self.compositor.disconnect();
+        let status = timeout(DEADLINE, self.daemon.wait()).await??;
+        anyhow::ensure!(!status.success(), "session loss must exit non-zero");
+        self.validate_history_after_shutdown().await
+    }
+
+    async fn validate_history_after_shutdown(&self) -> Result<()> {
         let path = self.state_path("app-daemon/resource-history-turso-v1.db");
         anyhow::ensure!(path.is_file(), "history database missing after shutdown");
         let database = turso::Builder::new_local(path.to_str().context("history path")?)

@@ -88,6 +88,7 @@ pub struct ApplicationService {
     resume_events: watch::Receiver<u64>,
     stopping: AtomicBool,
     stop: watch::Sender<bool>,
+    compositor_failure: watch::Sender<Option<shelllist_hyprland::IpcError>>,
     background_tasks: StdMutex<Vec<tokio::task::JoinHandle<()>>>,
     shutdown_lock: Mutex<()>,
     request_gate: RwLock<()>,
@@ -186,6 +187,7 @@ impl ApplicationService {
             resume_events,
             stopping: AtomicBool::new(false),
             stop,
+            compositor_failure: watch::channel(None).0,
             background_tasks: StdMutex::new(Vec::new()),
             shutdown_lock: Mutex::new(()),
             request_gate: RwLock::new(()),
@@ -223,6 +225,29 @@ impl ApplicationService {
             "application service is shutting down"
         );
         Ok(permit)
+    }
+
+    pub(crate) fn compositor_failed(&self, error: shelllist_hyprland::IpcError) {
+        self.compositor_failure.send_if_modified(|current| {
+            if current.is_some() {
+                false
+            } else {
+                *current = Some(error);
+                true
+            }
+        });
+    }
+
+    pub(crate) async fn compositor_failure(&self) -> anyhow::Error {
+        let mut errors = self.compositor_failure.subscribe();
+        loop {
+            if let Some(error) = errors.borrow_and_update().clone() {
+                return error.into();
+            }
+            if errors.changed().await.is_err() {
+                return anyhow::anyhow!("compositor failure channel closed");
+            }
+        }
     }
 
     pub async fn shutdown(&self) {

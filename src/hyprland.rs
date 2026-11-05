@@ -80,26 +80,21 @@ pub fn window_id(address: &str) -> String {
     )
 }
 
-pub(crate) fn window_event_relevant(line: &str) -> bool {
-    let Some((event, _)) = line.split_once(">>") else {
-        return false;
-    };
+pub(crate) fn window_event_relevant(event: &shelllist_hyprland::CompositorEvent) -> bool {
+    use shelllist_hyprland::CompositorEvent::*;
     matches!(
         event,
-        "openwindow"
-            | "closewindow"
-            | "movewindow"
-            | "movewindowv2"
-            | "activewindow"
-            | "activewindowv2"
-            | "windowtitle"
-            | "windowtitlev2"
-            | "workspace"
-            | "workspacev2"
-            | "renameworkspace"
-            | "moveworkspace"
-            | "moveworkspacev2"
-            | "configreloaded"
+        WindowOpened
+            | WindowClosed
+            | WindowMoved { .. }
+            | ActiveWindowChanged
+            | WindowTitleChanged
+            | WorkspaceChanged
+            | WorkspaceRenamed
+            | WorkspaceMoved
+            | WorkspaceIdChanged
+            | ConfigReloaded
+            | Malformed { .. }
     )
 }
 
@@ -171,13 +166,11 @@ async fn dispatch_with(client: &shelllist_hyprland::Client, arguments: &[&str]) 
     client
         .request_exact(&arguments.join(" "))
         .await
-        .is_ok_and(|response| response.trim() == "ok")
+        .is_ok_and(|response| shelllist_hyprland::ack(&response).is_ok())
 }
 
 fn valid_address(address: &str) -> bool {
-    address.strip_prefix("0x").is_some_and(|value| {
-        !value.is_empty() && value.chars().all(|character| character.is_ascii_hexdigit())
-    }) && address != "0x0"
+    shelllist_hyprland::WindowAddress::parse(address).is_ok()
 }
 
 #[cfg(test)]

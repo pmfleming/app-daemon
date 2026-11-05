@@ -48,6 +48,7 @@ fn state(now: Instant) -> WatchState {
             connection: Connection::Disconnected,
             available: false,
             refreshed: now,
+            fatal: None,
         },
         catalog: WatchRecovery::new(now),
         catalog_refreshed: now,
@@ -60,19 +61,50 @@ fn connection_transitions_require_both_events_and_snapshot_health() {
     let mut state = state(now);
     assert_eq!(state.catalog_deadline(), now + Duration::from_secs(30));
     let windows = &mut state.windows;
-    assert!(windows.observe(Some(Event::Connected)));
+    assert!(windows.observe(Some(Event::Connected {
+        instance: "fixture".into()
+    })));
     assert_eq!(windows.deadline(), now + Duration::from_secs(5));
     windows.available = true;
     assert_eq!(windows.deadline(), now + Duration::from_secs(30));
-    assert!(!windows.observe(Some(Event::Message("unrelated>>ignored".into()))));
-    assert!(windows.observe(Some(Event::Message("openwindow>>abc".into()))));
+    assert!(!windows.observe(Some(Event::Compositor(
+        shelllist_hyprland::CompositorEvent::parse("unrelated>>ignored")
+    ))));
+    assert!(windows.observe(Some(Event::Compositor(
+        shelllist_hyprland::CompositorEvent::parse("openwindow>>abc,1,app,title")
+    ))));
     assert!(windows.observe(Some(Event::Disconnected(None))));
     assert_eq!(windows.deadline(), now + Duration::from_secs(5));
     assert!(windows.observe(Some(Event::ConnectFailed("unavailable".into()))));
-    assert!(windows.observe(Some(Event::Connected)));
+    assert!(windows.observe(Some(Event::Connected {
+        instance: "fixture".into()
+    })));
     assert!(!windows.observe(None));
     assert_eq!(windows.connection, Connection::Closed);
     assert_eq!(windows.deadline(), now + Duration::from_secs(5));
+}
+
+#[tokio::test]
+async fn loss_refreshes_and_session_loss_reaches_normal_shutdown() {
+    let mut state = state(Instant::now());
+    assert!(state.windows.observe(Some(Event::Lagged)));
+    assert!(state.windows.observe(Some(Event::Compositor(
+        shelllist_hyprland::CompositorEvent::parse("movewindowv2>>broken")
+    ))));
+    assert!(state.windows.observe(Some(Event::SessionGone {
+        configured: "old".into(),
+        live: "new".into()
+    })));
+    assert_eq!(state.windows.connection, Connection::Closed);
+    let service = super::super::ApplicationService::build(false);
+    service.compositor_failed(state.windows.fatal.take().unwrap());
+    // It remains observable even when it arrived before the daemon starts waiting.
+    let error = service.compositor_failure().await;
+    assert!(
+        matches!(error.downcast_ref::<shelllist_hyprland::IpcError>(), Some(shelllist_hyprland::IpcError::SessionGone { configured, live }) if configured=="old" && live=="new")
+    );
+    service.shutdown().await;
+    assert!(service.request_permit().await.is_err());
 }
 
 #[tokio::test]
@@ -94,9 +126,17 @@ async fn selected_batches_finish_before_polling_and_closed_streams_do_not_spin()
         catalog_sender,
         resumes,
     };
-    window_sender.send(Event::Connected).await.unwrap();
+    window_sender
+        .send(Event::Connected {
+            instance: "fixture".into(),
+        })
+        .await
+        .unwrap();
     let signal = sources.next(&state).await;
-    assert!(matches!(&signal, Signal::Window(Some(Event::Connected))));
+    assert!(matches!(
+        &signal,
+        Signal::Window(Some(Event::Connected { .. }))
+    ));
     // These become ready during the selected debounce; neither may cancel it.
     resume_sender.send_replace(1);
     sources

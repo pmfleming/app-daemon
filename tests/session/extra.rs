@@ -207,3 +207,8 @@ async fn compositor_failures_and_reconnects_reconcile_without_host_desktop_acces
     drop(proxy);
     session.shutdown().await
 }
+#[tokio::test]
+async fn compositor_replacement_exits_nonzero_and_drains_history() -> anyhow::Result<()> {
+    let mut session = crate::support::Session::start(true).await?;
+    session.replace_compositor_session().await
+}

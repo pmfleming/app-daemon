@@ -94,6 +94,7 @@ struct WindowState {
     connection: Connection,
     available: bool,
     refreshed: Instant,
+    fatal: Option<shelllist_hyprland::IpcError>,
 }
 
 impl WindowState {
@@ -105,7 +106,7 @@ impl WindowState {
                 tracing::warn!("window event stream ended; continuing reconciliation");
                 false
             }
-            Some(Event::Connected) => {
+            Some(Event::Connected { .. }) => {
                 self.connection = Connection::Connected;
                 true
             }
@@ -121,7 +122,13 @@ impl WindowState {
                 tracing::warn!(%cause, "window event connection failed; continuing reconciliation");
                 true
             }
-            Some(Event::Message(line)) => hyprland::window_event_relevant(&line),
+            Some(Event::Lagged) => true,
+            Some(Event::SessionGone { configured, live }) => {
+                self.connection = Connection::Closed;
+                self.fatal = Some(shelllist_hyprland::IpcError::SessionGone { configured, live });
+                true
+            }
+            Some(Event::Compositor(event)) => hyprland::window_event_relevant(&event),
         }
     }
 
@@ -228,7 +235,8 @@ impl EventSources {
 
 pub(super) async fn track_state(service: std::sync::Weak<ApplicationService>) {
     let (window_sender, windows) = mpsc::channel(64);
-    let events_task = tokio::spawn(shelllist_hyprland::watch_events_detailed(window_sender));
+    let events_task =
+        tokio::spawn(shelllist_hyprland::Client::default().watch_events(window_sender));
     let _events = shelllist_daemon_tokio::AbortOnDrop(events_task.abort_handle());
     let (catalog_sender, catalog) = mpsc::channel(64);
     let Some(initial) = service.upgrade() else {
@@ -246,6 +254,7 @@ pub(super) async fn track_state(service: std::sync::Weak<ApplicationService>) {
             connection: Connection::Disconnected,
             available: false,
             refreshed: Instant::now(),
+            fatal: None,
         },
         catalog_refreshed: Instant::now(),
     };
@@ -260,7 +269,12 @@ pub(super) async fn track_state(service: std::sync::Weak<ApplicationService>) {
     drop(initial);
     while let Some(service) = service.upgrade() {
         let signal = sources.next(&state).await;
-        if let Some(refresh) = state.react(signal, &mut sources).await {
+        let refresh = state.react(signal, &mut sources).await;
+        if let Some(error) = state.windows.fatal.take() {
+            service.compositor_failed(error);
+            return;
+        }
+        if let Some(refresh) = refresh {
             state.windows.available = refresh
                 .apply(
                     &service,
