@@ -38,7 +38,7 @@ pub(super) async fn call(method: &str, params: impl Serialize) -> Result<Value> 
         let connection = zbus::Connection::session().await?;
         let proxy = zbus::Proxy::new(
             &connection,
-            "org.laufan.BarDaemon",
+            "org.laufan.BarCompositorDaemon",
             "/org/laufan/BarDaemon",
             "org.laufan.BarDaemon2",
         )
