@@ -162,7 +162,8 @@ fn query_ranks_window_metadata_before_hydrating_only_selected_rows() {
                 "id":"editor.desktop", "kind":"desktop-application", "name":"Editor",
                 "generic_name":"Document editor", "comment":"Edit café", "icon":"editor-icon",
                 "keywords":["Writer","Note"], "categories":["Development"], "category":"code",
-                "default_workspace_id":"3", "startup_class":"EditWindow", "new_workspace":false
+                "default_workspace_id":"3", "startup_class":"EditWindow", "new_workspace":false,
+                "autostart": catalog.entries[0].autostart
             })
         );
         assert_eq!(

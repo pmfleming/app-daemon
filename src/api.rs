@@ -125,7 +125,8 @@ impl ApiService {
         self.applications
             .update_settings(params)
             .await
-            .map(|settings| Settings {
+            .map(|(settings, autostart)| Settings {
+                autostart,
                 target_id,
                 category: settings.category,
                 workspace_id: settings.workspace_id,

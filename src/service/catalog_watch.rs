@@ -15,7 +15,8 @@ pub(super) enum CatalogEvent {
 }
 
 pub(super) fn create(sender: mpsc::Sender<CatalogEvent>) -> notify::Result<RecommendedWatcher> {
-    let roots = crate::catalog::default_catalog_paths();
+    let mut roots = crate::catalog::default_catalog_paths();
+    roots.extend(crate::autostart::directories());
     let plan = watch_plan(&roots);
     let watcher = RecommendedWatcher::new(
         move |event| {

@@ -209,6 +209,9 @@ pub struct ApplicationIdentity {
     pub default_workspace_id: Option<String>,
     #[serde(default)]
     pub new_workspace: bool,
+    /// Configured XDG login autostart; null when the entry cannot be read.
+    #[serde(default)]
+    pub autostart: Option<bool>,
     pub startup_class: String,
 }
 

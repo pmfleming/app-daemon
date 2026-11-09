@@ -1,4 +1,5 @@
 pub mod api;
+mod autostart;
 #[cfg(feature = "benchmarks")]
 pub mod benchmarks;
 pub mod catalog;

@@ -133,6 +133,7 @@ mod tests {
                 target_id: "editor.desktop".into(),
                 category: Some(Some("text".into())),
                 new_workspace: Some(true),
+                autostart: None,
             })
             .await
             .unwrap();

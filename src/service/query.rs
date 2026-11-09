@@ -285,6 +285,10 @@ impl<'a> Candidate<'a> {
                 .entry
                 .and(self.preferences)
                 .is_some_and(|value| value.new_workspace),
+            autostart: self
+                .entry
+                .filter(|entry| !entry.launch_only)
+                .and_then(|entry| entry.autostart),
             default_workspace_id: self
                 .entry
                 .and(self.preferences)

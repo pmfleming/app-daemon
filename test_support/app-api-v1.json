@@ -300,6 +300,14 @@
                   "format": "double",
                   "type": "number"
                 },
+                "autostart": {
+                  "default": null,
+                  "description": "Configured XDG login autostart; null when the entry cannot be read.",
+                  "type": [
+                    "boolean",
+                    "null"
+                  ]
+                },
                 "battery_percent": {
                   "default": 0.0,
                   "format": "double",
@@ -762,6 +770,7 @@
                 "category",
                 "default_workspace_id",
                 "new_workspace",
+                "autostart",
                 "startup_class",
                 "revision",
                 "running",
@@ -2519,6 +2528,14 @@
                   "format": "double",
                   "type": "number"
                 },
+                "autostart": {
+                  "default": null,
+                  "description": "Configured XDG login autostart; null when the entry cannot be read.",
+                  "type": [
+                    "boolean",
+                    "null"
+                  ]
+                },
                 "battery_percent": {
                   "default": 0.0,
                   "format": "double",
@@ -2981,6 +2998,7 @@
                 "category",
                 "default_workspace_id",
                 "new_workspace",
+                "autostart",
                 "startup_class",
                 "revision",
                 "running",
@@ -4175,6 +4193,12 @@
         "params_schema": {
           "$schema": "https://json-schema.org/draft/2020-12/schema",
           "properties": {
+            "autostart": {
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
             "category": {
               "type": [
                 "string",
@@ -4211,6 +4235,12 @@
         "result_schema": {
           "$schema": "https://json-schema.org/draft/2020-12/schema",
           "properties": {
+            "autostart": {
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
             "category": {
               "type": "string"
             },
@@ -4231,7 +4261,8 @@
             "target_id",
             "category",
             "workspace_id",
-            "new_workspace"
+            "new_workspace",
+            "autostart"
           ],
           "title": "Settings",
           "type": "object"

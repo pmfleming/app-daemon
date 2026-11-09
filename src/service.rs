@@ -418,7 +418,34 @@ impl ApplicationService {
     pub async fn update_settings(
         &self,
         params: UpdateSettingsParams,
-    ) -> anyhow::Result<ApplicationSettings> {
+    ) -> anyhow::Result<(ApplicationSettings, Option<bool>)> {
+        if let Some(enabled) = params.autostart {
+            anyhow::ensure!(
+                params.category.is_none() && params.new_workspace.is_none(),
+                "autostart must be updated separately from workspace preferences"
+            );
+            let update = Arc::clone(&self.settings_updates).lock_owned().await;
+            let catalog = Arc::clone(&*self.catalog.read().await);
+            let entry = catalog
+                .by_id(&params.target_id)
+                .filter(|entry| !entry.launch_only)
+                .ok_or_else(|| anyhow::anyhow!("autostart requires a desktop application"))?;
+            let source = entry.desktop_path().to_owned();
+            let settings = self
+                .settings
+                .read()
+                .await
+                .for_application(&params.target_id)
+                .cloned()
+                .unwrap_or_default();
+            tokio::task::spawn_blocking(move || {
+                let _update = update;
+                crate::autostart::set(&params.target_id, &source, enabled)
+            })
+            .await??;
+            self.refresh_catalog().await;
+            return Ok((settings, Some(enabled)));
+        }
         if params.new_workspace.is_some() {
             anyhow::ensure!(
                 self.catalog
@@ -433,6 +460,12 @@ impl ApplicationService {
             self.catalog.read().await.by_id(&params.target_id).is_some(),
             "application is no longer available"
         );
+        let autostart = self
+            .catalog
+            .read()
+            .await
+            .by_id(&params.target_id)
+            .and_then(|entry| entry.autostart);
         let update = Arc::clone(&self.settings_updates).lock_owned().await;
         let (next, settings) = self.settings.read().await.prepare_patch(
             params.target_id,
@@ -442,7 +475,7 @@ impl ApplicationService {
         self.persist_software_settings(Arc::new(next), update)
             .await?;
         self.publish_state().await;
-        Ok(settings)
+        Ok((settings, autostart))
     }
 
     pub async fn resource_history(
@@ -760,6 +793,8 @@ pub struct UpdateSettingsParams {
     pub category: Option<Option<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub new_workspace: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub autostart: Option<bool>,
 }
 
 fn category_patch<'de, D: serde::Deserializer<'de>>(

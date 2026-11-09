@@ -92,6 +92,6 @@ shelllist_daemon_core::declare_methods! {
         name: "applications.settings.update", params: UpdateSettingsParams, result: Settings, handler: update_settings,
         reply: |settings| Reply::Settings { settings }, response_key: "settings",
         policy: EFFECT, stream: stream::APPLICATIONS,
-        example: UpdateSettingsParams { target_id: "org.example.App.desktop".into(), category: Some(Some("code".into())), new_workspace: None },
+        example: UpdateSettingsParams { target_id: "org.example.App.desktop".into(), category: Some(Some("code".into())), new_workspace: None, autostart: None },
     }
 }

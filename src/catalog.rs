@@ -24,10 +24,14 @@ pub struct CatalogEntry {
     pub startup_class: String,
     pub actions: Vec<DesktopActionSummary>,
     pub launch_only: bool,
+    pub autostart: Option<bool>,
     entry: DesktopEntry,
 }
 
 impl CatalogEntry {
+    pub(crate) fn desktop_path(&self) -> &Path {
+        &self.entry.path
+    }
     pub(crate) fn store_path(&self) -> Option<String> {
         let path = std::fs::canonicalize(&self.entry.path).ok()?;
         let relative = path.strip_prefix("/nix/store").ok()?;
@@ -130,6 +134,7 @@ fn catalog_entry(
         return None;
     }
     Some(CatalogEntry {
+        autostart: crate::autostart::configured(&id),
         id,
         name: name.into_owned(),
         generic_name: entry.generic_name(locales).unwrap_or_default().into_owned(),
@@ -243,6 +248,7 @@ impl Hash for CatalogEntry {
         // complete ordered group data instead, including action Exec and launch
         // metadata not exposed in the presentation model. Path affects %k too.
         entry.entry.path.hash(hasher);
+        entry.autostart.hash(hasher);
         for (name, group) in &entry.entry.groups.0 {
             name.hash(hasher);
             group.0.hash(hasher);

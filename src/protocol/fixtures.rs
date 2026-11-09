@@ -53,6 +53,7 @@ fn page() -> ApplicationPage {
                 category: "shell".into(),
                 default_workspace_id: Some("1".into()),
                 new_workspace: false,
+                autostart: Some(false),
                 startup_class: "Alpha".into(),
             },
             revision: 41,
@@ -114,6 +115,7 @@ pub(super) fn replies() -> Value {
                 category: "code".into(),
                 workspace_id: Some("3".into()),
                 new_workspace: false,
+                autostart: Some(false),
             }),
         ),
         (
