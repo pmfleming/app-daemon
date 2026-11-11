@@ -2,6 +2,58 @@ use super::{Catalog, Observations, Release, SettingsStore, compose, read_worker,
 use anyhow::{Context, Result};
 use serde_json::json;
 
+#[test]
+fn update_ownership_and_release_states_are_domain_facts() -> Result<()> {
+    use super::{ReleaseState as State, UpdateRoute as Route};
+    let (_root, catalog, mut observations) = fixture()?;
+    let snapshot = compose(&catalog, &SettingsStore::default(), &observations);
+    let vendor = &snapshot.entries[0].installations[0];
+    assert_eq!(vendor.update_route, Some(Route::Vendor));
+    assert_eq!(vendor.release_state, Some(State::Newer));
+    observations.applications.packages[0].vendor_tool = None;
+    observations.applications.packages[0].kind = Some("local-helper".into());
+    let snapshot = compose(&catalog, &SettingsStore::default(), &observations);
+    assert_eq!(
+        snapshot.entries[0].installations[0].update_route,
+        Some(Route::Local)
+    );
+    assert_eq!(
+        snapshot.entries[0].installations[0].release_state,
+        Some(State::Local)
+    );
+    let mut release = Release {
+        version: Some("2.0".into()),
+        source: "official".into(),
+        checked_at: Some(10),
+        attempted_at: Some(10),
+        stale: false,
+        error: None,
+    };
+    assert_eq!(
+        super::release_state(Some(&release), Some("2.0"), Route::Nixos),
+        State::Current
+    );
+    assert_eq!(
+        super::release_state(Some(&release), Some("3.0"), Route::Nixos),
+        State::Different
+    );
+    assert_eq!(
+        super::release_state(Some(&release), Some("1.9b"), Route::Nixos),
+        State::Different
+    );
+    release.stale = true;
+    assert_eq!(
+        super::release_state(Some(&release), Some("1.0"), Route::Nixos),
+        State::Cached
+    );
+    release.error = Some("reader unavailable".into());
+    assert_eq!(
+        super::release_state(Some(&release), Some("1.0"), Route::Nixos),
+        State::Failed
+    );
+    Ok(())
+}
+
 fn fixture() -> Result<(tempfile::TempDir, Catalog, Observations)> {
     let root = tempfile::tempdir()?;
     for (id, name, category) in [

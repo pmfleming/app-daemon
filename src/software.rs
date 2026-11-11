@@ -39,6 +39,78 @@ pub struct Installation {
     pub active_version: Option<String>,
     pub version_origin: String,
     pub release: Option<Release>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub update_route: Option<UpdateRoute>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub release_state: Option<ReleaseState>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub channel: Option<String>,
+}
+#[derive(
+    Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema,
+)]
+#[serde(rename_all = "kebab-case")]
+pub enum UpdateRoute {
+    Nixos,
+    Vendor,
+    SelfUpdater,
+    Local,
+    #[default]
+    Unknown,
+}
+#[derive(
+    Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema,
+)]
+#[serde(rename_all = "kebab-case")]
+pub enum ReleaseState {
+    Current,
+    Newer,
+    Different,
+    Cached,
+    Failed,
+    NotChecked,
+    Local,
+    #[default]
+    Unsupported,
+}
+fn release_state(
+    release: Option<&Release>,
+    version: Option<&str>,
+    route: UpdateRoute,
+) -> ReleaseState {
+    if route == UpdateRoute::Local {
+        return ReleaseState::Local;
+    }
+    let Some(release) = release else {
+        return ReleaseState::Unsupported;
+    };
+    if release.error.is_some() {
+        return ReleaseState::Failed;
+    }
+    let Some(latest) = release.version.as_deref() else {
+        return ReleaseState::NotChecked;
+    };
+    if release.stale {
+        return ReleaseState::Cached;
+    }
+    if version == Some(latest) {
+        return ReleaseState::Current;
+    }
+    let numeric = |v: &str| {
+        v.split('.')
+            .map(str::parse::<u64>)
+            .collect::<Result<Vec<_>, _>>()
+            .ok()
+    };
+    if version
+        .and_then(numeric)
+        .zip(numeric(latest))
+        .is_some_and(|(local, remote)| remote > local)
+    {
+        ReleaseState::Newer
+    } else {
+        ReleaseState::Different
+    }
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct Record {
@@ -70,6 +142,10 @@ pub(crate) struct Package {
     pub desktop_ids: Vec<String>,
     pub kind: Option<String>,
     pub vendor_tool: Option<String>,
+    #[serde(default)]
+    pub update_route: UpdateRoute,
+    #[serde(default)]
+    pub channel: Option<String>,
 }
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub(crate) struct Inventory {
@@ -193,6 +269,22 @@ impl Package {
                 release.stale |= observations.stale;
                 release
             });
+        let update_route = if self.vendor_tool.is_some() {
+            UpdateRoute::Vendor
+        } else if self.kind.as_deref() == Some("local-helper") {
+            UpdateRoute::Local
+        } else if self.update_route != UpdateRoute::Unknown {
+            self.update_route
+        } else if self.store_path.is_some() {
+            UpdateRoute::Nixos
+        } else {
+            UpdateRoute::Unknown
+        };
+        let release_state = release_state(
+            release.as_ref(),
+            active.as_deref().or(self.version.as_deref()),
+            update_route,
+        );
         Installation {
             stale: observations.stale,
             scope: self.scope.clone(),
@@ -207,6 +299,9 @@ impl Package {
             .into(),
             active_version: active,
             release,
+            update_route: Some(update_route),
+            release_state: Some(release_state),
+            channel: self.channel.clone(),
         }
     }
 }

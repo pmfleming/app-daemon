@@ -63,6 +63,12 @@
                     "null"
                   ]
                 },
+                "channel": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
                 "declared_version": {
                   "type": [
                     "string",
@@ -82,6 +88,16 @@
                     }
                   ]
                 },
+                "release_state": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/$defs/ReleaseState"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
                 "scope": {
                   "type": "string"
                 },
@@ -92,6 +108,16 @@
                   "type": [
                     "string",
                     "null"
+                  ]
+                },
+                "update_route": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/$defs/UpdateRoute"
+                    },
+                    {
+                      "type": "null"
+                    }
                   ]
                 },
                 "version_origin": {
@@ -190,6 +216,29 @@
                 "error"
               ],
               "type": "object"
+            },
+            "ReleaseState": {
+              "enum": [
+                "current",
+                "newer",
+                "different",
+                "cached",
+                "failed",
+                "not-checked",
+                "local",
+                "unsupported"
+              ],
+              "type": "string"
+            },
+            "UpdateRoute": {
+              "enum": [
+                "nixos",
+                "vendor",
+                "self-updater",
+                "local",
+                "unknown"
+              ],
+              "type": "string"
             }
           },
           "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -864,6 +913,12 @@
                     "null"
                   ]
                 },
+                "channel": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
                 "declared_version": {
                   "type": [
                     "string",
@@ -883,6 +938,16 @@
                     }
                   ]
                 },
+                "release_state": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/$defs/ReleaseState"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
                 "scope": {
                   "type": "string"
                 },
@@ -893,6 +958,16 @@
                   "type": [
                     "string",
                     "null"
+                  ]
+                },
+                "update_route": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/$defs/UpdateRoute"
+                    },
+                    {
+                      "type": "null"
+                    }
                   ]
                 },
                 "version_origin": {
@@ -992,6 +1067,19 @@
               ],
               "type": "object"
             },
+            "ReleaseState": {
+              "enum": [
+                "current",
+                "newer",
+                "different",
+                "cached",
+                "failed",
+                "not-checked",
+                "local",
+                "unsupported"
+              ],
+              "type": "string"
+            },
             "ResourceMeasurement": {
               "properties": {
                 "attribution_method": {
@@ -1061,6 +1149,16 @@
                 "resources_shared"
               ],
               "type": "object"
+            },
+            "UpdateRoute": {
+              "enum": [
+                "nixos",
+                "vendor",
+                "self-updater",
+                "local",
+                "unknown"
+              ],
+              "type": "string"
             },
             "WindowSummary": {
               "description": "CPU, memory, and GPU observations for the current interval.",
@@ -3092,6 +3190,12 @@
                     "null"
                   ]
                 },
+                "channel": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
                 "declared_version": {
                   "type": [
                     "string",
@@ -3111,6 +3215,16 @@
                     }
                   ]
                 },
+                "release_state": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/$defs/ReleaseState"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
                 "scope": {
                   "type": "string"
                 },
@@ -3121,6 +3235,16 @@
                   "type": [
                     "string",
                     "null"
+                  ]
+                },
+                "update_route": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/$defs/UpdateRoute"
+                    },
+                    {
+                      "type": "null"
+                    }
                   ]
                 },
                 "version_origin": {
@@ -3220,6 +3344,19 @@
               ],
               "type": "object"
             },
+            "ReleaseState": {
+              "enum": [
+                "current",
+                "newer",
+                "different",
+                "cached",
+                "failed",
+                "not-checked",
+                "local",
+                "unsupported"
+              ],
+              "type": "string"
+            },
             "ResourceMeasurement": {
               "properties": {
                 "attribution_method": {
@@ -3289,6 +3426,16 @@
                 "resources_shared"
               ],
               "type": "object"
+            },
+            "UpdateRoute": {
+              "enum": [
+                "nixos",
+                "vendor",
+                "self-updater",
+                "local",
+                "unknown"
+              ],
+              "type": "string"
             },
             "WindowSummary": {
               "description": "CPU, memory, and GPU observations for the current interval.",
