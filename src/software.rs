@@ -97,19 +97,24 @@ fn release_state(
         return ReleaseState::Current;
     }
     let numeric = |v: &str| {
-        v.split('.')
+        let mut parts = v
+            .split('.')
             .map(str::parse::<u64>)
             .collect::<Result<Vec<_>, _>>()
-            .ok()
+            .ok()?;
+        while parts.last() == Some(&0) {
+            parts.pop();
+        }
+        Some(parts)
     };
-    if version
+    match version
         .and_then(numeric)
         .zip(numeric(latest))
-        .is_some_and(|(local, remote)| remote > local)
+        .map(|(local, remote)| remote.cmp(&local))
     {
-        ReleaseState::Newer
-    } else {
-        ReleaseState::Different
+        Some(std::cmp::Ordering::Equal) => ReleaseState::Current,
+        Some(std::cmp::Ordering::Greater) => ReleaseState::Newer,
+        _ => ReleaseState::Different,
     }
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]

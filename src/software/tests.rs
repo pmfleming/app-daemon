@@ -33,6 +33,26 @@ fn update_ownership_and_release_states_are_domain_facts() -> Result<()> {
         super::release_state(Some(&release), Some("2.0"), Route::Nixos),
         State::Current
     );
+    for local in ["2", "2.0.0", "2.0.0.0"] {
+        assert_eq!(
+            super::release_state(Some(&release), Some(local), Route::Nixos),
+            State::Current
+        );
+    }
+    release.version = Some("1.2.0".into());
+    assert_eq!(
+        super::release_state(Some(&release), Some("1.2"), Route::Nixos),
+        State::Current
+    );
+    assert_eq!(
+        super::release_state(Some(&release), Some("1.1.99"), Route::Nixos),
+        State::Newer
+    );
+    assert_eq!(
+        super::release_state(Some(&release), Some("1.2.0-beta"), Route::Nixos),
+        State::Different
+    );
+    release.version = Some("2.0".into());
     assert_eq!(
         super::release_state(Some(&release), Some("3.0"), Route::Nixos),
         State::Different
